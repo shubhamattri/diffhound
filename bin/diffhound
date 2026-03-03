@@ -1,0 +1,13 @@
+#!/bin/bash
+# diffhound — AI-powered PR code review
+# https://github.com/shubhamattri/diffhound
+#
+# Usage: diffhound <PR_NUMBER> [--auto-post] [--fast]
+
+set -euo pipefail
+
+# Resolve installation directory
+DIFFHOUND_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export DIFFHOUND_ROOT
+
+exec bash "${DIFFHOUND_ROOT}/lib/review.sh" "$@"

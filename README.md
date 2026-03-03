@@ -7,7 +7,7 @@ Multi-model pipeline: Claude (agentic, reads your codebase) → Codex + Gemini (
 ## What it does
 
 ```
-$ review-pr 7030 --fast
+$ diffhound 7030 --fast
 
 🔍 PR #7030
 ──────────────────────────────────────────
@@ -31,6 +31,19 @@ $ review-pr 7030 --fast
 - **Inline comments** — Posts directly to GitHub with line-accurate placement (auto-snaps to valid diff lines)
 - **Zero lint nits** — Trailing newlines, blank lines, import order? Banned. Only real bugs and design issues
 
+## Quick Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/shubhamattri/diffhound/main/install.sh | bash
+```
+
+Or manually:
+
+```bash
+git clone https://github.com/shubhamattri/diffhound.git ~/.diffhound
+ln -s ~/.diffhound/bin/diffhound ~/.local/bin/diffhound
+```
+
 ## Prerequisites
 
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) (`claude`) — with Max subscription or API key
@@ -51,43 +64,29 @@ brew install coreutils gawk jq gh
 sudo apt-get install jq gh
 ```
 
-## Setup
-
-```bash
-git clone https://github.com/shubhamattri/diffhound.git
-cd diffhound
-
-# Make executable
-chmod +x review-pr.sh
-
-# Set your defaults (add to ~/.zshrc or ~/.bashrc)
-export REVIEW_REPO_PATH="$HOME/path/to/your/repo"
-export REVIEW_LOGIN="your-github-username"
-```
-
-Or symlink for quick access:
-
-```bash
-ln -s "$(pwd)/review-pr.sh" /usr/local/bin/review-pr
-```
-
 ## Usage
 
 ```bash
 # Fast review (Claude only — no peer review)
-review-pr 1234 --fast
+diffhound 1234 --fast
 
 # Full review (Claude + Codex + Gemini peer review)
-review-pr 1234
+diffhound 1234
 
 # Auto-post without confirmation prompt
-review-pr 1234 --auto-post
+diffhound 1234 --auto-post
 
 # Fast + auto-post
-review-pr 1234 --fast --auto-post
+diffhound 1234 --fast --auto-post
 ```
 
 ## Configuration
+
+```bash
+# Add to ~/.zshrc or ~/.bashrc
+export REVIEW_REPO_PATH="$HOME/path/to/your/repo"
+export REVIEW_LOGIN="your-github-username"
+```
 
 | Env Var | Default | Description |
 |---------|---------|-------------|
@@ -126,28 +125,54 @@ The review checks for real issues across 5 categories:
 - **Security** — STRIDE, secrets in code, SQL injection, PII in logs
 - **Performance** — N+1 queries, missing pagination, no timeouts
 - **Reliability** — Race conditions, swallowed errors, missing transactions
-- **Domain-specific** — Copy-paste bugs in TPA integrations, enum completeness, timezone mismatches
+- **Domain-specific** — Copy-paste bugs, enum completeness, timezone mismatches
 
 ### What it won't flag
 
 Lint nits are banned. Trailing newlines, extra blank lines, whitespace, import ordering — these are linter concerns, not review concerns.
 
+## Project Structure
+
+```
+diffhound/
+├── bin/
+│   └── diffhound              # CLI entry point
+├── lib/
+│   ├── review.sh              # Main review pipeline
+│   ├── spinner.sh             # Terminal spinner utilities
+│   ├── platform.sh            # OS detection + dependency checks
+│   ├── parser.sh              # LLM output parsing + line-snapping
+│   └── github.sh              # GitHub API posting + fallback logic
+├── config/
+│   └── diffhound.example.yml  # Example configuration
+├── docs/
+│   ├── ARCHITECTURE.md        # Pipeline deep-dive
+│   └── CUSTOMIZATION.md       # Voice, principles, config
+├── review-pr.sh               # Standalone single-file version (backup)
+├── install.sh                 # One-command installer
+├── CHANGELOG.md
+├── LICENSE                    # MIT
+└── README.md
+```
+
 ## Voice customization
 
-The script uses a JSONL file of real review comments to match your voice. Format:
+diffhound rewrites review comments to match your writing style. Provide examples via a JSONL file:
 
 ```jsonl
 {"category":"security","subcategory":"token-leak","file_type":"ts","comment":"🔴 this is the user's full login token right? passing it to an external embed means..."}
 {"category":"data-bug","subcategory":"wrong-column","file_type":"ts","comment":"🔴 benefits.end_date is NULL for every benefit in prod..."}
 ```
 
-Set the path in the script (`VOICE_JSONL` variable) or it falls back to built-in examples.
+See [docs/CUSTOMIZATION.md](docs/CUSTOMIZATION.md) for full details.
 
 ## Cost
 
-- **Pass 1 (Claude agentic):** Free with Claude Max subscription. Or API cost if using `ANTHROPIC_API_KEY`
-- **Pass 2 (Codex + Gemini):** API costs for OpenAI + Google. Skipped with `--fast`
-- **Pass 3+4 (Haiku rewrite):** Free with Max subscription (or ~$0.01 per review via API)
+| Pass | What | Cost |
+|------|------|------|
+| Pass 1 | Claude agentic review | Free (Max subscription) or API |
+| Pass 2 | Codex + Gemini peer review | API costs. Skipped with `--fast` |
+| Pass 3+4 | Haiku voice rewrite | Free (Max) or ~$0.01/review |
 
 With `--fast` and Claude Max: **$0 per review.**
 

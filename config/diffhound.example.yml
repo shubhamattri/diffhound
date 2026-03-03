@@ -1,0 +1,15 @@
+# diffhound configuration
+# Copy to ~/.config/diffhound/config.yml and customize
+
+# Your local git repo path
+repo_path: ~/Dev/your-org/your-repo
+
+# Your GitHub username (for re-review detection)
+reviewer_login: your-github-username
+
+# Voice examples JSONL file (for comment style matching)
+# voice_jsonl: ~/.diffhound/voice-examples.jsonl
+
+# Review mode defaults
+# fast_mode: false      # Skip Codex+Gemini peer review
+# auto_post: false      # Post without confirmation prompt
