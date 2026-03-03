@@ -1,0 +1,21 @@
+# Temp files from review runs
+pr-*-diff.*
+pr-*-prompt.*
+pr-*-claude.*
+pr-*-codex.*
+pr-*-gemini.*
+pr-*-*.XXXXXX
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment
+.env
+.env.local
