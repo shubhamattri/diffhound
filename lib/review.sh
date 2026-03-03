@@ -27,8 +27,15 @@ AUTO_POST=false
 FAST_MODE=false
 
 # ── Configurable defaults (override via env vars) ────────────
-REPO_PATH="${REVIEW_REPO_PATH:-${HOME}/Dev/nova_benefits/repos/monorepo}"
-REVIEWER_LOGIN="${REVIEW_LOGIN:-shubhamattri-nova}"
+REPO_PATH="${REVIEW_REPO_PATH:-}"
+REVIEWER_LOGIN="${REVIEW_LOGIN:-}"
+
+if [ -z "$REPO_PATH" ] || [ -z "$REVIEWER_LOGIN" ]; then
+  echo "Error: REVIEW_REPO_PATH and REVIEW_LOGIN must be set." >&2
+  echo "  export REVIEW_REPO_PATH=\"\$HOME/path/to/your/repo\"" >&2
+  echo "  export REVIEW_LOGIN=\"your-github-username\"" >&2
+  exit 1
+fi
 
 if [ -z "$PR_NUMBER" ]; then
   echo "Usage: $0 <PR_NUMBER> [--auto-post] [--fast]"
@@ -229,7 +236,8 @@ fi
 spinner_start "Retrieving codebase context (RAG)..."
 RAG_CONTEXT_FILE=$(mktemp -t "pr-${PR_NUMBER}-rag.XXXXXX")
 
-if timeout 30 bash /Users/shubham/scripts/review-rag.sh \
+REVIEW_RAG_SCRIPT="${REVIEW_RAG_SCRIPT:-}"
+if [ -n "$REVIEW_RAG_SCRIPT" ] && timeout 30 bash "$REVIEW_RAG_SCRIPT" \
     "$DIFF_FILE" "$REPO_PATH" "$PR_NUMBER" "$REVIEWER_LOGIN" \
     > "$RAG_CONTEXT_FILE" 2>/dev/null; then
   RAG_SIZE=$(wc -c < "$RAG_CONTEXT_FILE" | tr -d ' ')
@@ -243,7 +251,7 @@ fi
 # STEP 2: BUILD THE FULL REVIEW PROMPT
 # ============================================================
 cat > "$PROMPT_FILE" << 'PROMPT_EOF'
-You are performing a Nova SDE-4 Code Review. Your job here is ENGINEERING ONLY — find bugs, risks, and issues with precision. Do NOT worry about tone, style, or how you phrase things. Just be accurate. A separate pass will handle the writing style.
+You are performing a senior-level code review. Your job here is ENGINEERING ONLY — find bugs, risks, and issues with precision. Do NOT worry about tone, style, or how you phrase things. Just be accurate. A separate pass will handle the writing style.
 
 IMPORTANT: You have access to the full codebase via Read and Bash tools. Use them.
 - When you see a changed function — read the full file to understand context before flagging anything
@@ -349,7 +357,7 @@ Apply each as a lens. For each principle, perform the concrete check listed.
     - "verify this could happen"
     - "confirm X matches Y"
     - "check if this is always set"
-    - "make sure this exists in the BSP dashboard"
+    - "make sure this exists in the admin dashboard"
     - "double check the behavior is identical"
     If you can read the diff and determine the answer: state it as fact.
     If you genuinely cannot determine it from the diff alone (e.g. requires a live DB query or external system state): say "needs staging verification — [exact command to run]" and classify it as a test checklist item, NOT an inline comment.
@@ -401,7 +409,7 @@ Apply each as a lens. For each principle, perform the concrete check listed.
 24. **URL construction edge cases**:
     For any code that appends to a URL string:
     a) Double-fragment: if the base URL already contains `#`, appending `#key=val` creates two `#` symbols — the browser parses only the first and ignores the rest. Fix: detect existing fragment and append with `&` instead.
-    b) Param collision: if using `append()` to add a param, and the source already contains a param with the same key (e.g. `token`), the consumer may pick the wrong one. Use `set()` or a namespaced key (e.g. `novaAuthToken`).
+    b) Param collision: if using `append()` to add a param, and the source already contains a param with the same key (e.g. `token`), the consumer may pick the wrong one. Use `set()` or a namespaced key (e.g. `appAuthToken`).
     Either of these causing auth token misdirection = BLOCKING.
 
 25. **Retract nits before posting — no noise comments**:
@@ -669,7 +677,7 @@ if [ "$FAST_MODE" != "true" ]; then
 I need a peer review of this engineering analysis. Do NOT run any tools or execute code. Text response only.
 
 ## Context
-TypeScript/Vue.js monorepo PR (Nova Benefits platform). A primary reviewer produced FINDING blocks below. You also have the full diff to spot anything missed.
+Code review PR. A primary reviewer produced FINDING blocks below. You also have the full diff to spot anything missed.
 
 ## Primary Analysis (FINDING blocks)
 $(cat "$CLAUDE_OUT")
@@ -687,7 +695,7 @@ Respond in the same FINDING block format. Plain text. No style concerns.
 PEER_EOF
 
   # Run Codex in background (prompt via stdin to avoid ARG_MAX on large diffs)
-  (cd /Users/shubham/Work/repos 2>/dev/null || cd /tmp; \
+  (cd "$REPO_PATH" 2>/dev/null || cd /tmp; \
     codex exec --skip-git-repo-check -s read-only < "$PEER_PROMPT_FILE" > "$CODEX_OUT" 2>&1 || \
     echo "CODEX_UNAVAILABLE" > "$CODEX_OUT") &
   CODEX_PID=$!
@@ -713,7 +721,7 @@ cp "$CLAUDE_OUT" "$SYNTH_FINDINGS"
 # ============================================================
 # STEP 5: VOICE RAG — retrieve matching examples by category
 # ============================================================
-VOICE_JSONL="$HOME/.ai_rules/review-voice-examples.jsonl"
+VOICE_JSONL="$HOME/.diffhound/voice-examples.jsonl"
 VOICE_EXAMPLES_FILE=$(mktemp -t "pr-${PR_NUMBER}-voice.XXXXXX")
 
 if [ -f "$VOICE_JSONL" ] && [ -s "$SYNTH_FINDINGS" ]; then
@@ -765,24 +773,24 @@ if [ -f "$VOICE_JSONL" ] && [ -s "$SYNTH_FINDINGS" ]; then
     cat >> "$VOICE_EXAMPLES_FILE" << 'FALLBACK_EXAMPLES'
 ---
 EXAMPLE — security blocker:
-"🔴 this is the user's full login token right? same one used in `markTokenAsUsed` at line 206. passing it to an external retool embed means that app gets full user-level access to our API, not just nominee endpoints.
+"🔴 this is the user's full session token right? same one used in `validateToken` at line 206. passing it to an external embed means that app gets full user-level access to our API, not just the scoped endpoints.
 
 couple of options:
-1. generate a short-lived scoped token on backend specifically for nominee operations (best option, most work)
-2. at minimum, validate that `embedAppLink` is a known/whitelisted retool URL before appending the token
+1. generate a short-lived scoped token on backend specifically for embed operations (best option, most work)
+2. at minimum, validate that `embedUrl` is a known/whitelisted URL before appending the token
 3. if neither is feasible rn, add a comment explaining the trust assumption and create a follow-up ticket for scoped tokens
 
 lmk what u think, happy to discuss"
 
 ---
 EXAMPLE — data bug (blocking):
-"🔴 `benefits.end_date` is NULL for every benefit in prod. policy expiry lives in `benefits.meta->>'endDate'` (JSONB) — that's what `types/user.ts:559` and the portal's `isPolicyActive()` both use. filter as written will silently exclude every claim after deploy.
+"🔴 `records.end_date` is NULL for every record in prod. expiry lives in `records.meta->>'endDate'` (JSONB) — that's what `types/record.ts:559` and the portal's `isActive()` both use. filter as written will silently exclude every item after deploy.
 
-also — the whatsapp test mock doesn't have `innerJoin` in `mockQueryChain`, so existing tests pass but none validate that expired policies are actually excluded."
+also — the test mock doesn't have `innerJoin` in `mockQueryChain`, so existing tests pass but none validate that expired records are actually excluded."
 
 ---
 EXAMPLE — consistency nit:
-"`employee` object also has `firstName` and `lastName` (line 197 uses `displayName`). for consistency, might want to apply the same pattern there too"
+"`user` object also has `firstName` and `lastName` (line 197 uses `displayName`). for consistency, might want to apply the same pattern there too"
 
 FALLBACK_EXAMPLES
   fi
@@ -798,26 +806,26 @@ These are actual comments this engineer has written. Match this voice exactly.
 
 ---
 EXAMPLE A — security blocker (large blast radius):
-"🔴 this is the user's full login token right? same one used in `markTokenAsUsed` at line 206. passing it to an external retool embed means that app gets full user-level access to our API, not just nominee endpoints.
+"🔴 this is the user's full session token right? same one used in `validateToken` at line 206. passing it to an external embed means that app gets full user-level access to our API, not just the scoped endpoints.
 
 couple of options:
-1. generate a short-lived scoped token on backend specifically for nominee operations (best option, most work)
-2. at minimum, validate that `embedAppLink` is a known/whitelisted retool URL before appending the token — so a random URL in org meta can't harvest tokens
+1. generate a short-lived scoped token on backend specifically for embed operations (best option, most work)
+2. at minimum, validate that `embedUrl` is a known/whitelisted URL before appending the token — so a random URL in config can't harvest tokens
 3. if neither is feasible rn, add a comment explaining the trust assumption and create a follow-up ticket for scoped tokens
 
 lmk what u think, happy to discuss"
 
 ---
 EXAMPLE B — subtle bug (URL construction):
-"if `customOnboardingUrl` already contains a hash fragment (like `https://retool.app/myapp#sidebar=true`), this would produce a URL with two `#` symbols. browser parses only the first one, so the token appended after the second `#` gets silently ignored — retool app won't be able to read it."
+"if `customUrl` already contains a hash fragment (like `https://app.example.com/page#sidebar=true`), this would produce a URL with two `#` symbols. browser parses only the first one, so the token appended after the second `#` gets silently ignored — the app won't be able to read it."
 
 ---
 EXAMPLE C — consistency (sibling field):
-"`employee` object also has `firstName` and `lastName` (line 197 uses `displayName`). for consistency, might want to apply the same pattern there too"
+"`user` object also has `firstName` and `lastName` (line 197 uses `displayName`). for consistency, might want to apply the same pattern there too"
 
 ---
 EXAMPLE D — data bug (blocking):
-"🔴 `benefits.end_date` is NULL for every benefit in prod. policy expiry lives in `benefits.meta->>'endDate'` (JSONB) — that's what `types/user.ts:559` and the portal's `isPolicyActive()` both use. filter as written will silently exclude every claim after deploy."
+"🔴 `records.end_date` is NULL for every record in prod. expiry lives in `records.meta->>'endDate'` (JSONB) — that's what `types/record.ts:559` and the portal's `isActive()` both use. filter as written will silently exclude every item after deploy."
 
 ---
 EXAMPLE E — should-fix, missing test:
@@ -1179,7 +1187,7 @@ JSONEND
   echo "  → https://github.com/${REPO_OWNER}/${REPO_NAME}/pull/${PR_NUMBER}"
 
   # Voice indexer — continuous learning from posted comments
-  VOICE_JSONL_INDEX="$HOME/.ai_rules/review-voice-examples.jsonl"
+  VOICE_JSONL_INDEX="$HOME/.diffhound/voice-examples.jsonl"
   INDEXED=$(index_voice_comments "${REVIEW_STRUCTURED}.new_comments" "$PR_NUMBER" "$VOICE_JSONL_INDEX")
   [ "$INDEXED" -gt 0 ] && echo "  📝 Indexed $INDEXED comments to voice RAG ($(wc -l < "$VOICE_JSONL_INDEX") total)"
 

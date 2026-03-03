@@ -90,8 +90,8 @@ export REVIEW_LOGIN="your-github-username"
 
 | Env Var | Default | Description |
 |---------|---------|-------------|
-| `REVIEW_REPO_PATH` | `~/Dev/nova_benefits/repos/monorepo` | Path to your local git repo |
-| `REVIEW_LOGIN` | `shubhamattri-nova` | Your GitHub username (for re-review detection) |
+| `REVIEW_REPO_PATH` | _(required)_ | Path to your local git repo |
+| `REVIEW_LOGIN` | _(required)_ | Your GitHub username (for re-review detection) |
 | `ANTHROPIC_API_KEY` | _(optional)_ | If set, used for Haiku style pass. If unset, uses Claude Max subscription |
 
 ## How it works
