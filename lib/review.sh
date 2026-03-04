@@ -42,10 +42,13 @@ if [ -z "$PR_NUMBER" ]; then
   exit 1
 fi
 
+LEARN_MODE=false
+
 for _arg in "${@:2}"; do
   case "$_arg" in
     --auto-post) AUTO_POST=true ;;
     --fast)      FAST_MODE=true ;;
+    --learn)     LEARN_MODE=true ;;
   esac
 done
 
@@ -54,11 +57,152 @@ if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 
+cd "$REPO_PATH" || { echo "Error: Cannot cd to $REPO_PATH" >&2; exit 1; }
+
+# ── Review cache directory (persistent across runs) ─────────
+REVIEW_CACHE_DIR="$HOME/.diffhound/cache"
+mkdir -p "$REVIEW_CACHE_DIR"
+
+# ── --learn: Feedback loop — learn from edited/deleted GitHub comments ──────
+_learn_from_pr() {
+  local pr="$1"
+  local cache_file="$REVIEW_CACHE_DIR/pr-${pr}-posted.json"
+  local voice_jsonl="$HOME/.diffhound/voice-examples.jsonl"
+
+  if [ ! -f "$cache_file" ]; then
+    echo "No posted-comment cache for PR #${pr}." >&2
+    echo "Run the review first (without --learn) to generate a cache." >&2
+    return 1
+  fi
+
+  echo "📚 Learning from PR #${pr} feedback..."
+
+  local repo_owner repo_name
+  repo_owner=$(gh repo view --json owner --jq '.owner.login')
+  repo_name=$(gh repo view --json name --jq '.name')
+
+  # Fetch current reviewer comments on this PR from GitHub
+  local current_comments
+  current_comments=$(gh api \
+    "/repos/${repo_owner}/${repo_name}/pulls/${pr}/comments" \
+    --jq "[.[] | select(.user.login == \"${REVIEWER_LOGIN}\") | {id,path,line,body,updated_at}]" \
+    2>/dev/null || echo "[]")
+
+  local posted_lines
+  posted_lines=$(jq -r '.comments[]' "$cache_file" 2>/dev/null || true)
+
+  local learned=0 removed=0 updated=0
+
+  while IFS= read -r original_line; do
+    [ -z "$original_line" ] && continue
+
+    local orig_body orig_path
+    orig_body=$(printf '%s' "$original_line" | sed -E 's/^[^:]+:[~]?[0-9]+:(BLOCKING|SHOULD-FIX|NIT)[[:space:]][—–-][[:space:]]*//')
+    orig_path=$(printf '%s' "$original_line" | cut -d: -f1)
+    local orig_prefix="${orig_body:0:60}"
+
+    local gh_body
+    gh_body=$(printf '%s' "$current_comments" | jq -r \
+      --arg path "$orig_path" --arg prefix "$orig_prefix" \
+      '[.[] | select(.path == $path and (.body | startswith($prefix)))] | first | .body // empty' \
+      2>/dev/null || true)
+
+    if [ -z "$gh_body" ]; then
+      # Comment deleted — remove from JSONL
+      if [ -f "$voice_jsonl" ]; then
+        local _tmp
+        _tmp=$(mktemp -t "voice-trim.XXXXXX")
+        jq -c --arg prefix "$orig_prefix" \
+          'select((.comment | startswith($prefix)) | not)' \
+          "$voice_jsonl" > "$_tmp" 2>/dev/null && mv "$_tmp" "$voice_jsonl" || rm -f "$_tmp"
+      fi
+      removed=$((removed + 1))
+    elif [ "$gh_body" != "$orig_body" ]; then
+      # Comment edited — update JSONL with human-corrected version
+      if [ -f "$voice_jsonl" ]; then
+        local _tmp
+        _tmp=$(mktemp -t "voice-update.XXXXXX")
+        jq -c --arg old "$orig_prefix" --arg new "$gh_body" \
+          'if (.comment | startswith($old)) then .comment = $new | .human_verified = true else . end' \
+          "$voice_jsonl" > "$_tmp" 2>/dev/null && mv "$_tmp" "$voice_jsonl" || rm -f "$_tmp"
+      fi
+      updated=$((updated + 1))
+    else
+      learned=$((learned + 1))
+    fi
+  done <<< "$posted_lines"
+
+  # ── Reply-based learning: detect dev replies that dismiss/reject a comment ──
+  local replied=0
+  # Fetch ALL comments on this PR (includes threads)
+  local all_comments
+  all_comments=$(gh api \
+    "/repos/${repo_owner}/${repo_name}/pulls/${pr}/comments" \
+    --paginate \
+    --jq "[.[] | {id, user: .user.login, body, in_reply_to_id, path, line}]" \
+    2>/dev/null || echo "[]")
+
+  # Find reviewer comments that received replies
+  local reviewer_comment_ids
+  reviewer_comment_ids=$(printf '%s' "$all_comments" | jq -r \
+    --arg login "$REVIEWER_LOGIN" \
+    '[.[] | select(.user == $login and .in_reply_to_id == null) | .id] | .[]')
+
+  while IFS= read -r cid; do
+    [ -z "$cid" ] && continue
+
+    # Get replies to this reviewer comment (from non-reviewer users)
+    local replies
+    replies=$(printf '%s' "$all_comments" | jq -r \
+      --argjson parent "$cid" --arg login "$REVIEWER_LOGIN" \
+      '[.[] | select(.in_reply_to_id == $parent and .user != $login)] | .[].body')
+
+    [ -z "$replies" ] && continue
+
+    # Get the original reviewer comment body
+    local orig_comment
+    orig_comment=$(printf '%s' "$all_comments" | jq -r \
+      --argjson cid "$cid" \
+      '.[] | select(.id == $cid) | .body')
+
+    # Record the feedback pair: reviewer comment + dev reply
+    local feedback_file="$REVIEW_CACHE_DIR/pr-${pr}-feedback.jsonl"
+    while IFS= read -r reply_body; do
+      [ -z "$reply_body" ] && continue
+      printf '%s\n' "$(jq -nc \
+        --arg review "$orig_comment" \
+        --arg reply "$reply_body" \
+        --argjson pr "$pr" \
+        --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '{pr: $pr, reviewer_comment: $review, dev_reply: $reply, timestamp: $ts}')" \
+        >> "$feedback_file"
+      replied=$((replied + 1))
+    done <<< "$replies"
+  done <<< "$reviewer_comment_ids"
+
+  # Auto-purge cache files older than 30 days
+  find "$REVIEW_CACHE_DIR" -name "pr-*-posted.json" -mtime +30 -delete 2>/dev/null || true
+
+  echo ""
+  echo "  ✅ $learned comments verified unchanged"
+  echo "  ✏️  $updated comments updated (human edits applied)"
+  echo "  🗑️  $removed comments removed (deleted on GitHub)"
+  [ "$replied" -gt 0 ] && echo "  💬 $replied dev replies recorded for learning"
+}
+
+# ── --learn early exit ──────────────────────────────────────
+if [ "$LEARN_MODE" = true ]; then
+  cd "$REPO_PATH" 2>/dev/null || true
+  REPO_OWNER=$(gh repo view --json owner --jq '.owner.login' 2>/dev/null)
+  REPO_NAME=$(gh repo view --json name --jq '.name' 2>/dev/null)
+  echo "📚 Learning from PR #${PR_NUMBER}..."
+  _learn_from_pr "$PR_NUMBER"
+  exit 0
+fi
+
 echo ""
 echo "🔍 PR #${PR_NUMBER}"
 echo "──────────────────────────────────────────"
-
-cd "$REPO_PATH" || { echo "Error: Cannot cd to $REPO_PATH" >&2; exit 1; }
 
 spinner_start "Fetching PR metadata..."
 REPO_OWNER=$(gh repo view --json owner --jq '.owner.login')
@@ -215,13 +359,24 @@ if [ "$IS_REREVIEW" = true ] && [ -n "$LAST_REVIEWED_SHA" ]; then
 
   CHANGED_FILES=$(wc -l < "$INCREMENTAL_FILES_LIST" 2>/dev/null | tr -d ' ' || echo "0")
 
+  DIFF_SIZE_BYTES=$(wc -c < "$DIFF_FILE" 2>/dev/null | tr -d ' ' || echo "0")
+
   if [ "$INCR_SIZE" -gt 0 ] && [ "$CHANGED_FILES" -gt 0 ]; then
-    # Count files in full diff for comparison
-    FULL_DIFF_FILES=$(grep -c '^diff --git' "$DIFF_FILE" || echo "0")
-    UNCHANGED_FILES=$((FULL_DIFF_FILES - CHANGED_FILES))
-    [ "$UNCHANGED_FILES" -lt 0 ] && UNCHANGED_FILES=0
-    echo "  ↻ Re-review: ${CHANGED_FILES} files changed since last review (${INCR_SIZE} bytes)"
-    echo "  ↻ Skipping ${UNCHANGED_FILES} unchanged files (already reviewed)"
+    # Safety: if incremental diff is LARGER than the PR diff, it means master was
+    # merged into the branch — the SHA range includes unrelated commits. Fall back
+    # to the PR diff to avoid blowing up the prompt.
+    if [ "$INCR_SIZE" -gt "$DIFF_SIZE_BYTES" ]; then
+      echo "  ↻ Incremental diff (${INCR_SIZE}B) > PR diff (${DIFF_SIZE_BYTES}B) — master merge detected"
+      echo "  ↻ Using PR diff instead (more focused)"
+      INCREMENTAL_DIFF_FILE=""
+      INCREMENTAL_FILES_LIST=""
+    else
+      FULL_DIFF_FILES=$(grep -c '^diff --git' "$DIFF_FILE" || echo "0")
+      UNCHANGED_FILES=$((FULL_DIFF_FILES - CHANGED_FILES))
+      [ "$UNCHANGED_FILES" -lt 0 ] && UNCHANGED_FILES=0
+      echo "  ↻ Re-review: ${CHANGED_FILES} files changed since last review (${INCR_SIZE} bytes)"
+      echo "  ↻ Skipping ${UNCHANGED_FILES} unchanged files (already reviewed)"
+    fi
   else
     # Incremental diff failed or empty — fall back to full review
     echo "  ↻ Could not compute incremental diff — using full diff"
@@ -236,12 +391,26 @@ fi
 spinner_start "Retrieving codebase context (RAG)..."
 RAG_CONTEXT_FILE=$(mktemp -t "pr-${PR_NUMBER}-rag.XXXXXX")
 
-REVIEW_RAG_SCRIPT="${REVIEW_RAG_SCRIPT:-}"
-if [ -n "$REVIEW_RAG_SCRIPT" ] && timeout 30 bash "$REVIEW_RAG_SCRIPT" \
+# RAG script: use bundled lib/rag.sh or override via REVIEW_RAG_SCRIPT
+_RAG_SCRIPT="${REVIEW_RAG_SCRIPT:-${LIB_DIR}/rag.sh}"
+
+# Cache key: repo + PR + HEAD SHA (auto-invalidates on new commits)
+_RAG_CACHE_KEY="${REPO_NAME}-${PR_NUMBER}-${HEAD_SHA:0:8}"
+_RAG_CACHE_FILE="$REVIEW_CACHE_DIR/rag-${_RAG_CACHE_KEY}.txt"
+
+# Purge RAG cache entries older than 7 days
+find "$REVIEW_CACHE_DIR" -name "rag-*.txt" -mtime +7 -delete 2>/dev/null || true
+
+if [ -f "$_RAG_CACHE_FILE" ]; then
+  cp "$_RAG_CACHE_FILE" "$RAG_CONTEXT_FILE"
+  RAG_SIZE=$(wc -c < "$RAG_CONTEXT_FILE" | tr -d ' ')
+  spinner_stop "RAG context loaded from cache ($(echo "$RAG_SIZE / 1024" | bc)KB)"
+elif [ -f "$_RAG_SCRIPT" ] && $_TIMEOUT_CMD 60 bash "$_RAG_SCRIPT" \
     "$DIFF_FILE" "$REPO_PATH" "$PR_NUMBER" "$REVIEWER_LOGIN" \
     > "$RAG_CONTEXT_FILE" 2>/dev/null; then
   RAG_SIZE=$(wc -c < "$RAG_CONTEXT_FILE" | tr -d ' ')
-  spinner_stop "RAG context ready ($(echo "$RAG_SIZE / 1024" | bc)KB)"
+  cp "$RAG_CONTEXT_FILE" "$_RAG_CACHE_FILE" 2>/dev/null || true
+  spinner_stop "RAG context ready ($(echo "$RAG_SIZE / 1024" | bc)KB) — cached"
 else
   spinner_stop "RAG context unavailable — proceeding with diff only"
   echo "" > "$RAG_CONTEXT_FILE"
@@ -505,6 +674,42 @@ FINDING RULES:
 - Do NOT include findings for things that look good
 - If uncertain after reading surrounding context: mark UNVERIFIABLE: yes
 
+# SCOPE DISCIPLINE (CRITICAL — violations of these rules waste developer time)
+
+## Rule 1: ONLY review code CHANGED in this PR
+- If a line is NOT in the diff (no \`+\` or \`-\` prefix), do NOT comment on it
+- Pre-existing patterns, pre-existing tech debt, pre-existing missing tests = OUT OF SCOPE
+- "This file also has X problem" = OUT OF SCOPE unless X was introduced by this PR
+- If a sibling file has the same bug pattern, only flag it if THIS PR introduced or copied the pattern
+- Exception: security vulnerabilities (secrets, SQL injection) are always in scope even if pre-existing
+
+## Rule 2: CALLER REACHABILITY CHECK before flagging edge cases
+- Before flagging "what if the caller sends X" — look for callers in the diff and RAG context
+- If the function is only called from a UI form with fixed fields (visible in diff/context), "what if someone sends arbitrary JSON" is NOT a valid concern
+- If the function is only called internally (not exposed via API, visible in diff/context), external attacker scenarios are NOT valid
+- A theoretical edge case that requires a caller path that doesn't exist in the visible context = NOT A FINDING
+- Ask: "Can a real user, through the actual UI or API, trigger this?" If the visible context shows NO → drop it
+- Ask: "Has this pattern existed in production without issues?" If YES and the PR didn't change it → drop it
+- IMPORTANT: If you CANNOT determine reachability from the diff + RAG context, do NOT speculate. Either mark UNVERIFIABLE or drop it. Never hallucinate that you checked callers you cannot see.
+
+## Rule 3: PROPORTIONALITY — match review depth to PR risk
+- BLOCKING and SECURITY findings: ALWAYS report, no cap. These are never suppressed.
+- NON-BLOCKING findings (SHOULD-FIX, NIT) are capped by PR size:
+  - Bug fix PR (< 100 lines): max 3 non-blocking findings
+  - Feature PR (100-500 lines): max 5 non-blocking findings
+  - Large PR (500+ lines): max 8 non-blocking findings
+- If you have more non-blocking findings than the limit: keep only the highest severity ones, drop the rest
+- A 3-file bug fix should NOT get 15 comments across 5 review rounds. That's a process failure.
+- For out-of-scope issues worth tracking: put them in the Checklist section as "follow-up ticket", NOT as inline comments
+- If a BLOCKING fix requires changing code outside the PR's scope, still flag it but note "follow-up ticket recommended" instead of demanding an in-PR fix
+
+## Rule 4: FRONT-LOAD everything — no drip-feeding findings across rounds
+- In re-review mode: ONLY check whether previous findings were addressed + review NEW code
+- Do NOT find new non-blocking issues in code that was already reviewed in a previous round (unless the code changed)
+- Exception: SECURITY and DATA CORRUPTION issues must ALWAYS be reported, even if missed in round 1 (apologize for the late find)
+- For missed non-security issues: put in Checklist as "follow-up", NOT as inline comments
+- The developer's job is to address YOUR findings, not to play whack-a-mole with new ones each round
+
 PROMPT_EOF
 
 # Append existing conversation context if present
@@ -524,6 +729,13 @@ The reviewer has already posted comments on this PR. Your job now is DIFFERENT f
    - If author gave a reason/explanation → evaluate if their reasoning is technically correct. If wrong: THREAD_STATUS: AUTHOR_WRONG with your counter-evidence. If right: THREAD_STATUS: RESOLVED_BY_EXPLANATION.
    - If author made no reply → THREAD_STATUS: NO_RESPONSE (flag if still an issue in diff)
 3. Also look for NEW issues in the diff (new code since last review) — output these as regular FINDING blocks.
+
+## CRITICAL RE-REVIEW CONSTRAINTS:
+- Do NOT find new non-blocking issues in code that was already present in the previous review round
+- Only flag NEW issues in lines that were ADDED or CHANGED since the last review
+- Exception: SECURITY and DATA CORRUPTION issues must always be reported even if missed earlier
+- For missed non-security issues: put in Checklist as "follow-up", NOT as inline findings
+- Max NEW non-blocking findings in a re-review: 3. Security/data-corruption findings have no cap
 
 ## Output format for existing threads:
 THREAD_STATUS: path/to/file.ts:LINE
@@ -690,6 +902,13 @@ $(cat "$DIFF_FILE")
 2. Any BLOCKING or SHOULD-FIX issues the primary analysis missed? Reference exact file:line from diff.
 3. Any findings rated too low or too high severity?
 4. Assume there is at least one gap. Find it.
+
+## SCOPE RULES (apply these strictly)
+- ONLY comment on code CHANGED in this PR (lines with + or - prefix in the diff)
+- Pre-existing patterns, tech debt, missing tests NOT introduced by this PR = OUT OF SCOPE
+- Before flagging edge cases: verify the caller path actually exists in the diff context. Theoretical scenarios that can't happen via the real UI/API = NOT A FINDING
+- Do NOT flag issues that require fixing code outside the PR's changed files
+- NON-BLOCKING findings cap: max 5. BLOCKING/SECURITY findings: no cap.
 
 Respond in the same FINDING block format. Plain text. No style concerns.
 PEER_EOF
@@ -1096,34 +1315,147 @@ cat "$REVIEW_SUMMARY"
 echo "──────────────────────────────────────────"
 echo ""
 
-if [ "$COMMENT_COUNT" -gt 0 ] || [ "$REPLY_COUNT_PREVIEW" -gt 0 ]; then
-  echo "📍 Comments Preview:"
-  head -5 "${REVIEW_STRUCTURED}.comments"
-  TOTAL=$((COMMENT_COUNT + REPLY_COUNT_PREVIEW))
-  [ "$TOTAL" -gt 5 ] && echo "   ... and $((TOTAL - 5)) more"
-  echo ""
-fi
+# ============================================================
+# INTERACTIVE COMMENT SELECTION (TTY only, skipped with --auto-post)
+# ============================================================
 
-# ============================================================
-# POST TO GITHUB
-# ============================================================
+declare -a _ALL_COMMENTS=()
+while IFS= read -r _line; do
+  _ALL_COMMENTS+=("$_line")
+done < "${REVIEW_STRUCTURED}.comments"
+
+declare -a _COMMENT_INDICES=()
+declare -a _REPLY_INDICES=()
+for _i in "${!_ALL_COMMENTS[@]}"; do
+  if [[ "${_ALL_COMMENTS[$_i]}" =~ ^COMMENT: ]]; then
+    _COMMENT_INDICES+=("$_i")
+  elif [[ "${_ALL_COMMENTS[$_i]}" =~ ^REPLY: ]]; then
+    _REPLY_INDICES+=("$_i")
+  fi
+done
+
+# bash 3.2 compat: use indexed array instead of associative (declare -A)
+declare -a _SELECTED=()
+for _i in "${!_ALL_COMMENTS[@]}"; do
+  _SELECTED[$_i]=1
+done
+
+_tui_render() {
+  local _num _idx _stripped _badge _preview
+  printf '\n'
+  printf '──────────────────────────────────────────\n'
+  printf '  📍 Comments (%d total):\n\n' "${#_COMMENT_INDICES[@]}"
+  _num=1
+  for _idx in "${_COMMENT_INDICES[@]}"; do
+    _stripped="${_ALL_COMMENTS[$_idx]#COMMENT: }"
+    _badge="  "
+    if [[ "$_stripped" =~ :BLOCKING ]]; then _badge="🔴"; fi
+    if [[ "$_stripped" =~ :SHOULD-FIX ]]; then _badge="🟡"; fi
+    if [[ "$_stripped" =~ :NIT ]]; then _badge="⚪"; fi
+    _preview="${_stripped:0:80}"
+    if [ "${_SELECTED[$_idx]}" = "1" ]; then
+      printf '  \033[32m[✓]\033[0m %2d %s %s\n' "$_num" "$_badge" "$_preview"
+    else
+      printf '  \033[31m[✗]\033[0m %2d %s %s\n' "$_num" "$_badge" "$_preview"
+    fi
+    _num=$((_num + 1))
+  done
+  if [ "${#_REPLY_INDICES[@]}" -gt 0 ]; then
+    printf '\n  ── Thread replies (always included): %d\n' "${#_REPLY_INDICES[@]}"
+  fi
+  printf '──────────────────────────────────────────\n'
+  printf '  Commands: <N> toggle  e<N> edit  d<N> drop  a all  n none  p post  q cancel\n'
+  printf '  > '
+}
+
 if [ "$AUTO_POST" = true ]; then
   POST_REVIEW=true
-elif [ ! -t 0 ]; then
-  # No TTY (running in background/pipe) — skip posting, just show the review
+elif [ ! -t 0 ] || [ ! -t 1 ]; then
   POST_REVIEW=false
 else
-  read -p "📤 Post this review to GitHub with inline comments? (y/n) " -n 1 -r
-  echo
-  [[ $REPLY =~ ^[Yy]$ ]] && POST_REVIEW=true || POST_REVIEW=false
+  while true; do
+    _tui_render
+    read -r _CMD </dev/tty
+    case "$_CMD" in
+      p|post)
+        POST_REVIEW=true
+        break
+        ;;
+      q|quit)
+        POST_REVIEW=false
+        break
+        ;;
+      a|all)
+        for _idx in "${_COMMENT_INDICES[@]}"; do _SELECTED[$_idx]=1; done
+        echo "  ✓ All comments selected"
+        ;;
+      n|none)
+        for _idx in "${_COMMENT_INDICES[@]}"; do _SELECTED[$_idx]=0; done
+        echo "  ✓ All comments deselected"
+        ;;
+      d[0-9]*)
+        _n="${_CMD#d}"
+        if [[ "$_n" =~ ^[0-9]+$ ]] && [ "$_n" -ge 1 ] && [ "$_n" -le "${#_COMMENT_INDICES[@]}" ]; then
+          _idx="${_COMMENT_INDICES[$((_n - 1))]}"
+          _SELECTED[$_idx]=0
+          echo "  ✓ Dropped comment #$_n"
+        else
+          echo "  ✗ Invalid: d<number> (e.g. d3)"
+        fi
+        ;;
+      e[0-9]*)
+        _n="${_CMD#e}"
+        if [[ "$_n" =~ ^[0-9]+$ ]] && [ "$_n" -ge 1 ] && [ "$_n" -le "${#_COMMENT_INDICES[@]}" ]; then
+          _idx="${_COMMENT_INDICES[$((_n - 1))]}"
+          _EDIT_TMP=$(mktemp -t "pr-comment-edit.XXXXXX")
+          printf '%s\n' "${_ALL_COMMENTS[$_idx]}" > "$_EDIT_TMP"
+          ${EDITOR:-vi} "$_EDIT_TMP" </dev/tty >/dev/tty
+          _edited=$(cat "$_EDIT_TMP" | head -1)
+          [ -n "$_edited" ] && _ALL_COMMENTS[$_idx]="$_edited"
+          rm -f "$_EDIT_TMP"
+          echo "  ✓ Updated comment #$_n"
+        else
+          echo "  ✗ Invalid: e<number> (e.g. e2)"
+        fi
+        ;;
+      [0-9]*)
+        if [[ "$_CMD" =~ ^[0-9]+$ ]] && [ "$_CMD" -ge 1 ] && [ "$_CMD" -le "${#_COMMENT_INDICES[@]}" ]; then
+          _idx="${_COMMENT_INDICES[$((_CMD - 1))]}"
+          if [ "${_SELECTED[$_idx]}" = "1" ]; then
+            _SELECTED[$_idx]=0
+            echo "  ✓ Excluded comment #$_CMD"
+          else
+            _SELECTED[$_idx]=1
+            echo "  ✓ Included comment #$_CMD"
+          fi
+        else
+          echo "  ✗ Invalid number (1-${#_COMMENT_INDICES[@]})"
+        fi
+        ;;
+      *)
+        echo "  Commands: <N> toggle  e<N> edit  d<N> drop  a all  n none  p post  q cancel"
+        ;;
+    esac
+  done
 fi
 
 if [ "$POST_REVIEW" = true ]; then
   spinner_start "Posting review to GitHub..."
 
-  # Separate COMMENT: lines from REPLY: lines
-  grep "^COMMENT:" "${REVIEW_STRUCTURED}.comments" | sed 's/^COMMENT: //' > "${REVIEW_STRUCTURED}.new_comments" || true
-  grep "^REPLY:" "${REVIEW_STRUCTURED}.comments" | sed 's/^REPLY: //' > "${REVIEW_STRUCTURED}.replies" || true
+  # Separate COMMENT: lines from REPLY: lines (respecting TUI selections)
+  : > "${REVIEW_STRUCTURED}.new_comments"
+  : > "${REVIEW_STRUCTURED}.replies"
+  if [ "${#_COMMENT_INDICES[@]}" -gt 0 ]; then
+    for _idx in "${_COMMENT_INDICES[@]}"; do
+      [ "${_SELECTED[$_idx]:-0}" = "1" ] || continue
+      printf '%s\n' "${_ALL_COMMENTS[$_idx]#COMMENT: }" >> "${REVIEW_STRUCTURED}.new_comments"
+    done
+  fi
+  if [ "${#_REPLY_INDICES[@]}" -gt 0 ]; then
+    for _idx in "${_REPLY_INDICES[@]}"; do
+      printf '%s\n' "${_ALL_COMMENTS[$_idx]#REPLY: }" >> "${REVIEW_STRUCTURED}.replies"
+    done
+  fi
   NEW_COMMENT_COUNT=$(wc -l < "${REVIEW_STRUCTURED}.new_comments" | tr -d ' ')
   REPLY_COUNT=$(wc -l < "${REVIEW_STRUCTURED}.replies" | tr -d ' ')
 
@@ -1186,10 +1518,35 @@ JSONEND
   echo ""
   echo "  → https://github.com/${REPO_OWNER}/${REPO_NAME}/pull/${PR_NUMBER}"
 
+  # Save posted comments to cache for --learn feedback loop
+  if [ "$_POSTED_OK" = true ] && [ -f "${REVIEW_STRUCTURED}.new_comments" ]; then
+    _POSTED_CACHE="$REVIEW_CACHE_DIR/pr-${PR_NUMBER}-posted.json"
+    {
+      printf '{"pr":%s,"head_sha":"%s","posted_at":"%s","comments":' \
+        "$PR_NUMBER" "$HEAD_SHA" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      jq -Rs '[split("\n")[] | select(length > 0)]' < "${REVIEW_STRUCTURED}.new_comments"
+      printf '}'
+    } > "$_POSTED_CACHE" 2>/dev/null || true
+  fi
+
   # Voice indexer — continuous learning from posted comments
   VOICE_JSONL_INDEX="$HOME/.diffhound/voice-examples.jsonl"
-  INDEXED=$(index_voice_comments "${REVIEW_STRUCTURED}.new_comments" "$PR_NUMBER" "$VOICE_JSONL_INDEX")
+  INDEXED=$(index_voice_comments "${REVIEW_STRUCTURED}.new_comments" "$PR_NUMBER" "$VOICE_JSONL_INDEX" "$REVIEW_CACHE_DIR")
   [ "$INDEXED" -gt 0 ] && echo "  📝 Indexed $INDEXED comments to voice RAG ($(wc -l < "$VOICE_JSONL_INDEX") total)"
+
+  # Auto-learn from ALL previous PR caches (0 LLM tokens, just GitHub API)
+  # Picks up human edits/deletions on previously posted comments
+  _LEARNED_TOTAL=0
+  for _cache_file in "$REVIEW_CACHE_DIR"/pr-*-posted.json; do
+    [ -f "$_cache_file" ] || continue
+    _cached_pr=$(jq -r '.pr' "$_cache_file" 2>/dev/null || true)
+    [ -z "$_cached_pr" ] && continue
+    [ "$_cached_pr" = "$PR_NUMBER" ] && continue  # skip current (just posted)
+    # Only process caches older than 1 hour (give human time to review on GitHub)
+    find "$_cache_file" -mmin +60 -print 2>/dev/null | grep -q . || continue
+    _learn_from_pr "$_cached_pr" >/dev/null 2>&1 && _LEARNED_TOTAL=$((_LEARNED_TOTAL + 1)) || true
+  done
+  [ "$_LEARNED_TOTAL" -gt 0 ] && echo "  📚 Auto-learned from $_LEARNED_TOTAL previous review(s)"
 
   # Cleanup parse files
   rm -f "${REVIEW_STRUCTURED}.new_comments" "${REVIEW_STRUCTURED}.replies" 2>/dev/null || true
