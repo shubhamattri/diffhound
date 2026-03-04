@@ -1548,6 +1548,13 @@ JSONEND
   done
   [ "$_LEARNED_TOTAL" -gt 0 ] && echo "  📚 Auto-learned from $_LEARNED_TOTAL previous review(s)"
 
+  # Auto-resolve threads addressed by new commits (re-review only)
+  if [ "$IS_REREVIEW" = true ] && [ -n "$INCREMENTAL_DIFF_FILE" ] && [ -f "$INCREMENTAL_DIFF_FILE" ]; then
+    _RESOLVED=$(resolve_addressed_comments "$REPO_OWNER" "$REPO_NAME" "$PR_NUMBER" \
+      "$EXISTING_COMMENTS_FILE" "$INCREMENTAL_DIFF_FILE" "$REVIEWER_LOGIN")
+    [ "$_RESOLVED" -gt 0 ] && echo "  ✓ Auto-resolved $_RESOLVED addressed thread(s)"
+  fi
+
   # Cleanup parse files
   rm -f "${REVIEW_STRUCTURED}.new_comments" "${REVIEW_STRUCTURED}.replies" 2>/dev/null || true
 else
