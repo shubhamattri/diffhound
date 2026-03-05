@@ -191,6 +191,141 @@ diffhound rewrites review comments to match your writing style. Provide examples
 
 See [docs/CUSTOMIZATION.md](docs/CUSTOMIZATION.md) for full details.
 
+## Architecture Deep Dive
+
+### RAG — What it is and why it matters
+
+**RAG (Retrieval-Augmented Generation)** means giving the AI relevant context _before_ it generates a response. Without RAG, the model only sees the diff — 3 changed lines with no idea what the surrounding function does, what other files exist, or what was reviewed before. With RAG, it sees the full picture.
+
+There are several RAG architectures, each with different tradeoffs:
+
+| Type | How it works | Tradeoff |
+|------|-------------|----------|
+| **Naive RAG** | Fixed retrieval strategy → stuff into prompt | Simple, predictable, but can't adapt to what the model actually needs |
+| **Advanced RAG** | Pre-retrieval query rewriting + post-retrieval re-ranking and compression | Better relevance, but more complex pipeline |
+| **Graph RAG** | Builds a knowledge graph (e.g., call graph), retrieves subgraphs | Captures relationships ("A calls B which uses table C"), expensive to build |
+| **Agentic RAG** | The LLM decides what to retrieve, evaluates, retrieves more if needed | Most flexible — self-correcting, iterative. Slower, less predictable |
+| **Hybrid RAG** | Keyword search (BM25) + semantic/vector search combined | Best of both — exact matches AND conceptual matches |
+
+#### What diffhound uses: Naive + Agentic hybrid
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                        RAG PIPELINE                                  │
+│                                                                      │
+│  ┌─────────────────────┐     ┌────────────────────────────────────┐  │
+│  │  LAYER 1: Naive RAG │     │  LAYER 2: Agentic RAG             │  │
+│  │  (rag.sh — fixed)   │     │  (Claude Pass 1 — adaptive)       │  │
+│  │                     │     │                                    │  │
+│  │  • Function context │────▶│  • Reads additional files on demand│  │
+│  │  • Sibling files    │     │  • Follows import chains           │  │
+│  │  • Git history      │     │  • Greps for patterns              │  │
+│  │  • Past comments    │     │  • Checks test coverage            │  │
+│  │  • Enums/constants  │     │  • Verifies findings before posting│  │
+│  │                     │     │                                    │  │
+│  │  Deterministic,     │     │  Adaptive, self-correcting,        │  │
+│  │  5-10 seconds       │     │  follows the code wherever it leads│  │
+│  └─────────────────────┘     └────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+**Why this combination?**
+- Layer 1 (Naive) guarantees a baseline context floor — every review sees function bodies, sibling files, and history regardless of what the model decides to do
+- Layer 2 (Agentic) lets Claude go deeper where needed — if it spots a suspicious pattern, it can read the actual implementation, check callers, verify test coverage
+- Neither layer alone is sufficient. Naive RAG misses adaptive exploration. Pure agentic RAG has no guaranteed baseline and may skip obvious context.
+
+**Why not the others?**
+- **Graph RAG** — would need to build and maintain a call graph for the entire codebase. High build cost, marginal gain over agentic exploration for PR-sized reviews
+- **Vector/semantic search** — useful for large doc collections, overkill for code review where you know exactly which files changed and can deterministically retrieve their context
+- **Chunking** — not needed. A large PR diff (~150KB) + RAG context (~44KB) is ~48K tokens, well within Claude's 200K context window. Chunking would _degrade_ review quality by losing cross-file context
+
+### Tree-sitter AST extraction
+
+Most code review tools dump the first N lines of each file as context. This wastes tokens on imports, license headers, and unrelated functions.
+
+Diffhound uses **tree-sitter** (a concrete syntax tree parser) to extract only the enclosing function/method around each changed hunk:
+
+```
+Traditional:               Tree-sitter:
+┌─────────────────────┐    ┌─────────────────────┐
+│ import ...          │    │                     │
+│ import ...          │    │                     │
+│ import ...          │    │                     │
+│ const CONFIG = ...  │    │                     │
+│                     │    │                     │
+│ function unrelated  │    │                     │
+│   ...50 lines...    │    │                     │
+│                     │    ├─────────────────────┤
+│ function changed()  │    │ function changed()  │
+│   line A            │    │   line A            │
+│   line B  ← diff    │    │   line B  ← diff    │
+│   line C            │    │   line C            │
+│   line D            │    │   line D            │
+├─────────────────────┤    ├─────────────────────┤
+│ ... truncated ...   │    │                     │
+└─────────────────────┘    └─────────────────────┘
+   ~100 lines, 30%            ~20 lines, 100%
+   relevant                    relevant
+```
+
+Result: **60-70% fewer tokens** with higher signal density. Falls back to a ±35 line window if tree-sitter isn't installed.
+
+### Multi-model peer review
+
+On new PRs, diffhound doesn't trust a single model. It runs three independent reviewers in parallel:
+
+```
+                    ┌──────────┐
+              ┌────▶│  Codex   │────┐
+              │     └──────────┘    │
+┌──────────┐  │     ┌──────────┐    │     ┌───────────────┐
+│  Claude   │──┼────▶│  Gemini  │────┼────▶│  Merge + Post │
+│  Pass 1-2 │  │     └──────────┘    │     └───────────────┘
+└──────────┘  │                      │
+              └──────────────────────┘
+                   (parallel)
+```
+
+- **Agreements** across models = high confidence findings
+- **Unique findings** = things one model caught that others missed
+- **Disagreements** = presented as-is for the developer to judge
+
+Skipped with `--fast` (re-reviews use Claude only for speed).
+
+### Voice rewrite system
+
+AI review comments sound robotic by default. Diffhound rewrites every comment to match the reviewer's natural writing style using a JSONL file of real examples as style reference.
+
+The system also **learns continuously**:
+- If you edit a posted comment on GitHub → the voice file updates
+- If you delete a comment (it was wrong) → the example is removed
+- If a developer replies with "this is intentional" → recorded as feedback
+
+This creates a feedback loop where reviews get more natural and more accurate over time.
+
+### Auto-resolve on re-review
+
+When a developer pushes fixes, diffhound detects which previous comments are addressed:
+
+1. Parses the incremental diff **line-by-line** (not hunk ranges — avoids false positives from unchanged context lines)
+2. Matches each previous comment to actually-changed lines with ±2 line tolerance
+3. Resolves matched threads via GitHub's GraphQL API
+
+This eliminates the manual "Resolve conversation" clicking that adds friction to the review cycle.
+
+### Design decisions and why
+
+| Decision | Alternative considered | Why we chose this |
+|----------|----------------------|-------------------|
+| **No chunking** | Split large diffs into file-level chunks | Cross-file bugs are the highest-value findings. Chunking kills them. Context window isn't a bottleneck. |
+| **Naive + Agentic RAG** | Pure agentic, vector DB, graph RAG | Guaranteed baseline + adaptive depth. No infrastructure to maintain. |
+| **Tree-sitter over regex** | Regex-based function extraction, head -N | AST-aware extraction is language-agnostic and precise. 60-70% token reduction. |
+| **±2 tolerance for auto-resolve** | ±5 (more aggressive) | Peer-reviewed by Codex + Gemini. ±5 resolved unrelated nearby comments. Conservative is safer. |
+| **GraphQL for thread resolution** | REST API | REST doesn't expose thread IDs. GraphQL is the only way to resolve review threads programmatically. |
+| **Line-by-line diff parsing** | Hunk range matching | Hunk ranges include context lines (unchanged). Line-by-line only counts actual `+`/`-` lines as changed. |
+| **Parallel RAG sections** | Sequential retrieval | 4 sections run in parallel with 15s timeouts each. Total RAG time: ~5-10s instead of ~40s. |
+| **Voice JSONL over fine-tuning** | Fine-tune a model on past comments | JSONL is transparent, editable, version-controllable. Fine-tuning is a black box. |
+
 ## Cost
 
 | Pass | What | Cost |
