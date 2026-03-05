@@ -188,6 +188,140 @@ _learn_from_pr() {
   echo "  ✏️  $updated comments updated (human edits applied)"
   echo "  🗑️  $removed comments removed (deleted on GitHub)"
   [ "$replied" -gt 0 ] && echo "  💬 $replied dev replies recorded for learning"
+
+  # ── Reply-based response: generate AI replies to dev comments ──
+  if [ "$replied" -gt 0 ]; then
+    _respond_to_dev_replies "$pr" "$repo_owner" "$repo_name" "$all_comments"
+  fi
+}
+
+# ── Respond to dev replies with AI-generated conversational replies ──
+_respond_to_dev_replies() {
+  local pr="$1" repo_owner="$2" repo_name="$3" all_comments="$4"
+  local responded=0 max_responses=5
+
+  # Find reviewer top-level comment IDs
+  local reviewer_ids
+  reviewer_ids=$(printf '%s' "$all_comments" | jq -r \
+    --arg login "$REVIEWER_LOGIN" \
+    '[.[] | select(.user == $login and .in_reply_to_id == null) | .id] | .[]')
+
+  while IFS= read -r cid; do
+    [ -z "$cid" ] && continue
+    [ "$responded" -ge "$max_responses" ] && break
+
+    # Get the full thread for this comment: original + all replies, ordered by id
+    local thread
+    thread=$(printf '%s' "$all_comments" | jq -c \
+      --argjson parent "$cid" \
+      '[.[] | select(.id == $parent or .in_reply_to_id == $parent)] | sort_by(.id)')
+
+    # Check if the last message in thread is from a dev (not the reviewer)
+    local last_user
+    last_user=$(printf '%s' "$thread" | jq -r \
+      --arg login "$REVIEWER_LOGIN" \
+      '.[-1].user')
+    [ "$last_user" = "$REVIEWER_LOGIN" ] && continue
+
+    # Dev replied last — check we haven't already responded (via response cache)
+    local last_reply_id
+    last_reply_id=$(printf '%s' "$thread" | jq -r '.[-1].id')
+    local response_cache="$REVIEW_CACHE_DIR/pr-${pr}-responses.txt"
+    if [ -f "$response_cache" ] && grep -qx "$last_reply_id" "$response_cache" 2>/dev/null; then
+      continue
+    fi
+
+    # Gather context for the AI call
+    local original_comment dev_reply file_path
+    original_comment=$(printf '%s' "$thread" | jq -r '.[0].body')
+    dev_reply=$(printf '%s' "$thread" | jq -r '.[-1].body')
+    file_path=$(printf '%s' "$thread" | jq -r '.[0].path // empty')
+
+    # Get minimal code context (~20 lines around the comment)
+    local code_context=""
+    if [ -n "$file_path" ] && [ -f "${REPO_PATH}/${file_path}" ]; then
+      local comment_line
+      comment_line=$(printf '%s' "$thread" | jq -r '.[0].line // 0')
+      if [ "$comment_line" -gt 0 ] 2>/dev/null; then
+        local start_line=$((comment_line > 10 ? comment_line - 10 : 1))
+        code_context=$(sed -n "${start_line},$((comment_line + 10))p" "${REPO_PATH}/${file_path}" 2>/dev/null || true)
+      fi
+    fi
+
+    # Build the prompt
+    local prompt
+    prompt="You are a code reviewer replying to a developer's response on a PR comment.
+
+YOUR ORIGINAL COMMENT:
+${original_comment}
+
+DEVELOPER'S REPLY:
+${dev_reply}
+"
+    if [ -n "$code_context" ]; then
+      prompt+="
+CODE CONTEXT (${file_path} around the comment):
+${code_context}
+"
+    fi
+
+    prompt+="
+Rules:
+- If dev says \"fixed\"/\"done\" → reply \"thanks, will verify on next push\" (1 line)
+- If dev chose an option you suggested → acknowledge briefly
+- If dev says \"intentional\" → accept if reasonable, push back with evidence if not
+- If dev asks a question → answer concisely
+- If dev disagrees → re-evaluate honestly. Concede if they're right.
+- Keep replies to 1-3 sentences. Same casual voice as your review comments.
+- NEVER repeat the original concern verbatim. The thread already has it.
+- NEVER mention AI, automated review, or any tool name."
+
+    # Call Claude Haiku via API (fast + cheap)
+    local ai_reply=""
+    if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+      local _resp_json
+      _resp_json=$(mktemp -t "respond-${pr}.XXXXXX")
+      jq -n --arg prompt "$prompt" '{
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 256,
+        messages: [{role: "user", content: $prompt}]
+      }' > "$_resp_json"
+
+      local _api_out
+      _api_out=$(curl -sf https://api.anthropic.com/v1/messages \
+        -H "x-api-key: ${ANTHROPIC_API_KEY}" \
+        -H "anthropic-version: 2023-06-01" \
+        -H "content-type: application/json" \
+        -d @"$_resp_json" 2>/dev/null || echo "")
+      rm -f "$_resp_json"
+
+      ai_reply=$(printf '%s' "$_api_out" | jq -r '.content[0].text // empty' 2>/dev/null || true)
+    fi
+
+    # Fallback: claude CLI
+    if [ -z "$ai_reply" ]; then
+      local _saved_key="${ANTHROPIC_API_KEY:-}"
+      unset ANTHROPIC_API_KEY
+      ai_reply=$(printf '%s' "$prompt" | claude -p --model claude-haiku-4-5-20251001 2>/dev/null || true)
+      [ -n "$_saved_key" ] && export ANTHROPIC_API_KEY="$_saved_key"
+    fi
+
+    [ -z "$ai_reply" ] && continue
+
+    # Post the reply to the thread
+    if gh api \
+      --method POST \
+      -H "Accept: application/vnd.github+json" \
+      -H "X-GitHub-Api-Version: 2022-11-28" \
+      "/repos/${repo_owner}/${repo_name}/pulls/${pr}/comments/${cid}/replies" \
+      --field "body=${ai_reply}" > /dev/null 2>&1; then
+      responded=$((responded + 1))
+      # Record in response cache to prevent double-replying
+      echo "$last_reply_id" >> "$response_cache"
+    fi
+  done <<< "$reviewer_ids"
+
+  [ "$responded" -gt 0 ] && echo "  🗣️  $responded AI responses posted to dev replies"
 }
 
 # ── --learn early exit ──────────────────────────────────────
