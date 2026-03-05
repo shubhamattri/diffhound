@@ -248,14 +248,20 @@ resolve_addressed_comments() {
     cline=$(printf '%s' "$reviewer_comments" | jq -r ".[$i].line")
     i=$((i + 1))
 
-    local lines="${changed_lines[$cpath]:-}"
-    [ -z "$lines" ] && continue
+    local lines_str="${changed_lines[$cpath]:-}"
+    [ -z "$lines_str" ] && continue
+
+    # Split space-separated line numbers into array for safe iteration
+    local -a line_arr=()
+    read -ra line_arr <<< "$lines_str"
 
     local matched=false
-    for cl in $lines; do
-      local diff=$((cline - cl))
-      [ "$diff" -lt 0 ] && diff=$((-diff))
-      if [ "$diff" -le "$tolerance" ]; then
+    local cl
+    for cl in "${line_arr[@]}"; do
+      [[ "$cl" =~ ^[0-9]+$ ]] || continue
+      local delta=$((cline - cl))
+      [ "$delta" -lt 0 ] && delta=$(( -delta ))
+      if [ "$delta" -le "$tolerance" ]; then
         matched=true
         break
       fi
