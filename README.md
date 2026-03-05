@@ -78,6 +78,9 @@ diffhound 1234 --auto-post
 
 # Fast + auto-post
 diffhound 1234 --fast --auto-post
+
+# Learn from GitHub feedback (edited/deleted comments update voice JSONL)
+diffhound 1234 --learn
 ```
 
 ## Configuration
@@ -107,6 +110,26 @@ export REVIEW_LOGIN="your-github-username"
 └─────────────┘    └──────────────────┘    └─────────────────┘    └──────────────┘
 ```
 
+### RAG context retrieval
+
+Before the AI sees the diff, diffhound gathers surrounding codebase context (5 sections, 4 in parallel):
+
+| Section | What | How |
+|---------|------|-----|
+| Function context | Complete function/method around each changed hunk | Tree-sitter AST extraction (falls back to ±35 line window) |
+| Sibling files | Other files in the same directory | `find` for pattern propagation checks |
+| Git history | Last 5 commits per changed file | `git log --oneline` |
+| Past comments | Previous review comments on these files | GitHub API |
+| Enums & constants | Definitions of constants referenced in the diff | `git grep` |
+
+**Optional:** Install `tree-sitter` for precise function extraction (60-70% fewer tokens vs file headers):
+
+```bash
+pip3 install tree-sitter tree-sitter-typescript tree-sitter-javascript tree-sitter-python
+```
+
+Without tree-sitter, falls back to showing the first 80 lines of each changed file.
+
 ### Re-review optimization
 
 When you've already reviewed a PR and the author pushes fixes:
@@ -116,6 +139,7 @@ When you've already reviewed a PR and the author pushes fixes:
 3. Fetches only the incremental diff (changes since your last review)
 4. Checks each existing thread — resolved? still open? author wrong?
 5. Focuses analysis on new/changed files only
+6. **Auto-resolves addressed threads** — if a changed line falls within ±2 lines of a previous comment, that thread is automatically resolved via GraphQL API
 
 ### 25 engineering principles
 
@@ -142,13 +166,14 @@ diffhound/
 │   ├── spinner.sh             # Terminal spinner utilities
 │   ├── platform.sh            # OS detection + dependency checks
 │   ├── parser.sh              # LLM output parsing + line-snapping
-│   └── github.sh              # GitHub API posting + fallback logic
+│   ├── github.sh              # GitHub API posting + voice indexer + learning
+│   ├── rag.sh                 # RAG context retrieval (parallel sections)
+│   └── extract-context.py     # AST-based function extraction (tree-sitter)
 ├── config/
 │   └── diffhound.example.yml  # Example configuration
 ├── docs/
 │   ├── ARCHITECTURE.md        # Pipeline deep-dive
 │   └── CUSTOMIZATION.md       # Voice, principles, config
-├── review-pr.sh               # Standalone single-file version (backup)
 ├── install.sh                 # One-command installer
 ├── CHANGELOG.md
 ├── LICENSE                    # MIT
