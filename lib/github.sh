@@ -56,9 +56,28 @@ post_review() {
       fi
       new_comment_count=$inline_posted
     else
-      spinner_fail "Failed to post review to GitHub"
-      echo "  Summary saved: $review_summary" >&2
-      posted_ok=false
+      # If APPROVE/REQUEST_CHANGES failed (e.g. cannot approve/request-changes own PR), retry as COMMENT
+      if [ "$review_event" = "APPROVE" ] || [ "$review_event" = "REQUEST_CHANGES" ]; then
+        jq '.event = "COMMENT"' "$_fallback_json" > "${_fallback_json}.retry"
+        if gh api \
+          --method POST \
+          -H "Accept: application/vnd.github+json" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          "/repos/${repo_owner}/${repo_name}/pulls/${pr_number}/reviews" \
+          --input "${_fallback_json}.retry" > /dev/null 2>&1; then
+          review_event="COMMENT"
+          rm -f "${_fallback_json}.retry"
+        else
+          rm -f "${_fallback_json}.retry"
+          spinner_fail "Failed to post review to GitHub"
+          echo "  Summary saved: $review_summary" >&2
+          posted_ok=false
+        fi
+      else
+        spinner_fail "Failed to post review to GitHub"
+        echo "  Summary saved: $review_summary" >&2
+        posted_ok=false
+      fi
     fi
     rm -f "$_fallback_json"
   fi
