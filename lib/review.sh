@@ -1743,7 +1743,9 @@ Verdict is severity-based, NOT score-based:
 
 # REQUIRED OUTPUT FORMAT
 
-You MUST output valid JSON. No text before or after the JSON block. Wrap in ```json fences.
+You MUST output valid JSON. No text before or after the JSON block. Wrap in \`\`\`json fences.
+
+SCORE RULE (critical): The "score" field MUST equal the sum of all scorecard category scores. Do NOT guess or estimate — add them: security.score + tests.score + observability.score + performance.score + readability.score + compatibility.score = score. Double-check your arithmetic.
 
 LINE NUMBER RULES (critical — wrong lines cause GitHub to reject the comment):
 - LINE must be a line number from the \`+\` side of the diff (i.e. a line shown with \`+\` prefix or unchanged context line inside a hunk)
@@ -1755,7 +1757,7 @@ LINE NUMBER RULES (critical — wrong lines cause GitHub to reject the comment):
 {
   "summary": "Overall PR assessment in 1-2 sentences",
   "verdict": "REQUEST_CHANGES | COMMENT | APPROVE",
-  "score": 72,
+  "score": 0,
   "scorecard": {
     "security": {"score": 20, "max": 25, "reason": "..."},
     "tests": {"score": 15, "max": 20, "reason": "..."},
@@ -2052,6 +2054,19 @@ export ANTHROPIC_API_KEY="$_SAVED_API_KEY"
 spinner_stop "Pass 1 complete"
 
 fi  # end SMALL/MEDIUM tier monolithic path
+
+# ── Fix scorecard math: recompute score as sum of category scores ──
+# Claude sometimes hallucinates the total score. Belt + suspenders.
+_json_check=$(_extract_json "$CLAUDE_OUT" 2>/dev/null || true)
+if [ -n "$_json_check" ] && echo "$_json_check" | jq -e '.scorecard' >/dev/null 2>&1; then
+  _computed_score=$(echo "$_json_check" | jq '[.scorecard[].score] | add' 2>/dev/null || echo "")
+  _claimed_score=$(echo "$_json_check" | jq '.score' 2>/dev/null || echo "")
+  if [ -n "$_computed_score" ] && [ -n "$_claimed_score" ] && [ "$_computed_score" != "$_claimed_score" ]; then
+    echo "  Fixing scorecard math: claimed ${_claimed_score}, actual ${_computed_score}" >&2
+    _fixed_json=$(echo "$_json_check" | jq --argjson s "$_computed_score" '.score = $s')
+    { echo '```json'; echo "$_fixed_json"; echo '```'; } > "$CLAUDE_OUT"
+  fi
+fi
 
 # ============================================================
 # STEP 4: PEER REVIEW — CODEX + GEMINI
