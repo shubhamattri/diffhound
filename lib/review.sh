@@ -2028,7 +2028,7 @@ fi  # end SMALL/MEDIUM tier monolithic path
 CODEX_CONTENT=""
 GEMINI_CONTENT=""
 
-if [ "$FAST_MODE" != "true" ]; then
+if [ "$FAST_MODE" != "true" ] && [ "$IS_REREVIEW" != "true" ]; then
   spinner_start "Cross-checking findings (pass 2/${_TOTAL_PASSES})..."
 
   PEER_PROMPT_FILE=$(mktemp -t "pr-${PR_NUMBER}-peer.XXXXXX")
@@ -2068,7 +2068,7 @@ ${_PEER_DIFF_CONTENT}
 1. For each BLOCKING finding: do you agree? If wrong or overstated, explain why with diff evidence.
 2. Any BLOCKING or SHOULD-FIX issues the primary analysis missed? Reference exact file:line from diff.
 3. Any findings rated too low or too high severity?
-4. Assume there is at least one gap. Find it.
+4. Only flag genuinely missed issues — do not manufacture findings for completeness.
 
 ## SCOPE RULES (apply these strictly)
 - ONLY comment on code CHANGED in this PR (lines with + or - prefix in the diff)
@@ -2096,7 +2096,11 @@ PEER_EOF
   GEMINI_CONTENT=$(cat "$GEMINI_OUT")
   spinner_stop "Pass 2 complete"
 else
-  echo "  ⚡ Fast mode — peer review skipped" >&2
+  if [ "$IS_REREVIEW" = "true" ]; then
+    echo "  🔄 Re-review — peer review skipped (incremental focus only)" >&2
+  else
+    echo "  ⚡ Fast mode — peer review skipped" >&2
+  fi
 fi
 
 # SYNTH_FINDINGS points to Claude's raw output for Voice RAG category detection.
@@ -2108,8 +2112,9 @@ cp "$CLAUDE_OUT" "$SYNTH_FINDINGS"
 # STEP 4.5: CROSS-VERIFICATION PASS (kill false positives)
 # For each finding, Haiku verifies against diff context + RAG + learned patterns.
 # Drops FALSE_POSITIVE findings. Tags LIKELY findings with lower confidence.
+# Skipped in re-reviews: incremental scope already limits false positive surface.
 # ============================================================
-if [ "$FAST_MODE" != "true" ]; then
+if [ "$FAST_MODE" != "true" ] && [ "$IS_REREVIEW" != "true" ]; then
   spinner_start "Verifying findings (reducing false positives)..."
 
   VERIFY_PROMPT=$(mktemp -t "pr-${PR_NUMBER}-verify.XXXXXX")

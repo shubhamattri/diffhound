@@ -37,10 +37,15 @@ jobs:
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
+          PR_ACTION: ${{ github.event.action }}
         run: |
           FAST_FLAG=""
           AUTO_FLAG=""
           if [ "${{ inputs.fast_mode }}" = "true" ]; then
+            FAST_FLAG="--fast"
+          fi
+          # Re-reviews (synchronize = new push) always use --fast to avoid whack-a-mole
+          if [ "$PR_ACTION" = "synchronize" ]; then
             FAST_FLAG="--fast"
           fi
           if [ "${{ inputs.auto_post }}" = "true" ]; then
