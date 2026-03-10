@@ -1,0 +1,57 @@
+# Reusable Diffhound review workflow
+# Usage in any repo:
+#   jobs:
+#     review:
+#       uses: shubhamattri/diffhound/.github/workflows/review.yml@main
+#       secrets: inherit
+
+name: Diffhound Code Review
+
+on:
+  workflow_call:
+    inputs:
+      fast_mode:
+        description: "Skip peer review (Codex+Gemini)"
+        required: false
+        default: false
+        type: boolean
+      auto_post:
+        description: "Post review without manual approval"
+        required: false
+        default: true
+        type: boolean
+    secrets:
+      DIFFHOUND_SSH_KEY:
+        description: "SSH key for the Diffhound review VM"
+        required: true
+      DIFFHOUND_HOST:
+        description: "Hostname/IP of the Diffhound review VM"
+        required: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - name: Trigger Diffhound review
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          FAST_FLAG=""
+          AUTO_FLAG=""
+          if [ "${{ inputs.fast_mode }}" = "true" ]; then
+            FAST_FLAG="--fast"
+          fi
+          if [ "${{ inputs.auto_post }}" = "true" ]; then
+            AUTO_FLAG="--auto-post"
+          fi
+
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DIFFHOUND_SSH_KEY }}" > ~/.ssh/diffhound_key
+          chmod 600 ~/.ssh/diffhound_key
+
+          ssh -o StrictHostKeyChecking=no \
+            -i ~/.ssh/diffhound_key \
+            ubuntu@${{ secrets.DIFFHOUND_HOST }} \
+            "cd /home/ubuntu/diffhound && bash lib/review.sh ${PR_NUMBER} --repo ${REPO} ${AUTO_FLAG} ${FAST_FLAG}"

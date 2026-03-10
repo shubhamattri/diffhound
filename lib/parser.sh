@@ -1,13 +1,42 @@
 #!/bin/bash
 # diffhound — output parsing & comment extraction
-# Extracts FINDING blocks, COMMENT/REPLY lines, and summary from LLM output
+# Supports JSON structured output (primary) with regex fallback
 
-# Extract inline comments from structured review output
-# Joins multi-line comment bodies using Unit Separator (\x1f)
+# Extract JSON block from LLM output (between ```json and ```)
+_extract_json() {
+  local file="$1"
+  sed -n '/^```json/,/^```/{/^```/d;p;}' "$file" 2>/dev/null
+}
+
+# Parse findings from structured review output
+# Primary: JSON parsing via jq
+# Fallback: regex extraction of COMMENT:/REPLY: lines
 parse_comments() {
   local structured_file="$1"
   local comments_file="$2"
 
+  # Try JSON parsing first
+  local json_content
+  json_content=$(_extract_json "$structured_file")
+
+  if [ -n "$json_content" ] && echo "$json_content" | jq -e '.findings' >/dev/null 2>&1; then
+    # JSON mode — extract findings as COMMENT: lines
+    # Join multi-line bodies with Unit Separator (\x1f) to preserve them on one line
+    echo "$json_content" | jq -r '
+      .findings[] |
+      "COMMENT: \(.file):\(.line):\(.severity) — \(.body | gsub("\n"; "\u001f"))"
+    ' > "$comments_file" 2>/dev/null || true
+
+    # Thread statuses go into summary, not as duplicate inline comments.
+    # STILL_OPEN/AUTHOR_WRONG threads will be handled by the re-review
+    # reply logic in review.sh which matches against existing comment IDs.
+
+    # Save parsed JSON for downstream use (verification pass, confidence scores)
+    echo "$json_content" > "${structured_file}.json"
+    return 0
+  fi
+
+  # Fallback: regex-based parsing (backward compatible)
   if grep -q "INLINE_COMMENTS_START" "$structured_file"; then
     sed -n '/INLINE_COMMENTS_START/,/INLINE_COMMENTS_END/p' "$structured_file" | \
       awk '
@@ -25,7 +54,7 @@ parse_comments() {
         END { if (buf != "") print buf }
       ' > "${comments_file}.raw" || true
 
-    # Post-processing: drop lint nits (trailing newlines, blank lines, whitespace, import order)
+    # Post-processing: drop lint nits
     grep -viE '(trailing newline|missing newline|extra blank line|end of file|trailing whitespace|import order|file.ending|no newline at end)' \
       "${comments_file}.raw" > "$comments_file" 2>/dev/null || \
       cp "${comments_file}.raw" "$comments_file"
@@ -40,6 +69,34 @@ parse_summary() {
   local structured_file="$1"
   local summary_file="$2"
 
+  # Try JSON parsing first
+  local json_content
+  json_content=$(_extract_json "$structured_file")
+
+  if [ -n "$json_content" ] && echo "$json_content" | jq -e '.summary' >/dev/null 2>&1; then
+    # Build summary from JSON
+    {
+      echo "$json_content" | jq -r '.summary'
+      echo ""
+      echo "## Scorecard"
+      echo "| Category | Score | Notes |"
+      echo "|----------|-------|-------|"
+      echo "$json_content" | jq -r '
+        .scorecard | to_entries[] |
+        "| \(.key | gsub("_"; " ") | ascii_upcase) (\(.value.max)%) | \(.value.score)/\(.value.max) | \(.value.reason) |"
+      '
+      local total verdict
+      total=$(echo "$json_content" | jq -r '.score')
+      verdict=$(echo "$json_content" | jq -r '.verdict')
+      echo "| **Total** | **${total}/100** | **${verdict}** |"
+      echo ""
+      echo "## Verification & Test Checklist"
+      echo "$json_content" | jq -r '(.checklist // [])[] | "- [ ] \(.)"'
+    } > "$summary_file"
+    return 0
+  fi
+
+  # Fallback: regex-based
   if grep -q "SUMMARY_START" "$structured_file"; then
     sed -n '/SUMMARY_START/,/SUMMARY_END/p' "$structured_file" | \
       grep -v "SUMMARY_START" | grep -v "SUMMARY_END" > "$summary_file"
@@ -53,6 +110,16 @@ parse_verdict() {
   local summary_file="$1"
   local comments_file="$2"
   local verdict=""
+
+  # Method 0: Check for parsed JSON
+  local json_file="${comments_file%.comments}.json"
+  if [ -f "$json_file" ]; then
+    verdict=$(jq -r '.verdict // empty' "$json_file" 2>/dev/null || true)
+    if [ -n "$verdict" ]; then
+      echo "$verdict" | tr '[:lower:]' '[:upper:]'
+      return
+    fi
+  fi
 
   # Method 1: Extract verdict word from scorecard **Total** row
   verdict=$(grep -i '\*\*Total\*\*' "$summary_file" | grep -oiE 'REQUEST_CHANGES|APPROVE|COMMENT' | head -1 || true)
@@ -134,4 +201,12 @@ snap_to_diff_line() {
 strip_severity_label() {
   local text="$1"
   printf '%s' "$text" | sed -e 's/^[A-Z][A-Z_-]* [—–-] *//' -e "s/^[A-Z][A-Z_-]*$(printf '\x1f')//" | tr $'\x1f' '\n'
+}
+
+# Extract confidence scores from parsed JSON for verification pass
+# Returns: file:line:confidence (one per line)
+get_confidence_scores() {
+  local json_file="$1"
+  [ -f "$json_file" ] || return 0
+  jq -r '.findings[] | "\(.file):\(.line):\(.confidence // 0.5)"' "$json_file" 2>/dev/null || true
 }

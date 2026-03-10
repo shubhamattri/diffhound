@@ -6,7 +6,7 @@
 # Allow calling from inside a Claude Code session
 unset CLAUDECODE 2>/dev/null || true
 
-set -euo pipefail
+set -uo pipefail
 IFS=$'\n\t'
 
 # ── Resolve lib directory ────────────────────────────────────
@@ -22,6 +22,28 @@ source "${LIB_DIR}/github.sh"
 # ── Verify dependencies ─────────────────────────────────────
 _check_deps
 
+# ── Health check — verify critical tools before starting ─────
+_health_check() {
+  local errors=0
+  if \! gh auth status >/dev/null 2>&1; then
+    echo "Error: gh not authenticated. Run: gh auth login" >&2
+    errors=$((errors + 1))
+  fi
+  if \! command -v jq >/dev/null 2>&1; then
+    echo "Error: jq not found" >&2
+    errors=$((errors + 1))
+  fi
+  local disk_avail
+  disk_avail=$(df -m /tmp 2>/dev/null | awk "NR==2{print \$4}" || echo "999999")
+  if [ "${disk_avail:-0}" -lt 100 ]; then
+    echo "Error: Less than 100MB free in /tmp" >&2
+    errors=$((errors + 1))
+  fi
+  return $errors
+}
+
+_health_check || exit 1
+
 PR_NUMBER="${1:-}"
 AUTO_POST=false
 FAST_MODE=false
@@ -30,26 +52,63 @@ FAST_MODE=false
 REPO_PATH="${REVIEW_REPO_PATH:-}"
 REVIEWER_LOGIN="${REVIEW_LOGIN:-}"
 
+# Resolve repo path from --repo flag or env var
+if [ -n "$REPO_ARG" ]; then
+  _REPO_OWNER="${REPO_ARG%%/*}"
+  _REPO_NAME="${REPO_ARG##*/}"
+  _REPO_DIR="$HOME/repos/${_REPO_OWNER}/${_REPO_NAME}"
+
+  if [ ! -d "$_REPO_DIR/.git" ]; then
+    echo "  Cloning ${REPO_ARG}..."
+    mkdir -p "$HOME/repos/${_REPO_OWNER}"
+    if ! git clone --depth=50 "https://github.com/${REPO_ARG}.git" "$_REPO_DIR" 2>&1; then
+      echo "Error: Failed to clone ${REPO_ARG}" >&2
+      exit 1
+    fi
+  else
+    # Pull latest
+    (cd "$_REPO_DIR" && git fetch --all --prune -q && git pull -q 2>/dev/null || true)
+  fi
+
+  REPO_PATH="$_REPO_DIR"
+  # Derive reviewer login from gh if not set
+  [ -z "$REVIEWER_LOGIN" ] && REVIEWER_LOGIN=$(gh api user --jq '.login' 2>/dev/null || echo "")
+fi
+
 if [ -z "$REPO_PATH" ] || [ -z "$REVIEWER_LOGIN" ]; then
-  echo "Error: REVIEW_REPO_PATH and REVIEW_LOGIN must be set." >&2
+  echo "Error: REVIEW_REPO_PATH and REVIEW_LOGIN must be set (or use --repo owner/name)." >&2
   echo "  export REVIEW_REPO_PATH=\"\$HOME/path/to/your/repo\"" >&2
   echo "  export REVIEW_LOGIN=\"your-github-username\"" >&2
+  echo "  Or: $0 <PR_NUMBER> --repo owner/name" >&2
   exit 1
 fi
 
 if [ -z "$PR_NUMBER" ]; then
-  echo "Usage: $0 <PR_NUMBER> [--auto-post] [--fast]"
+  echo "Usage: $0 <PR_NUMBER> [--auto-post] [--fast] [--repo owner/name]"
   exit 1
 fi
 
 LEARN_MODE=false
+
+REPO_ARG=""
 
 for _arg in "${@:2}"; do
   case "$_arg" in
     --auto-post) AUTO_POST=true ;;
     --fast)      FAST_MODE=true ;;
     --learn)     LEARN_MODE=true ;;
+    --repo=*)    REPO_ARG="${_arg#--repo=}" ;;
+    --repo)      ;; # value captured by next iteration hack below
   esac
+done
+
+# Handle --repo value (positional after flag)
+_prev=""
+for _arg in "${@:2}"; do
+  if [ "$_prev" = "--repo" ]; then
+    REPO_ARG="$_arg"
+  fi
+  _prev="$_arg"
 done
 
 if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
@@ -59,8 +118,154 @@ fi
 
 cd "$REPO_PATH" || { echo "Error: Cannot cd to $REPO_PATH" >&2; exit 1; }
 
+# ============================================================
+# STEP 0: LOAD REPO CONFIG (.diffhound.yml or .diffhound.md)
+# ============================================================
+DIFFHOUND_CONFIG=""
+DIFFHOUND_PRIORITIES=""
+DIFFHOUND_IGNORE=""
+DIFFHOUND_SKIP_FILES=""
+DIFFHOUND_CONTEXT=""
+DIFFHOUND_SEVERITY_OVERRIDES=""
+
+_load_repo_config() {
+  local config_file=""
+  if [ -f "$REPO_PATH/.diffhound.yml" ]; then
+    config_file="$REPO_PATH/.diffhound.yml"
+  elif [ -f "$REPO_PATH/.diffhound.yaml" ]; then
+    config_file="$REPO_PATH/.diffhound.yaml"
+  elif [ -f "$REPO_PATH/.diffhound.md" ]; then
+    # Markdown config — inject as-is into prompt context
+    DIFFHOUND_CONTEXT=$(cat "$REPO_PATH/.diffhound.md" 2>/dev/null)
+    echo "  📋 Loaded .diffhound.md config"
+    return 0
+  fi
+
+  [ -z "$config_file" ] && return 0
+
+  DIFFHOUND_CONFIG="$config_file"
+
+  # Parse with python3 (yaml) or yq if available
+  if command -v python3 >/dev/null 2>&1 && python3 -c "import yaml" 2>/dev/null; then
+    # Extract each section via python3 inline
+    DIFFHOUND_PRIORITIES=$(python3 -c "
+import yaml, sys
+try:
+    with open('$config_file') as f:
+        cfg = yaml.safe_load(f)
+    review = cfg.get('review', {})
+    for p in review.get('priorities', []):
+        print(p)
+except: pass
+" 2>/dev/null || true)
+
+    DIFFHOUND_IGNORE=$(python3 -c "
+import yaml, sys
+try:
+    with open('$config_file') as f:
+        cfg = yaml.safe_load(f)
+    review = cfg.get('review', {})
+    for i in review.get('ignore', []):
+        print(i)
+except: pass
+" 2>/dev/null || true)
+
+    DIFFHOUND_SKIP_FILES=$(python3 -c "
+import yaml, sys
+try:
+    with open('$config_file') as f:
+        cfg = yaml.safe_load(f)
+    review = cfg.get('review', {})
+    for s in review.get('skip_files', []):
+        print(s)
+except: pass
+" 2>/dev/null || true)
+
+    DIFFHOUND_CONTEXT=$(python3 -c "
+import yaml, sys
+try:
+    with open('$config_file') as f:
+        cfg = yaml.safe_load(f)
+    review = cfg.get('review', {})
+    ctx = review.get('context', '')
+    if ctx: print(ctx)
+except: pass
+" 2>/dev/null || true)
+
+    DIFFHOUND_SEVERITY_OVERRIDES=$(python3 -c "
+import yaml, json, sys
+try:
+    with open('$config_file') as f:
+        cfg = yaml.safe_load(f)
+    review = cfg.get('review', {})
+    sev = review.get('severity', {})
+    if sev: print(json.dumps(sev))
+except: pass
+" 2>/dev/null || true)
+
+    echo "  📋 Loaded config from $config_file"
+  elif command -v yq >/dev/null 2>&1; then
+    DIFFHOUND_PRIORITIES=$(yq -r '.review.priorities[]?' "$config_file" 2>/dev/null || true)
+    DIFFHOUND_IGNORE=$(yq -r '.review.ignore[]?' "$config_file" 2>/dev/null || true)
+    DIFFHOUND_SKIP_FILES=$(yq -r '.review.skip_files[]?' "$config_file" 2>/dev/null || true)
+    DIFFHOUND_CONTEXT=$(yq -r '.review.context // ""' "$config_file" 2>/dev/null || true)
+    echo "  📋 Loaded config from $config_file (via yq)"
+  else
+    echo "  ⚠ .diffhound.yml found but no yaml parser available. Install: pip3 install pyyaml OR brew install yq" >&2
+  fi
+}
+
+_load_repo_config
+
+# Apply skip_files filter to diff if configured
+_filter_diff_by_config() {
+  local diff_file="$1"
+  [ -z "$DIFFHOUND_SKIP_FILES" ] && return 0
+
+  local filtered_diff
+  filtered_diff=$(mktemp -t "pr-filtered-diff.XXXXXX")
+  local skip_pattern=""
+  while IFS= read -r skip; do
+    [ -z "$skip" ] && continue
+    # Convert glob to regex (basic: ** -> .*, * -> [^/]*)
+    local regex
+    regex=$(printf '%s' "$skip" | sed 's/\./\./g; s/\*\*/DOUBLESTAR/g; s/\*/[^\/]*/g; s/DOUBLESTAR/.*/g')
+    if [ -z "$skip_pattern" ]; then
+      skip_pattern="$regex"
+    else
+      skip_pattern="${skip_pattern}|${regex}"
+    fi
+  done <<< "$DIFFHOUND_SKIP_FILES"
+
+  if [ -n "$skip_pattern" ]; then
+    # Filter out diff hunks for matching files
+    if awk -v pattern="$skip_pattern" '
+      /^diff --git/ {
+        split($0, parts, " b/")
+        file = parts[2]
+        if (match(file, pattern)) { skip = 1 } else { skip = 0 }
+      }
+      !skip { print }
+    ' "$diff_file" > "$filtered_diff" 2>/dev/null; then
+      if [ -s "$filtered_diff" ]; then
+        mv "$filtered_diff" "$diff_file"
+      else
+        echo "  Warning: skip_files matched ALL files - using unfiltered diff" >&2
+        rm -f "$filtered_diff"
+      fi
+    else
+      echo "  Warning: skip_files filter failed - using unfiltered diff" >&2
+      rm -f "$filtered_diff"
+    fi
+  else
+    rm -f "$filtered_diff"
+  fi
+}
+
 # ── Review cache directory (persistent across runs) ─────────
-REVIEW_CACHE_DIR="$HOME/.diffhound/cache"
+# Per-repo cache directory
+_CACHE_REPO_ID=$(cd "$REPO_PATH" && gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null | tr '/' '-' || basename "$REPO_PATH")
+REVIEW_CACHE_DIR="$HOME/.diffhound/cache/${_CACHE_REPO_ID}"
 mkdir -p "$REVIEW_CACHE_DIR"
 
 # ── --learn: Feedback loop — learn from edited/deleted GitHub comments ──────
@@ -506,16 +711,28 @@ REVIEW_SUMMARY=$(mktemp -t "pr-${PR_NUMBER}-summary.XXXXXX")
 REVIEW_JSON=$(mktemp -t "pr-${PR_NUMBER}-review.XXXXXX")
 
 cleanup() {
-  [ -n "$_spinner_pid" ] && kill "$_spinner_pid" 2>/dev/null && wait "$_spinner_pid" 2>/dev/null || true
+  local exit_code=$?
+  [ -n "${_spinner_pid:-}" ] && kill "$_spinner_pid" 2>/dev/null && wait "$_spinner_pid" 2>/dev/null || true
   _spinner_pid=""
-  rm -f "$DIFF_FILE" "$PROMPT_FILE" "$CLAUDE_OUT" "$CODEX_OUT" "$GEMINI_OUT" \
-        "${PEER_PROMPT_FILE:-}" "$SYNTH_PROMPT" "$REVIEW_STRUCTURED" "$REVIEW_SUMMARY" \
-        "$REVIEW_JSON" "${REVIEW_STRUCTURED}.comments" "${REVIEW_STRUCTURED}.new_comments" \
-        "${REVIEW_STRUCTURED}.replies" "${SYNTH_FINDINGS:-}" "${STYLE_PROMPT:-}" \
+  rm -f "${DIFF_FILE:-}" "${PROMPT_FILE:-}" "${CLAUDE_OUT:-}" "${CODEX_OUT:-}" "${GEMINI_OUT:-}" \
+        "${PEER_PROMPT_FILE:-}" "${SYNTH_PROMPT:-}" "${REVIEW_STRUCTURED:-}" "${REVIEW_SUMMARY:-}" \
+        "${REVIEW_JSON:-}" "${REVIEW_STRUCTURED:-}.comments" "${REVIEW_STRUCTURED:-}.new_comments" \
+        "${REVIEW_STRUCTURED:-}.replies" "${SYNTH_FINDINGS:-}" "${STYLE_PROMPT:-}" \
         "${EXISTING_COMMENTS_FILE:-}" "${EXISTING_REVIEWS_FILE:-}" "${THREADS_SUMMARY_FILE:-}" \
-        "${INCREMENTAL_DIFF_FILE:-}" "${INCREMENTAL_FILES_LIST:-}"
+        "${INCREMENTAL_DIFF_FILE:-}" "${INCREMENTAL_FILES_LIST:-}" \
+        "${_USER_TMP:-}" "${VOICE_EXAMPLES_FILE:-}" "${RAG_CONTEXT_FILE:-}" \
+        "${VERIFY_PROMPT:-}" "${VERIFY_OUT:-}"
+
+  # Post failure comment if review crashed mid-way
+  if [ "$exit_code" -ne 0 ] && [ -n "${REPO_OWNER:-}" ] && [ -n "${REPO_NAME:-}" ] && [ -n "${PR_NUMBER:-}" ]; then
+    gh api --method POST \
+      -H "Accept: application/vnd.github+json" \
+      "/repos/${REPO_OWNER}/${REPO_NAME}/issues/${PR_NUMBER}/comments" \
+      -f "body=Diffhound review failed (exit code $exit_code). Check logs on the review VM." \
+      >/dev/null 2>&1 || true
+  fi
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
 
 # ============================================================
 # STEP 0.5: FETCH EXISTING COMMENTS & DETECT RE-REVIEW MODE
@@ -596,6 +813,7 @@ if ! $_TIMEOUT_CMD 300 gh pr diff "$PR_NUMBER" > "$DIFF_FILE" 2>&1; then
   spinner_fail "Failed to fetch diff"
   exit 1
 fi
+_filter_diff_by_config "$DIFF_FILE"
 DIFF_SIZE=$(wc -c < "$DIFF_FILE")
 if [ "$DIFF_SIZE" -gt 150000 ]; then
   spinner_stop "Diff fetched (large: ${DIFF_SIZE} bytes — focused review)"
@@ -901,48 +1119,65 @@ Verdict is severity-based, NOT score-based:
 
 # REQUIRED OUTPUT FORMAT
 
-Output each finding as a FINDING block. One block per issue. Be thorough but only flag real issues.
-
-### FINDINGS_START
-FINDING: file/path.ts:LINE:SEVERITY
+You MUST output valid JSON. No text before or after the JSON block. Wrap in ```json fences.
 
 LINE NUMBER RULES (critical — wrong lines cause GitHub to reject the comment):
 - LINE must be a line number from the \`+\` side of the diff (i.e. a line shown with \`+\` prefix or unchanged context line inside a hunk)
 - Count from the \`@@ +NEW,count @@\` hunk header to find the correct line number
-- NEVER approximate or guess a line number — if you can't find the exact \`+\` line, use the nearest \`+\` line in the same hunk
+- NEVER approximate or guess a line number — if you can\'t find the exact \`+\` line, use the nearest \`+\` line in the same hunk
 - Only comment on lines that appear in the diff — never reference lines outside diff hunks
 
-WHAT: [One sentence: what is wrong]
-EVIDENCE: [What in the diff proves it — reference specific lines, function names, variable names]
-IMPACT: [What breaks in production if this is not fixed]
-OPTIONS:
-1. [Concrete fix option 1]
-2. [Concrete fix option 2, if applicable]
-3. [Fallback option, if applicable]
-UNVERIFIABLE: [yes/no — if yes, what staging command would verify it]
-### FINDINGS_END
-
-### SCORECARD_START
-Security: X/25 — [reason]
-Tests: X/20 — [reason]
-Observability: X/10 — [reason]
-Performance: X/15 — [reason]
-Readability: X/15 — [reason]
-Compatibility: X/15 — [reason]
-Total: X/100 — REQUEST_CHANGES|APPROVE|COMMENT (verdict from severity: any BLOCKING → REQUEST_CHANGES, SHOULD-FIX only → COMMENT, NITs only/clean → APPROVE)
-
-Blocking: [file:line, file:line, or NONE]
-ShouldFix: [file:line, file:line, or NONE]
-Nits: [file:line, file:line, or NONE]
-Checklist: [staging commands or verification steps needed before merge]
-### SCORECARD_END
+```json
+{
+  "summary": "Overall PR assessment in 1-2 sentences",
+  "verdict": "REQUEST_CHANGES | COMMENT | APPROVE",
+  "score": 72,
+  "scorecard": {
+    "security": {"score": 20, "max": 25, "reason": "..."},
+    "tests": {"score": 15, "max": 20, "reason": "..."},
+    "observability": {"score": 8, "max": 10, "reason": "..."},
+    "performance": {"score": 12, "max": 15, "reason": "..."},
+    "readability": {"score": 13, "max": 15, "reason": "..."},
+    "compatibility": {"score": 14, "max": 15, "reason": "..."}
+  },
+  "findings": [
+    {
+      "file": "src/api/claims.ts",
+      "line": 45,
+      "severity": "BLOCKING",
+      "confidence": 0.92,
+      "title": "SQL injection via unsanitized input",
+      "body": "The claimId parameter is interpolated directly into the query string...",
+      "evidence": "Line 45: db.raw(SELECT * FROM claims WHERE id = ${claimId})",
+      "impact": "Attacker can execute arbitrary SQL via claimId parameter",
+      "suggestion": "Use parameterized query: db.raw('SELECT * FROM claims WHERE id = ?', [claimId])",
+      "options": ["Use parameterized query", "Use Knex query builder .where()"],
+      "unverifiable": false
+    }
+  ],
+  "thread_statuses": [
+    {
+      "file": "path/to/file.ts",
+      "line": 10,
+      "status": "RESOLVED | STILL_OPEN | AUTHOR_WRONG | RESOLVED_BY_EXPLANATION | NO_RESPONSE",
+      "original_concern": "...",
+      "evidence": "...",
+      "author_reply": "...",
+      "reviewer_verdict": "..."
+    }
+  ],
+  "checklist": ["Run staging test for X", "Verify Y in prod"]
+}
+```
 
 FINDING RULES:
 - Only include findings for issues tied to a SPECIFIC line number visible in the diff
 - LINE must be a line visible in the diff as a \`+\` line (added or modified). Never approximate.
 - Use the EXACT file path from the diff
 - Do NOT include findings for things that look good
-- If uncertain after reading surrounding context: mark UNVERIFIABLE: yes
+- If uncertain after reading surrounding context: set unverifiable to true and explain in body
+- confidence: 0.0-1.0 (how certain are you this is a real issue, not a false positive)
+- thread_statuses: only include in re-review mode, otherwise empty array
 
 # SCOPE DISCIPLINE (CRITICAL — violations of these rules waste developer time)
 
@@ -1099,6 +1334,46 @@ fi
 
 cat "$DIFF_FILE" >> "$PROMPT_FILE"
 
+# Append repo config context if available
+if [ -n "$DIFFHOUND_CONTEXT" ]; then
+  cat >> "$PROMPT_FILE" << CONFIG_HEADER
+
+---
+
+# REPO-SPECIFIC CONTEXT (from .diffhound.yml)
+# This is project-level context the team has provided. Use it to understand patterns and conventions.
+
+${DIFFHOUND_CONTEXT}
+
+CONFIG_HEADER
+fi
+
+if [ -n "$DIFFHOUND_PRIORITIES" ]; then
+  {
+    echo ""
+    echo "# REPO-SPECIFIC PRIORITIES (from .diffhound.yml)"
+    echo "Pay extra attention to these areas:"
+    while IFS= read -r _p; do
+      [ -z "$_p" ] && continue
+      echo "- $_p"
+    done <<< "$DIFFHOUND_PRIORITIES"
+    echo ""
+  } >> "$PROMPT_FILE"
+fi
+
+if [ -n "$DIFFHOUND_IGNORE" ]; then
+  {
+    echo ""
+    echo "# REPO-SPECIFIC IGNORE RULES (from .diffhound.yml)"
+    echo "Do NOT flag the following — the team has explicitly deprioritized them:"
+    while IFS= read -r _ig; do
+      [ -z "$_ig" ] && continue
+      echo "- $_ig"
+    done <<< "$DIFFHOUND_IGNORE"
+    echo ""
+  } >> "$PROMPT_FILE"
+fi
+
 # Append RAG context if available
 if [ -s "$RAG_CONTEXT_FILE" ]; then
   cat >> "$PROMPT_FILE" << RAG_HEADER
@@ -1127,14 +1402,14 @@ spinner_start "Analyzing code (pass 1/${_TOTAL_PASSES})......"
 _SAVED_API_KEY="${ANTHROPIC_API_KEY:-}"
 unset ANTHROPIC_API_KEY
 
-if ! claude -p \
+if ! $_TIMEOUT_CMD 300 claude -p \
     --allowedTools "Read,Bash" \
     --add-dir "$REPO_PATH" \
     --dangerously-skip-permissions \
     --output-format text \
     < "$PROMPT_FILE" > "$CLAUDE_OUT" 2>&1; then
   spinner_fail "Agentic pass failed — falling back to standard analysis"
-  if ! claude -p < "$PROMPT_FILE" > "$CLAUDE_OUT" 2>&1; then
+  if ! $_TIMEOUT_CMD 180 claude -p --output-format text < "$PROMPT_FILE" > "$CLAUDE_OUT" 2>&1; then
     spinner_fail "Analysis failed"
     cat "$CLAUDE_OUT" >&2
     export ANTHROPIC_API_KEY="$_SAVED_API_KEY"
@@ -1206,6 +1481,183 @@ fi
 # The actual merge (in normal mode) happens in the combined Pass 3+4 curl call below.
 SYNTH_FINDINGS=$(mktemp -t "pr-${PR_NUMBER}-findings.XXXXXX")
 cp "$CLAUDE_OUT" "$SYNTH_FINDINGS"
+
+# ============================================================
+# STEP 4.5: CROSS-VERIFICATION PASS (kill false positives)
+# For each finding, Haiku verifies against diff context + RAG + learned patterns.
+# Drops FALSE_POSITIVE findings. Tags LIKELY findings with lower confidence.
+# ============================================================
+if [ "$FAST_MODE" != "true" ]; then
+  spinner_start "Verifying findings (reducing false positives)..."
+
+  VERIFY_PROMPT=$(mktemp -t "pr-${PR_NUMBER}-verify.XXXXXX")
+  VERIFY_OUT=$(mktemp -t "pr-${PR_NUMBER}-verify-out.XXXXXX")
+
+  # Extract JSON findings from Claude output (or parse FINDING blocks)
+  _FINDINGS_JSON=""
+  _json_block=$(_extract_json "$CLAUDE_OUT" 2>/dev/null || true)
+  if [ -n "$_json_block" ] && echo "$_json_block" | jq -e '.findings' >/dev/null 2>&1; then
+    _FINDINGS_JSON="$_json_block"
+  fi
+
+  if [ -n "$_FINDINGS_JSON" ]; then
+    _FINDING_COUNT=$(echo "$_FINDINGS_JSON" | jq '.findings | length')
+
+    if [ "$_FINDING_COUNT" -gt 0 ]; then
+      # Build verification prompt with all findings + context
+      {
+        cat << 'VERIFY_SYS'
+You are a code review verifier. For each finding below, determine if it is a real issue or a false positive.
+
+For each finding, you receive:
+- The finding details (file, line, severity, body)
+- The actual diff context around the flagged line
+- Learned false positive patterns from past reviews
+
+Your job: classify each finding as VALID, LIKELY, or FALSE_POSITIVE.
+- VALID (confidence 0.85-1.0): Clear evidence in the diff/context confirms the issue
+- LIKELY (confidence 0.5-0.84): Plausible but cannot fully confirm from available context
+- FALSE_POSITIVE (confidence 0.0-0.49): The concern is unfounded, already handled, or out of scope
+
+Output valid JSON only:
+```json
+{
+  "verifications": [
+    {"index": 0, "verdict": "VALID", "confidence": 0.92, "reason": "one line reason"},
+    {"index": 1, "verdict": "FALSE_POSITIVE", "confidence": 0.15, "reason": "the guard already handles this case at line 42"}
+  ]
+}
+```
+VERIFY_SYS
+
+        echo ""
+        echo "## FINDINGS TO VERIFY"
+        echo "$_FINDINGS_JSON" | jq -r '
+          .findings | to_entries[] |
+          "### Finding \(.key): \(.value.file):\(.value.line) [\(.value.severity)]
+\(.value.title // .value.body)
+Evidence: \(.value.evidence // "none")
+"
+        '
+
+        echo ""
+        echo "## DIFF CONTEXT (around flagged lines)"
+        # For each finding, extract ±20 lines from the diff
+        echo "$_FINDINGS_JSON" | jq -r '.findings[].file' | sort -u | while read -r _vf; do
+          [ -z "$_vf" ] && continue
+          echo "### $_vf"
+          awk -v f="$_vf" '
+            /^diff --git/ { in_file = 0 }
+            /^diff --git a\// {
+              split($0, parts, " b/")
+              if (parts[2] == f) in_file = 1
+            }
+            in_file { print }
+          ' "$DIFF_FILE" 2>/dev/null | head -200
+          echo ""
+        done
+
+        # Include learned patterns for context
+        _lp_file="$HOME/.diffhound/learned-patterns.jsonl"
+        if [ -f "$_lp_file" ] && [ -s "$_lp_file" ]; then
+          echo ""
+          echo "## LEARNED FALSE POSITIVE PATTERNS (from past reviews)"
+          jq -r '.lesson' "$_lp_file" 2>/dev/null | sort -u | head -20 | while read -r _lesson; do
+            echo "- $_lesson"
+          done
+        fi
+      } > "$VERIFY_PROMPT"
+
+      # Call Haiku for verification (cheap + fast)
+      _verify_resp=""
+      if [ -n "${ANTHROPIC_API_KEY:-}" ] && [ "${_KEY_HAS_CREDITS:-false}" = "true" ]; then
+        _vj_tmp=$(mktemp -t "pr-${PR_NUMBER}-vj.XXXXXX")
+        jq -n --rawfile prompt "$VERIFY_PROMPT" '{
+          model: "claude-haiku-4-5-20251001",
+          max_tokens: 2048,
+          messages: [{role: "user", content: $prompt}]
+        }' > "$_vj_tmp"
+
+        _verify_resp=$($_TIMEOUT_CMD 60 curl -sf https://api.anthropic.com/v1/messages           -H "x-api-key: ${ANTHROPIC_API_KEY}"           -H "anthropic-version: 2023-06-01"           -H "content-type: application/json"           -d @"$_vj_tmp" 2>/dev/null || echo "")
+        rm -f "$_vj_tmp"
+        _verify_resp=$(echo "$_verify_resp" | jq -r '.content[0].text // empty' 2>/dev/null || true)
+      fi
+
+      # Fallback: claude CLI
+      if [ -z "$_verify_resp" ]; then
+        _saved_vk="${ANTHROPIC_API_KEY:-}"
+        unset ANTHROPIC_API_KEY
+        _verify_resp=$($_TIMEOUT_CMD 60 claude -p --model claude-haiku-4-5-20251001 --output-format text < "$VERIFY_PROMPT" 2>/dev/null || true)
+        [ -n "$_saved_vk" ] && export ANTHROPIC_API_KEY="$_saved_vk"
+      fi
+
+      # Parse verification results and filter findings
+      if [ -n "$_verify_resp" ]; then
+        _verify_json
+        _verify_json=$(echo "$_verify_resp" | sed -n '/^```json/,/^```/{/^```/d;p;}' 2>/dev/null || echo "$_verify_resp")
+
+        if echo "$_verify_json" | jq -e '.verifications' >/dev/null 2>&1; then
+          _dropped=0; _downgraded=0
+
+          # Build filtered findings JSON
+          _filtered_json
+          _filtered_json=$(echo "$_FINDINGS_JSON" | jq --argjson verifications "$(echo "$_verify_json" | jq '.verifications')" '
+            # Filter findings based on verification results
+            .findings = [
+              .findings | to_entries[] |
+              . as $entry |
+              # If no verification for this index, keep as-is (safe default)
+              ([$verifications[] | select(.index == $entry.key)] | first // {verdict: "VALID", confidence: 0.7}) as $v |
+              if $v.verdict == "FALSE_POSITIVE" then
+                empty
+              elif $v.verdict == "LIKELY" then
+                $entry.value + {confidence: ($v.confidence // 0.6)}
+              else
+                $entry.value + {confidence: ($v.confidence // 0.9)}
+              end
+            ] |
+            # Recalculate verdict based on remaining findings
+            if [.findings[] | select(.severity == "BLOCKING")] | length > 0 then
+              .verdict = "REQUEST_CHANGES"
+            elif [.findings[] | select(.severity == "SHOULD-FIX")] | length > 0 then
+              .verdict = "COMMENT"
+            else
+              .verdict = "APPROVE"
+            end
+          ' 2>/dev/null || echo "")
+
+          if [ -n "$_filtered_json" ] && echo "$_filtered_json" | jq -e '.findings' >/dev/null 2>&1; then
+            _dropped=$(echo "$_verify_json" | jq '[.verifications[] | select(.verdict == "FALSE_POSITIVE")] | length' 2>/dev/null || echo "0")
+            _downgraded=$(echo "$_verify_json" | jq '[.verifications[] | select(.verdict == "LIKELY")] | length' 2>/dev/null || echo "0")
+
+            # Update CLAUDE_OUT with filtered findings
+            # Rebuild the output as JSON-fenced block
+            {
+              echo '```json'
+              echo "$_filtered_json"
+              echo '```'
+            } > "$CLAUDE_OUT"
+
+            spinner_stop "Verified: ${_dropped} false positives dropped, ${_downgraded} downgraded"
+          else
+            spinner_stop "Verification parse failed — using unfiltered findings"
+          fi
+        else
+          spinner_stop "Verification output invalid — using unfiltered findings"
+        fi
+      else
+        spinner_stop "Verification call failed — using unfiltered findings"
+      fi
+    else
+      spinner_stop "No findings to verify"
+    fi
+  else
+    spinner_stop "Non-JSON output — verification skipped (will use regex fallback)"
+  fi
+
+  rm -f "$VERIFY_PROMPT" "$VERIFY_OUT" 2>/dev/null || true
+fi
+
 
 # ============================================================
 # STEP 5: VOICE RAG — retrieve matching examples by category
@@ -1533,7 +1985,7 @@ if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
     _KEY_HAS_CREDITS=true
   fi
 fi
-if [ "$_KEY_HAS_CREDITS" = "true" ]; then
+if [ "${_KEY_HAS_CREDITS:-false}" = "true" ]; then
   _JSON_TMP=$(mktemp -t "pr-${PR_NUMBER}-json.XXXXXX")
   jq -n \
     --arg system "$_STATIC_SYSTEM" \
@@ -1545,7 +1997,7 @@ if [ "$_KEY_HAS_CREDITS" = "true" ]; then
       messages: [{role: "user", content: $user}]
     }' > "$_JSON_TMP"
 
-  _API_RESP=$(curl -sf https://api.anthropic.com/v1/messages \
+  _API_RESP=$($_TIMEOUT_CMD 120 curl -sf https://api.anthropic.com/v1/messages \
     -H "x-api-key: ${ANTHROPIC_API_KEY}" \
     -H "anthropic-version: 2023-06-01" \
     -H "anthropic-beta: prompt-caching-2024-07-31" \

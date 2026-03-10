@@ -1,22 +1,23 @@
 #!/bin/bash
 # RAG Context Retriever for PR Reviews
-# Usage: ./review-rag.sh <diff_file> <repo_path> <pr_number> <reviewer_login>
+# Usage: ./rag.sh <diff_file> <repo_path> <pr_number> <reviewer_login>
 # Outputs: enriched context block to stdout (inject into Pass 1 prompt)
 #
 # What it retrieves:
-#   1. Full function context around each changed hunk (not just diff lines)
-#   2. Sibling files using the same patterns (for lateral propagation check)
-#   3. Git history for each changed file (why was this touched before?)
-#   4. Past review comments on these files (what has been flagged here before?)
-#   5. Import/dependency graph (what calls what)
+#   1. Full function context around each changed hunk (tree-sitter or fallback)
+#   2. Full file content for changed files (up to 500 lines per file)
+#   3. Callers of changed functions (git grep across repo)
+#   4. Interface/type definitions referenced by changed code
+#   5. Sibling files using the same patterns (for lateral propagation check)
+#   6. Git history for each changed file
+#   7. Past review comments on these files
+#   8. Related enums & constants
 #
-# Sections 2-5 run in parallel for speed (~5-10s faster on 5+ file PRs).
+# Context budget: 60KB max total output to stay in prompt cache sweet spot.
 
-# Note: intentionally no set -e — this is a best-effort data gathering script.
-# Partial output is fine; set -e would kill background subshells on benign failures.
 set -uo pipefail
 
-# Platform compat: macOS needs gtimeout from coreutils
+# Platform compat
 if [ "$(uname -s)" = "Darwin" ]; then
   _TIMEOUT_CMD="gtimeout"
   command -v gtimeout >/dev/null 2>&1 || _TIMEOUT_CMD="timeout"
@@ -37,7 +38,7 @@ fi
 REPO_OWNER=$(cd "$REPO_PATH" && gh repo view --json owner --jq '.owner.login' 2>/dev/null || echo "novabenefits")
 REPO_NAME=$(cd "$REPO_PATH" && gh repo view --json name --jq '.name' 2>/dev/null || echo "monorepo")
 
-# ── Extract changed files and their changed line ranges ──────────────────────
+# ── Extract changed files ────────────────────────────────────────────────────
 declare -a CHANGED_FILES=()
 CURRENT_FILE=""
 
@@ -48,18 +49,24 @@ while IFS= read -r line; do
   fi
 done < "$DIFF_FILE"
 
-# Deduplicate (guard: if no files found, exit gracefully)
 if [ "${#CHANGED_FILES[@]}" -eq 0 ]; then
   echo "# RAG CONTEXT — NO CHANGED FILES FOUND IN DIFF"
-  echo "# Diff file may be empty or in an unexpected format."
   exit 0
 fi
 CHANGED_FILES=($(printf '%s\n' "${CHANGED_FILES[@]}" | sort -u))
 
-# ── File pattern cache: decide depth per file based on past review findings ──
+# ── Extract changed function names from diff ─────────────────────────────────
+_extract_changed_functions() {
+  # Parse diff for function/method names near changed lines
+  grep -E '^\+.*\b(function|const|export|async)\s+\w+|^\+.*\w+\s*[=(]\s*(async\s*)?\(' "$DIFF_FILE" 2>/dev/null | \
+    grep -oE '\b[a-zA-Z_][a-zA-Z0-9_]*\s*[=(]' | \
+    sed 's/[=(]//g' | \
+    sort -u | head -20
+}
+
+# ── File pattern cache ───────────────────────────────────────────────────────
 _PATTERNS_FILE="$HOME/.claude/review-cache/file-patterns.json"
 
-# bash 3.2 compat: use a function instead of associative array (declare -A)
 _file_depth() {
   local file="$1"
   if [ -f "$_PATTERNS_FILE" ]; then
@@ -73,49 +80,186 @@ _file_depth() {
   echo "shallow"
 }
 
+# ── Track total output size (60KB budget) ─────────────────────────────────────
+_TOTAL_BYTES=0
+_MAX_BYTES=61440  # 60KB
+
+_check_budget() {
+  local new_content="$1"
+  local new_size=${#new_content}
+  if [ $((_TOTAL_BYTES + new_size)) -gt "$_MAX_BYTES" ]; then
+    return 1  # over budget
+  fi
+  _TOTAL_BYTES=$((_TOTAL_BYTES + new_size))
+  return 0
+}
+
+_emit() {
+  local content="$1"
+  if _check_budget "$content"; then
+    printf '%s' "$content"
+  fi
+}
+
 echo "# RAG CONTEXT — AUTO-RETRIEVED FOR THIS PR"
-echo "# This section provides additional codebase context beyond the diff."
-echo "# The reviewer should use this to verify patterns, check sibling files, and avoid false positives."
+echo "# Budget: 60KB max. Sections prioritized by review value."
 echo ""
 
-# ── 1. ENCLOSING FUNCTION CONTEXT (tree-sitter precision) ────────────────────
-# Section 1 runs first (sequential) — highest value, feeds into reviewer understanding.
-# extract-context.py extracts the exact function/method containing each changed
-# hunk instead of the first 100 lines of the file. Falls back to ±35 line window
-# if tree-sitter is not installed. 60-70% fewer tokens vs the old head -100 path.
-
+# ============================================================
+# SECTION 1: ENCLOSING FUNCTION CONTEXT (tree-sitter precision)
+# ============================================================
 DIFFHOUND_ROOT="${DIFFHOUND_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-python3 "${DIFFHOUND_ROOT}/lib/extract-context.py" "$REPO_PATH" "$DIFF_FILE" 2>/dev/null || {
-  # Hard fallback if python3 or script unavailable: show head -80 per file
-  echo "## 1. FULL FILE CONTEXT (key files — fallback mode)"
-  echo ""
+_sec1=$($_TIMEOUT_CMD 20 python3 "${DIFFHOUND_ROOT}/lib/extract-context.py" "$REPO_PATH" "$DIFF_FILE" 2>/dev/null || true)
+
+if [ -n "$_sec1" ]; then
+  _emit "$_sec1"
+else
+  # Hard fallback: head -80 per file
+  _fb=""
+  _fb+="## 1. FULL FILE CONTEXT (key files — fallback mode)"$'\n\n'
   for file in "${CHANGED_FILES[@]}"; do
     full_path="$REPO_PATH/$file"
     [ ! -f "$full_path" ] && continue
     ext="${file##*.}"
     if [[ "$ext" =~ ^(ts|tsx|vue|js|jsx|py|go|sql)$ ]]; then
       lines=$(wc -l < "$full_path" 2>/dev/null || echo 0)
-      echo "### $file ($lines lines total)"
-      head -80 "$full_path" 2>/dev/null
-      echo "  ... [full file at $full_path]"
-      echo ""
+      _fb+="### $file ($lines lines total)"$'\n'
+      _fb+="$(head -80 "$full_path" 2>/dev/null)"$'\n'
+      _fb+="  ... [full file at $full_path]"$'\n\n'
     fi
   done
-}
+  _emit "$_fb"
+fi
 
-# ── Sections 2-5 run in parallel using temp files ────────────────────────────
+# ============================================================
+# SECTION 1.5: FULL FILE CONTENT (up to 500 lines per file)
+# For files not fully covered by tree-sitter extraction
+# ============================================================
+_sec1_5=""
+_sec1_5+=$'\n'"## 1.5. FULL FILE CONTENT (changed files, up to 500 lines)"$'\n\n'
+for file in "${CHANGED_FILES[@]}"; do
+  full_path="$REPO_PATH/$file"
+  [ ! -f "$full_path" ] && continue
+  ext="${file##*.}"
+  [[ "$ext" =~ ^(ts|tsx|vue|js|jsx|py|go)$ ]] || continue
+
+  file_lines=$(wc -l < "$full_path" 2>/dev/null || echo 0)
+  if [ "$file_lines" -le 500 ]; then
+    _sec1_5+="### $file (full — $file_lines lines)"$'\n'
+    _sec1_5+='```'"$ext"$'\n'
+    _sec1_5+="$(cat "$full_path" 2>/dev/null)"$'\n'
+    _sec1_5+='```'$'\n\n'
+  else
+    # For large files, extract changed functions + ±50 lines around each hunk
+    _sec1_5+="### $file (large — $file_lines lines, showing changed regions)"$'\n'
+    _sec1_5+='```'"$ext"$'\n'
+    # Extract hunk start lines from diff for this file
+    _hunk_lines=$(awk -v f="$file" '
+      /^diff --git/ { in_file = 0 }
+      /^diff --git a\// { split($0, parts, " b/"); if (parts[2] == f) in_file = 1; else in_file = 0 }
+      in_file && /^@@ / {
+        s = $0; sub(/.*\+/, "", s); sub(/,.*/, "", s)
+        print int(s)
+      }
+    ' "$DIFF_FILE" 2>/dev/null)
+
+    for _hl in $_hunk_lines; do
+      _start=$((_hl > 50 ? _hl - 50 : 1))
+      _end=$((_hl + 50))
+      _sec1_5+="// ... lines ${_start}-${_end} ..."$'\n'
+      _sec1_5+="$(sed -n "${_start},${_end}p" "$full_path" 2>/dev/null)"$'\n'
+    done
+    _sec1_5+='```'$'\n\n'
+  fi
+done
+_emit "$_sec1_5"
+
+# ============================================================
+# SECTIONS 2-7 run in parallel using temp files
+# ============================================================
+# Write changed files to temp file for safe subshell access (avoids shell injection)
+_CHANGED_FILES_TMP=$(mktemp -t "rag-files.XXXXXX")
+printf '%s\n' "${CHANGED_FILES[@]}" > "$_CHANGED_FILES_TMP"
+
 _SEC2=$(mktemp -t "rag-sec2.XXXXXX")
 _SEC3=$(mktemp -t "rag-sec3.XXXXXX")
 _SEC4=$(mktemp -t "rag-sec4.XXXXXX")
 _SEC5=$(mktemp -t "rag-sec5.XXXXXX")
+_SEC6=$(mktemp -t "rag-sec6.XXXXXX")
+_SEC7=$(mktemp -t "rag-sec7.XXXXXX")
 
-# Each section wrapped in $_TIMEOUT_CMD to prevent any single section from hanging
+# ── Section 2: CALLERS of changed functions ──
+# Pre-extract function names for subshell use
+_CHANGED_FUNCS=$(_extract_changed_functions 2>/dev/null || true)
 
-# Section 2: Sibling files (background)
 $_TIMEOUT_CMD 15 bash -c '
-  echo "## 2. SIBLING FILES (same domain/pattern — check for lateral propagation)"
+  echo "## 2. CALLERS (who calls the changed functions)"
   echo ""
-  for file in '"$(printf "'%s' " "${CHANGED_FILES[@]}")"'; do
+  funcs="'"$_CHANGED_FUNCS"'"
+  [ -z "$funcs" ] && { echo "  (no function names extracted from diff)"; echo ""; exit 0; }
+
+  count=0
+  while IFS= read -r func; do
+    [ -z "$func" ] && continue
+    [ "$count" -ge 10 ] && break
+    callers=$(cd "'"$REPO_PATH"'" && git grep -n "$func" -- "*.ts" "*.js" "*.tsx" "*.vue" 2>/dev/null | \
+      grep -v "function ${func}\|const ${func}\|export.*${func}" | head -5 || true)
+    if [ -n "$callers" ]; then
+      echo "### Callers of \`$func\`:"
+      echo "$callers" | while IFS= read -r cl; do
+        caller_file=$(echo "$cl" | cut -d: -f1)
+        caller_line=$(echo "$cl" | cut -d: -f2)
+        # Show ±5 lines around the caller
+        start_l=$((caller_line > 5 ? caller_line - 5 : 1))
+        end_l=$((caller_line + 5))
+        echo "  $cl"
+        sed -n "${start_l},${end_l}p" "'"$REPO_PATH"'/${caller_file}" 2>/dev/null | sed "s/^/    /"
+        echo ""
+      done
+      count=$((count + 1))
+    fi
+  done <<< "$funcs"
+' > "$_SEC2" 2>/dev/null &
+_PID2=$!
+
+# Export function for subshell use
+
+# ── Section 3: INTERFACES & TYPES ──
+$_TIMEOUT_CMD 15 bash -c '
+  echo "## 3. INTERFACES & TYPES (contracts the changed code must satisfy)"
+  echo ""
+  # Extract type/interface names from the diff
+  types=$(grep -oE "(interface|type)\s+[A-Z][a-zA-Z0-9]+" "'"$DIFF_FILE"'" 2>/dev/null | \
+    awk "{print \$2}" | sort -u | head -10)
+
+  # Also look for type annotations in changed lines
+  more_types=$(grep -oE ":\s*[A-Z][a-zA-Z0-9]+[<\[\|]?" "'"$DIFF_FILE"'" 2>/dev/null | \
+    grep -oE "[A-Z][a-zA-Z0-9]+" | sort -u | head -10)
+  types=$(printf "%s\n%s" "$types" "$more_types" | sort -u | head -15)
+
+  [ -z "$types" ] && { echo "  (no type references found in diff)"; echo ""; exit 0; }
+
+  while IFS= read -r tname; do
+    [ -z "$tname" ] && continue
+    defn=$(cd "'"$REPO_PATH"'" && git grep -n "export.*\(interface\|type\)\s\+${tname}\b" -- "*.ts" "*.d.ts" 2>/dev/null | head -1 || true)
+    if [ -n "$defn" ]; then
+      def_file=$(echo "$defn" | cut -d: -f1)
+      def_line=$(echo "$defn" | cut -d: -f2)
+      echo "### $tname (defined in $def_file:$def_line)"
+      # Show the full interface/type definition (up to 30 lines)
+      end_l=$((def_line + 30))
+      sed -n "${def_line},${end_l}p" "'"$REPO_PATH"'/${def_file}" 2>/dev/null
+      echo ""
+    fi
+  done <<< "$types"
+' > "$_SEC3" 2>/dev/null &
+_PID3=$!
+
+# ── Section 4: Sibling files ──
+$_TIMEOUT_CMD 15 bash -c '
+  echo "## 4. SIBLING FILES (same domain/pattern — check for lateral propagation)"
+  echo ""
+  for file in $(cat "'"$_CHANGED_FILES_TMP"'"); do
     dir=$(dirname "$file")
     full_dir="'"$REPO_PATH"'/$dir"
     [ ! -d "$full_dir" ] && continue
@@ -129,26 +273,25 @@ $_TIMEOUT_CMD 15 bash -c '
       echo ""
     fi
   done
-' > "$_SEC2" 2>/dev/null &
-_PID2=$!
+' > "$_SEC4" 2>/dev/null &
+_PID4=$!
 
-# Section 3: Git history (background)
+# ── Section 5: Git history ──
 $_TIMEOUT_CMD 15 bash -c '
-  echo "## 3. GIT HISTORY (last 5 commits per changed file)"
+  echo "## 5. GIT HISTORY (last 5 commits per changed file)"
   echo ""
-  for file in '"$(printf "'%s' " "${CHANGED_FILES[@]}")"'; do
+  for file in $(cat "'"$_CHANGED_FILES_TMP"'"); do
     [ -f "'"$REPO_PATH"'/$file" ] || continue
     echo "### $file"
     cd "'"$REPO_PATH"'" && git log --oneline -5 -- "$file" 2>/dev/null || echo "  (no history)"
     echo ""
   done
-' > "$_SEC3" 2>/dev/null &
-_PID3=$!
+' > "$_SEC5" 2>/dev/null &
+_PID5=$!
 
-# Section 4: Past review comments (background)
-# Single API call for THIS PR's comments only (not all repo comments)
+# ── Section 6: Past review comments ──
 $_TIMEOUT_CMD 15 bash -c '
-  echo "## 4. PAST REVIEW COMMENTS (what has been flagged in these files before)"
+  echo "## 6. PAST REVIEW COMMENTS (what has been flagged in these files before)"
   echo ""
   if [ -n "'"$PR_NUMBER"'" ] && command -v gh &>/dev/null; then
     gh api "/repos/'"${REPO_OWNER}"'/'"${REPO_NAME}"'/pulls/'"${PR_NUMBER}"'/comments?per_page=100" 2>/dev/null | \
@@ -156,13 +299,12 @@ $_TIMEOUT_CMD 15 bash -c '
       "group_by(.path) | .[] | select(.[0].user.login == \$login) | \"### Past comments on \(.[0].path):\", (.[] | \"  [\(.created_at[0:10])] \(.body[0:200])\"), \"\"" \
       2>/dev/null || true
   fi
-' > "$_SEC4" 2>/dev/null &
-_PID4=$!
+' > "$_SEC6" 2>/dev/null &
+_PID6=$!
 
-# Section 5: Enum/constant files (background)
-# Use git grep (index-aware, much faster than grep -rn on large repos)
+# ── Section 7: Enums & constants ──
 $_TIMEOUT_CMD 15 bash -c '
-  echo "## 5. RELATED ENUMS & CONSTANTS (check completeness)"
+  echo "## 7. RELATED ENUMS & CONSTANTS (check completeness)"
   echo ""
   candidates=$(grep -oE "[A-Z][A-Z_]{3,}" "'"$DIFF_FILE"'" | sort -u | head -10 || true)
   if [ -n "$candidates" ]; then
@@ -175,16 +317,21 @@ $_TIMEOUT_CMD 15 bash -c '
       fi
     done <<< "$candidates"
   fi
-' > "$_SEC5" 2>/dev/null &
-_PID5=$!
+' > "$_SEC7" 2>/dev/null &
+_PID7=$!
 
-# Wait for all background sections — each has its own 15s timeout
-wait "$_PID2" "$_PID3" "$_PID4" "$_PID5" 2>/dev/null || true
+# Wait for all background sections
+wait $_PID2 $_PID3 $_PID4 $_PID5 $_PID6 $_PID7 2>/dev/null || true
 
-# Concatenate in order
-cat "$_SEC2" "$_SEC3" "$_SEC4" "$_SEC5"
+# Concatenate in priority order (callers + types first, then supporting context)
+for _secfile in "$_SEC2" "$_SEC3" "$_SEC4" "$_SEC5" "$_SEC6" "$_SEC7"; do
+  _sec_content=$(cat "$_secfile" 2>/dev/null || true)
+  if [ -n "$_sec_content" ]; then
+    _emit "$_sec_content"$'\n'
+  fi
+done
 
 # Cleanup temp files
-rm -f "$_SEC2" "$_SEC3" "$_SEC4" "$_SEC5"
+rm -f "$_SEC2" "$_SEC3" "$_SEC4" "$_SEC5" "$_SEC6" "$_SEC7"
 
 echo "# END RAG CONTEXT"
