@@ -1031,7 +1031,9 @@ _build_review_chunks() {
   : > "$_sort_tmp"
   while IFS=$'\t' read -r file prio reason; do
     [ -z "$file" ] && continue
-    [ "$prio" = "SKIP" ] && continue
+    # Safety: never fully skip files — demote SKIP to LOW so they still get reviewed
+    # (in the last chunk, with minimal priority). Haiku can misclassify.
+    [ "$prio" = "SKIP" ] && prio="LOW" && reason="demoted-from-skip: ${reason}"
     local safe_name="${file//\//_SLASH_}"
     local fsize=0
     [ -f "${file_diffs_dir}/${safe_name}" ] && fsize=$(wc -c < "${file_diffs_dir}/${safe_name}" | tr -d ' ')
@@ -1196,11 +1198,16 @@ $(cat "$chunk_out")
 ${all_findings}
 
 YOUR TASK:
-1. Deduplicate: if two chunks flag the same issue, keep the most detailed version
-2. Link cross-file findings: if chunk A mentions a function and chunk B reviews its caller, connect them
-3. Resolve CROSS_FILE_NOTES: check if concerns raised in one chunk are answered by another chunk's findings
+1. Deduplicate: if two chunks flag the same issue, keep the most detailed version. NEVER drop a finding — if in doubt, keep it.
+2. Link cross-file findings: if chunk A mentions a function and chunk B reviews its caller, create a COMBINED finding that references both files with the full evidence chain.
+3. Resolve CROSS_FILE_NOTES (CRITICAL — this is where chunking can miss bugs):
+   - For each CROSS_FILE_NOTE: search ALL other chunks for the referenced function/type/enum
+   - If chunk A says 'calls X in another file' and chunk B mentions X → link them into one finding
+   - If a cross-file concern is NOT answered by any other chunk → ELEVATE it as a finding with UNVERIFIABLE: yes
+   - Do NOT silently discard unresolved cross-file notes — they represent potential bugs the chunking missed
 4. Produce a single FINDINGS_START...FINDINGS_END block with all unique findings
 5. Produce a single SCORECARD_START...SCORECARD_END with overall scores
+6. Include a CROSS_FILE_RESOLUTION section showing how each cross-file note was resolved (or marked unverifiable)
 
 Use the same output format as the individual chunks but with a unified scorecard:
 
@@ -1448,9 +1455,9 @@ if [ "$REVIEW_TIER" = "LARGE" ] || [ "$REVIEW_TIER" = "HUGE" ]; then
   SKIP_COUNT=$(grep -c $'\tSKIP\t' "$TRIAGE_FILE" || true)
   spinner_stop "Triage complete: ${TRIAGE_COUNT} files (${CRITICAL_COUNT} critical, ${SKIP_COUNT} skipped)"
 
-  # Safety: log skipped files so user can audit — never silently drop code
+  # Safety: SKIP files are demoted to LOW (still reviewed). Log them for visibility.
   if [ "$SKIP_COUNT" -gt 0 ]; then
-    echo "  ⚠️  Skipped files (not reviewed — deletion-only or auto-generated):"
+    echo "  ℹ️  Low-priority files (triage suggested skip, demoted to LOW — still reviewed):"
     grep $'\tSKIP\t' "$TRIAGE_FILE" | while IFS=$'\t' read -r _f _p _r; do
       echo "     ↳ $_f ($_r)"
     done
