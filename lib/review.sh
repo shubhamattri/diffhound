@@ -2418,7 +2418,7 @@ if [ -f "$VOICE_JSONL" ] && [ -s "$SYNTH_FINDINGS" ]; then
     cat >> "$VOICE_EXAMPLES_FILE" << 'FALLBACK_EXAMPLES'
 ---
 EXAMPLE — security blocker:
-"🔴 this is the user's full session token right? same one used in `validateToken` at line 206. passing it to an external embed means that app gets full user-level access to our API, not just the scoped endpoints.
+"this is the user's full session token right? same one used in `validateToken` at line 206. passing it to an external embed means that app gets full user-level access to our API, not just the scoped endpoints.
 
 couple of options:
 1. generate a short-lived scoped token on backend specifically for embed operations (best option, most work)
@@ -2429,7 +2429,7 @@ lmk what u think, happy to discuss"
 
 ---
 EXAMPLE — data bug (blocking):
-"🔴 `records.end_date` is NULL for every record in prod. expiry lives in `records.meta->>'endDate'` (JSONB) — that's what `types/record.ts:559` and the portal's `isActive()` both use. filter as written will silently exclude every item after deploy.
+"`records.end_date` is NULL for every record in prod. expiry lives in `records.meta->>'endDate'` (JSONB) — that's what `types/record.ts:559` and the portal's `isActive()` both use. filter as written will silently exclude every item after deploy.
 
 also — the test mock doesn't have `innerJoin` in `mockQueryChain`, so existing tests pass but none validate that expired records are actually excluded."
 
@@ -2451,7 +2451,7 @@ These are actual comments this engineer has written. Match this voice exactly.
 
 ---
 EXAMPLE A — security blocker (large blast radius):
-"🔴 this is the user's full session token right? same one used in `validateToken` at line 206. passing it to an external embed means that app gets full user-level access to our API, not just the scoped endpoints.
+"this is the user's full session token right? same one used in `validateToken` at line 206. passing it to an external embed means that app gets full user-level access to our API, not just the scoped endpoints.
 
 couple of options:
 1. generate a short-lived scoped token on backend specifically for embed operations (best option, most work)
@@ -2470,7 +2470,7 @@ EXAMPLE C — consistency (sibling field):
 
 ---
 EXAMPLE D — data bug (blocking):
-"🔴 `records.end_date` is NULL for every record in prod. expiry lives in `records.meta->>'endDate'` (JSONB) — that's what `types/record.ts:559` and the portal's `isActive()` both use. filter as written will silently exclude every item after deploy."
+"`records.end_date` is NULL for every record in prod. expiry lives in `records.meta->>'endDate'` (JSONB) — that's what `types/record.ts:559` and the portal's `isActive()` both use. filter as written will silently exclude every item after deploy."
 
 ---
 EXAMPLE E — should-fix, missing test:
@@ -2520,8 +2520,8 @@ NEVER — SEVERITY LABELS IN COMMENT BODY (THIS IS THE #1 MISTAKE):
 - The comment BODY starts directly with the observation — no label, no prefix, no badge
 - Wrong: "BLOCKING — the guard here is too broad..."
 - Wrong: "NIT — this could be simplified..."
-- Right: "🔴 the guard here is too broad..."
-- Right: "small thing — this could be simplified..."
+- Right: "the guard here is too broad..."
+- Right: "this could be simplified..."
 
 NEVER — OTHER:
 - "Why:", "Fix:", "Impact:" as explicit labels
@@ -2535,15 +2535,14 @@ NEVER — OTHER:
 - "one suggestion —", "small thing —", "one more thing —", "typo:", or any formulaic opener — dive straight into the observation
 - Long run-on sentences — if a comment exceeds 4 lines, break it into short punchy paragraphs
 
-HOW TO OPEN EACH SEVERITY — the key rule is: start with the SUBSTANCE, not a label announcing what type of problem it is.
+HOW TO OPEN EACH SEVERITY — the key rule is: start with the SUBSTANCE, not a label announcing what type of problem it is. No emoji prefixes, no visual flags — dive straight into the observation.
 
-- BLOCKING security/data bug → "🔴 [the actual observation directly]"
-  WRONG: "🔴 security concern — the guard is too broad"  ← "security concern" is a label, not substance
-  WRONG: "🔴 wrong column — `benefits.end_date` is NULL"  ← "wrong column" is a label
-  RIGHT: "🔴 the `|| !ctx.user` check makes this fail-open. if ctx exists but user is null..."
-  RIGHT: "🔴 `benefits.end_date` is NULL for every benefit in prod. policy expiry lives in..."
-  RIGHT: "🔴 this is the user's full login token right? passing it to an external retool embed..."
-  The 🔴 is just a visual flag. What follows is the observation itself — no category noun.
+- BLOCKING security/data bug → "[the actual observation directly]"
+  WRONG: "security concern — the guard is too broad"  ← "security concern" is a label, not substance
+  WRONG: "wrong column — `benefits.end_date` is NULL"  ← "wrong column" is a label
+  RIGHT: "the `|| !ctx.user` check makes this fail-open. if ctx exists but user is null..."
+  RIGHT: "`benefits.end_date` is NULL for every benefit in prod. policy expiry lives in..."
+  RIGHT: "this is the user's full login token right? passing it to an external retool embed..."
 - BLOCKING scope/arch issue → "this feels unrelated to [PR title] — [explain the risk]"
 - SHOULD-FIX → dive straight in, no opener at all
   e.g. "no unit test covers the headless path that caused the crash..."
@@ -2599,7 +2598,7 @@ STATIC_SYS_EOF
 # ── Dynamic user message (findings + examples — not cached) ───────────────────
 _USER_TMP=$(mktemp -t "pr-${PR_NUMBER}-user.XXXXXX")
 
-_SEVERITY_RULE="CRITICAL RULE — READ FIRST: Never start a comment body with a severity label. The word BLOCKING, BLOCKER, SHOULD-FIX, or NIT must NEVER appear at the start of a comment body. It belongs only in the COMMENT: metadata tag. Correct opener for a blocking bug: '🔴 [description]'. Correct opener for a nit: dive straight into the observation, no formulaic opener. Correct opener for a should-fix: dive straight into the observation."
+_SEVERITY_RULE="CRITICAL RULE — READ FIRST: Never start a comment body with a severity label or emoji flag. The word BLOCKING, BLOCKER, SHOULD-FIX, or NIT must NEVER appear at the start of a comment body. It belongs only in the COMMENT: metadata tag. No emoji prefixes either. For ALL severities: dive straight into the observation. No formulaic opener, no visual flag."
 
 if [ "$_RUN_PEER_REVIEW" = true ]; then
   _MERGE_INSTRUCTION="Here are three engineering analyses. First merge them: use the highest severity where ≥2 models agree, discard speculative findings with no diff evidence, no attribution tags in output. Then rewrite the merged result in the engineer's voice.
