@@ -41,12 +41,13 @@ jobs:
         run: |
           FAST_FLAG=""
           AUTO_FLAG=""
+          SYNC_FLAG=""
           if [ "${{ inputs.fast_mode }}" = "true" ]; then
             FAST_FLAG="--fast"
           fi
-          # Re-reviews (synchronize = new push) always use --fast to avoid whack-a-mole
+          # Pass synchronize event type so review.sh can size-threshold the review depth
           if [ "$PR_ACTION" = "synchronize" ]; then
-            FAST_FLAG="--fast"
+            SYNC_FLAG="--synchronize"
           fi
           if [ "${{ inputs.auto_post }}" = "true" ]; then
             AUTO_FLAG="--auto-post"
@@ -59,4 +60,4 @@ jobs:
           ssh -o StrictHostKeyChecking=no \
             -i ~/.ssh/diffhound_key \
             ubuntu@${{ secrets.DIFFHOUND_HOST }} \
-            "cd /home/ubuntu/diffhound && bash lib/review.sh ${PR_NUMBER} --repo ${REPO} ${AUTO_FLAG} ${FAST_FLAG}"
+            "cd /home/ubuntu/diffhound && bash lib/review.sh ${PR_NUMBER} --repo ${REPO} ${AUTO_FLAG} ${FAST_FLAG} ${SYNC_FLAG}"

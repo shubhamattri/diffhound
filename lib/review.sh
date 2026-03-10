@@ -53,6 +53,8 @@ FAST_MODE=false
 LEARN_MODE=false
 REPO_ARG=""
 FORCE_MONOLITHIC=false
+FORCE_FULL=false
+IS_SYNCHRONIZE=false
 
 for _arg in "${@:2}"; do
   case "$_arg" in
@@ -60,6 +62,8 @@ for _arg in "${@:2}"; do
     --fast)               FAST_MODE=true ;;
     --learn)              LEARN_MODE=true ;;
     --force-monolithic)   FORCE_MONOLITHIC=true ;;
+    --force-full)         FORCE_FULL=true ;;
+    --synchronize)        IS_SYNCHRONIZE=true ;;
     --repo=*)             REPO_ARG="${_arg#--repo=}" ;;
     --repo)               ;; # value captured by next iteration hack below
   esac
@@ -1391,6 +1395,26 @@ if [ "$IS_REREVIEW" = true ] && [ -n "$LAST_REVIEWED_SHA" ]; then
   fi
 fi
 
+# Determine re-review depth based on delta size (addresses bait-and-switch scenario)
+# REREVIEW_DEPTH: "shallow" = skip peer review, "full" = run peer review with re-review prompt
+REREVIEW_DEPTH="shallow"
+if [ "$IS_REREVIEW" = true ]; then
+  _INCR_BYTES=${INCR_SIZE:-0}
+  _INCR_LINES=$(wc -l < "${INCREMENTAL_DIFF_FILE:-/dev/null}" 2>/dev/null | tr -d ' ' || echo "0")
+  # Large delta (>=10KB or >=200 lines) = full review depth — substantial changes deserve scrutiny
+  if [ "$_INCR_BYTES" -ge 10240 ] || [ "$_INCR_LINES" -ge 200 ]; then
+    REREVIEW_DEPTH="full"
+    echo "  ↻ Large re-review delta (${_INCR_BYTES}B, ${_INCR_LINES} lines) — running full peer review" >&2
+  else
+    echo "  ↻ Small re-review delta (${_INCR_BYTES}B, ${_INCR_LINES} lines) — skipping peer review" >&2
+  fi
+fi
+# --force-full overrides all re-review depth decisions
+if [ "$FORCE_FULL" = true ]; then
+  REREVIEW_DEPTH="full"
+  echo "  --force-full: overriding re-review depth to full" >&2
+fi
+
 # ============================================================
 # STEP 1: RAG CONTEXT ENRICHMENT
 # ============================================================
@@ -1992,8 +2016,15 @@ fi
 # ============================================================
 echo ""
 echo ""
+# Pass count: Claude(1) + peer(1) + cross-verify(1) + voice(1) = 4
+# Fast mode: Claude(1) + voice(1) = 2
+# Re-review shallow: Claude(1) + cross-verify(1) + voice(1) = 3
+# Re-review full: Claude(1) + peer(1) + cross-verify(1) + voice(1) = 4
 _TOTAL_PASSES=4
 [ "$FAST_MODE" = "true" ] && _TOTAL_PASSES=2
+if [ "$IS_REREVIEW" = true ] && [ "$REREVIEW_DEPTH" = "shallow" ]; then
+  _TOTAL_PASSES=3
+fi
 spinner_start "Analyzing code (pass 1/${_TOTAL_PASSES})......"
 
 # Pass 1: Claude agentic — uses Max subscription (claude.ai auth), NOT the API key.
@@ -2023,19 +2054,40 @@ spinner_stop "Pass 1 complete"
 fi  # end SMALL/MEDIUM tier monolithic path
 
 # ============================================================
-# STEP 4: PEER REVIEW — CODEX + GEMINI (skipped in --fast mode)
+# STEP 4: PEER REVIEW — CODEX + GEMINI
+# Routing: --fast → skip | fresh review → full aggressive | re-review shallow → skip | re-review full → incremental-scoped
 # ============================================================
 CODEX_CONTENT=""
 GEMINI_CONTENT=""
 
-if [ "$FAST_MODE" != "true" ] && [ "$IS_REREVIEW" != "true" ]; then
+_RUN_PEER_REVIEW=false
+_PEER_MODE="fresh"  # "fresh" = aggressive gap-hunt, "rereview" = incremental-only + softened
+
+if [ "$FAST_MODE" = "true" ]; then
+  echo "  Fast mode — peer review skipped" >&2
+elif [ "$IS_REREVIEW" = "true" ] && [ "$REREVIEW_DEPTH" = "shallow" ]; then
+  echo "  Re-review (small delta) — peer review skipped" >&2
+elif [ "$IS_REREVIEW" = "true" ] && [ "$REREVIEW_DEPTH" = "full" ]; then
+  _RUN_PEER_REVIEW=true
+  _PEER_MODE="rereview"
+  echo "  Re-review (large delta) — running scoped peer review on incremental diff" >&2
+else
+  _RUN_PEER_REVIEW=true
+  _PEER_MODE="fresh"
+fi
+
+if [ "$_RUN_PEER_REVIEW" = true ]; then
   spinner_start "Cross-checking findings (pass 2/${_TOTAL_PASSES})..."
 
   PEER_PROMPT_FILE=$(mktemp -t "pr-${PR_NUMBER}-peer.XXXXXX")
 
-  # For LARGE/HUGE: send only CRITICAL-file diffs to keep peer prompt under 30KB
+  # Determine diff content for peer review based on mode
   _PEER_DIFF_CONTENT=""
-  if [ "$REVIEW_TIER" = "LARGE" ] || [ "$REVIEW_TIER" = "HUGE" ]; then
+  if [ "$_PEER_MODE" = "rereview" ] && [ -n "${INCREMENTAL_DIFF_FILE:-}" ] && [ -s "${INCREMENTAL_DIFF_FILE:-}" ]; then
+    # Re-review: feed ONLY incremental diff to peers (Codex insight: targeted, not full)
+    _PEER_DIFF_CONTENT=$(cat "$INCREMENTAL_DIFF_FILE")
+  elif [ "$REVIEW_TIER" = "LARGE" ] || [ "$REVIEW_TIER" = "HUGE" ]; then
+    # Large fresh review: send only CRITICAL-file diffs to keep peer prompt under 30KB
     if [ -f "${TRIAGE_FILE:-}" ]; then
       _critical_files=$(grep $'\tCRITICAL\t' "$TRIAGE_FILE" | cut -f1 || true)
       if [ -n "$_critical_files" ]; then
@@ -2052,7 +2104,36 @@ if [ "$FAST_MODE" != "true" ] && [ "$IS_REREVIEW" != "true" ]; then
     _PEER_DIFF_CONTENT=$(cat "$DIFF_FILE")
   fi
 
-  cat > "$PEER_PROMPT_FILE" << PEER_EOF
+  # Build peer prompt — aggressive for fresh reviews, softened for re-reviews
+  if [ "$_PEER_MODE" = "rereview" ]; then
+    cat > "$PEER_PROMPT_FILE" << PEER_EOF
+I need a peer review of this re-review analysis. Do NOT run any tools or execute code. Text response only.
+
+## Context
+This is a RE-REVIEW of a PR after the author pushed new commits. The primary reviewer checked thread resolution and reviewed only the incremental changes. You have the incremental diff below.
+
+## Primary Analysis (FINDING blocks)
+$(cat "$CLAUDE_OUT")
+
+## Incremental Diff (changes since last review)
+${_PEER_DIFF_CONTENT}
+
+## Your Task (engineering only — no style concerns)
+1. For each BLOCKING finding: do you agree? If wrong or overstated, explain why with diff evidence.
+2. Any BLOCKING or SECURITY issues genuinely missed in the incremental diff? Reference exact file:line.
+3. Any findings rated too low or too high severity?
+4. Only flag genuinely missed issues — do not manufacture findings for completeness.
+
+## SCOPE RULES (apply these strictly)
+- ONLY comment on code CHANGED in the incremental diff above
+- Do NOT flag pre-existing patterns or issues from the original review round
+- Do NOT re-raise issues that were already flagged in the first review
+- NON-BLOCKING findings cap: max 3. BLOCKING/SECURITY findings: no cap.
+
+Respond in the same FINDING block format. Plain text. No style concerns.
+PEER_EOF
+  else
+    cat > "$PEER_PROMPT_FILE" << PEER_EOF
 I need a peer review of this engineering analysis. Do NOT run any tools or execute code. Text response only.
 
 ## Context
@@ -2068,7 +2149,7 @@ ${_PEER_DIFF_CONTENT}
 1. For each BLOCKING finding: do you agree? If wrong or overstated, explain why with diff evidence.
 2. Any BLOCKING or SHOULD-FIX issues the primary analysis missed? Reference exact file:line from diff.
 3. Any findings rated too low or too high severity?
-4. Only flag genuinely missed issues — do not manufacture findings for completeness.
+4. Assume there is at least one gap. Find it.
 
 ## SCOPE RULES (apply these strictly)
 - ONLY comment on code CHANGED in this PR (lines with + or - prefix in the diff)
@@ -2079,6 +2160,7 @@ ${_PEER_DIFF_CONTENT}
 
 Respond in the same FINDING block format. Plain text. No style concerns.
 PEER_EOF
+  fi
 
   # Run Codex in background (prompt via stdin to avoid ARG_MAX on large diffs)
   (cd "$REPO_PATH" 2>/dev/null || cd /tmp; \
@@ -2095,12 +2177,6 @@ PEER_EOF
   CODEX_CONTENT=$(cat "$CODEX_OUT")
   GEMINI_CONTENT=$(cat "$GEMINI_OUT")
   spinner_stop "Pass 2 complete"
-else
-  if [ "$IS_REREVIEW" = "true" ]; then
-    echo "  🔄 Re-review — peer review skipped (incremental focus only)" >&2
-  else
-    echo "  ⚡ Fast mode — peer review skipped" >&2
-  fi
 fi
 
 # SYNTH_FINDINGS points to Claude's raw output for Voice RAG category detection.
@@ -2112,9 +2188,10 @@ cp "$CLAUDE_OUT" "$SYNTH_FINDINGS"
 # STEP 4.5: CROSS-VERIFICATION PASS (kill false positives)
 # For each finding, Haiku verifies against diff context + RAG + learned patterns.
 # Drops FALSE_POSITIVE findings. Tags LIKELY findings with lower confidence.
-# Skipped in re-reviews: incremental scope already limits false positive surface.
+# ALWAYS runs on re-reviews — incremental diffs have HIGHER hallucination rates
+# and need the false-positive filter MORE than full diffs do.
 # ============================================================
-if [ "$FAST_MODE" != "true" ] && [ "$IS_REREVIEW" != "true" ]; then
+if [ "$FAST_MODE" != "true" ]; then
   spinner_start "Verifying findings (reducing false positives)..."
 
   VERIFY_PROMPT=$(mktemp -t "pr-${PR_NUMBER}-verify.XXXXXX")
@@ -2522,14 +2599,16 @@ STATIC_SYS_EOF
 # ── Dynamic user message (findings + examples — not cached) ───────────────────
 _USER_TMP=$(mktemp -t "pr-${PR_NUMBER}-user.XXXXXX")
 
-if [ "$FAST_MODE" = "true" ]; then
-  _MERGE_INSTRUCTION="Here is one engineering analysis. Rewrite it in the engineer's voice using the rules above.
+_SEVERITY_RULE="CRITICAL RULE — READ FIRST: Never start a comment body with a severity label. The word BLOCKING, BLOCKER, SHOULD-FIX, or NIT must NEVER appear at the start of a comment body. It belongs only in the COMMENT: metadata tag. Correct opener for a blocking bug: '🔴 [description]'. Correct opener for a nit: dive straight into the observation, no formulaic opener. Correct opener for a should-fix: dive straight into the observation."
 
-CRITICAL RULE — READ FIRST: Never start a comment body with a severity label. The word BLOCKING, BLOCKER, SHOULD-FIX, or NIT must NEVER appear at the start of a comment body. It belongs only in the COMMENT: metadata tag. Correct opener for a blocking bug: '🔴 [description]'. Correct opener for a nit: dive straight into the observation, no formulaic opener. Correct opener for a should-fix: dive straight into the observation."
-else
+if [ "$_RUN_PEER_REVIEW" = true ]; then
   _MERGE_INSTRUCTION="Here are three engineering analyses. First merge them: use the highest severity where ≥2 models agree, discard speculative findings with no diff evidence, no attribution tags in output. Then rewrite the merged result in the engineer's voice.
 
-CRITICAL RULE — READ FIRST: Never start a comment body with a severity label. The word BLOCKING, BLOCKER, SHOULD-FIX, or NIT must NEVER appear at the start of a comment body. It belongs only in the COMMENT: metadata tag. Correct opener for a blocking bug: '🔴 [description]'. Correct opener for a nit: dive straight into the observation, no formulaic opener. Correct opener for a should-fix: dive straight into the observation."
+${_SEVERITY_RULE}"
+else
+  _MERGE_INSTRUCTION="Here is one engineering analysis. Rewrite it in the engineer's voice using the rules above.
+
+${_SEVERITY_RULE}"
 fi
 
 {
@@ -2555,7 +2634,7 @@ fi
   echo "## ENGINEERING FINDINGS (Claude)"
   cat "$CLAUDE_OUT"
 
-  if [ "$FAST_MODE" != "true" ]; then
+  if [ "$_RUN_PEER_REVIEW" = true ]; then
     if [ -n "$CODEX_CONTENT" ] && [ "$CODEX_CONTENT" != "CODEX_UNAVAILABLE" ]; then
       echo ""
       echo "## CODEX FINDINGS"
