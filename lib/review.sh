@@ -1289,17 +1289,51 @@ if [ "$REVIEWER_COMMENT_COUNT" -gt 0 ]; then
     '[.[] | select(.user == $login)] | sort_by(.submitted_at) | last | .commit_id // empty' \
     "$EXISTING_REVIEWS_FILE" 2>/dev/null || echo "")
 
-  # Extract previous scorecard from the last review body for score anchoring
-  PREV_SCORECARD=""
+  # Extract previous scorecard as structured JSON for script-owned score merging
+  # Format: {"security":{"score":20,"max":25},"tests":{"score":15,"max":20},...}
+  PREV_SCORECARD_JSON=""
   _last_review_body=$(jq -r --arg login "$REVIEWER_LOGIN" \
     '[.[] | select(.user == $login)] | sort_by(.submitted_at) | last | .body // empty' \
     "$EXISTING_REVIEWS_FILE" 2>/dev/null || echo "")
 
   if [ -n "$_last_review_body" ]; then
-    # Try to extract scorecard table rows from markdown (| Category | X/Y | reason |)
-    _scorecard_lines=$(echo "$_last_review_body" | grep -E '^\|[^|]+\|[[:space:]]*[0-9]+/[0-9]+' | grep -v 'Total' || true)
-    if [ -n "$_scorecard_lines" ]; then
-      PREV_SCORECARD="$_scorecard_lines"
+    # Try to extract scorecard from JSON block in review body (hidden comment format)
+    _prev_json=$(echo "$_last_review_body" | sed -n '/^<!-- SCORECARD_JSON/,/^SCORECARD_JSON -->/p' 2>/dev/null | grep -v 'SCORECARD_JSON' || true)
+    if [ -n "$_prev_json" ] && echo "$_prev_json" | jq -e '.' >/dev/null 2>&1; then
+      PREV_SCORECARD_JSON="$_prev_json"
+    else
+      # Fallback: parse scorecard from markdown table rows
+      # Extract rows like: | SECURITY (25%) | 20/25 | reason |
+      _parsed=$(echo "$_last_review_body" | awk '
+        /^\|[^|]+\|[[:space:]]*\*?\*?[0-9]+\/[0-9]+/ && !/[Tt]otal/ {
+          split($0, cols, "|")
+          # col 2 = category, col 3 = score/max
+          cat = cols[2]; gsub(/^[ \t]+|[ \t]+$/, "", cat)
+          score_str = cols[3]; gsub(/^[ \t*]+|[ \t*]+$/, "", score_str); gsub(/\*/, "", score_str)
+          n = split(score_str, parts, "/")
+          if (n == 2 && parts[1]+0 == parts[1] && parts[2]+0 == parts[2]) {
+            # Normalize category name to lowercase key
+            key = tolower(cat)
+            gsub(/[^a-z].*/, "", key)  # "SECURITY (25%)" -> "security"
+            if (key != "") {
+              printf "%s\t%s\t%s\n", key, parts[1], parts[2]
+            }
+          }
+        }
+      ' 2>/dev/null || true)
+      if [ -n "$_parsed" ]; then
+        # Build JSON object from parsed TSV
+        PREV_SCORECARD_JSON=$(echo "$_parsed" | awk -F'\t' '
+          BEGIN { printf "{" }
+          NR > 1 { printf "," }
+          { printf "\"%s\":{\"score\":%s,\"max\":%s}", $1, $2, $3 }
+          END { printf "}" }
+        ')
+        # Validate
+        if ! echo "$PREV_SCORECARD_JSON" | jq -e '.' >/dev/null 2>&1; then
+          PREV_SCORECARD_JSON=""
+        fi
+      fi
     fi
   fi
 
@@ -1898,29 +1932,8 @@ REREVIEW_HEADER
   echo "---" >> "$PROMPT_FILE"
   echo "" >> "$PROMPT_FILE"
 
-  # Inject previous scorecard for score anchoring (prevents wild swings between reviews)
-  if [ -n "$PREV_SCORECARD" ]; then
-    {
-      echo "## SCORE ANCHORING (critical — prevents score instability)"
-      echo ""
-      echo "Your PREVIOUS scorecard for this PR:"
-      echo ""
-      echo "| Category | Score | Notes |"
-      echo "|----------|-------|-------|"
-      echo "$PREV_SCORECARD"
-      echo ""
-      echo "ANCHORING RULES:"
-      echo "- For categories where NO code changed since last review: CARRY FORWARD the previous score and reason. Do not re-evaluate."
-      echo "- For categories where code DID change: re-evaluate, but your new score must be within +/- 3 points of the previous score UNLESS you can cite a specific code change that justifies a larger delta."
-      echo "- If a BLOCKING issue was fixed: the affected category score should go UP, not down."
-      echo "- If new code introduced a problem: the affected category score should go DOWN, with evidence."
-      echo "- NEVER swing a category by more than 5 points without explicit justification tied to a specific diff line."
-      echo "- The scorecard should converge across reviews, not oscillate. A developer fixing your findings should see their score improve, not randomly change."
-      echo ""
-      echo "---"
-      echo ""
-    } >> "$PROMPT_FILE"
-  fi
+  # Score anchoring is handled POST-LLM by script-owned merging (see after CLAUDE_OUT).
+  # The LLM evaluates all categories fresh; the script clamps scores to ±5 of previous.
 
   # If incremental diff is available, add focused review instructions
   if [ -n "$INCREMENTAL_DIFF_FILE" ] && [ -s "$INCREMENTAL_DIFF_FILE" ]; then
@@ -2103,6 +2116,74 @@ if [ -n "$_json_check" ] && echo "$_json_check" | jq -e '.scorecard' >/dev/null 
     echo "  Fixing scorecard math: claimed ${_claimed_score}, actual ${_computed_score}" >&2
     _fixed_json=$(echo "$_json_check" | jq --argjson s "$_computed_score" '.score = $s')
     { echo '```json'; echo "$_fixed_json"; echo '```'; } > "$CLAUDE_OUT"
+  fi
+
+  # Embed scorecard as hidden HTML comment for reliable extraction in future re-reviews.
+  # Re-reviews will prefer this over markdown table parsing.
+  if [ "$IS_REREVIEW" != true ]; then
+    _json_check=$(_extract_json "$CLAUDE_OUT" 2>/dev/null || true)
+    _sc_compact=$(echo "$_json_check" | jq -c '.scorecard' 2>/dev/null || true)
+    if [ -n "$_sc_compact" ]; then
+      _sc_comment="<!-- SCORECARD_JSON
+${_sc_compact}
+SCORECARD_JSON -->"
+      _updated=$(echo "$_json_check" | jq --arg sc "$_sc_comment" '.summary = .summary + "\n\n" + $sc')
+      { echo '```json'; echo "$_updated"; echo '```'; } > "$CLAUDE_OUT"
+    fi
+  fi
+fi
+
+# ── Script-owned score merging for re-reviews ──────────────────
+# Instead of asking the LLM to anchor scores (unreliable), the script
+# clamps each category to ±5 of the previous review's score. This
+# prevents wild swings while still allowing meaningful score changes.
+if [ "$IS_REREVIEW" = true ] && [ -n "$PREV_SCORECARD_JSON" ]; then
+  _json_check=$(_extract_json "$CLAUDE_OUT" 2>/dev/null || true)
+  if [ -n "$_json_check" ] && echo "$_json_check" | jq -e '.scorecard' >/dev/null 2>&1; then
+    _merged_json=$(echo "$_json_check" | jq --argjson prev "$PREV_SCORECARD_JSON" '
+      .scorecard as $new |
+      reduce ($new | keys[]) as $cat ($new;
+        if $prev[$cat] then
+          .[$cat].score as $ns |
+          $prev[$cat].score as $ps |
+          if ($ns - $ps) > 5 then
+            .[$cat].score = ($ps + 5) |
+            .[$cat].reason = .[$cat].reason + " [clamped: LLM scored \($ns), prev \($ps)]"
+          elif ($ps - $ns) > 5 then
+            .[$cat].score = ($ps - 5) |
+            .[$cat].reason = .[$cat].reason + " [clamped: LLM scored \($ns), prev \($ps)]"
+          else . end
+        else . end
+      ) | { scorecard: . }
+    ' 2>/dev/null || true)
+
+    if [ -n "$_merged_json" ] && echo "$_merged_json" | jq -e '.scorecard' >/dev/null 2>&1; then
+      _new_scorecard=$(echo "$_merged_json" | jq '.scorecard')
+      _new_total=$(echo "$_new_scorecard" | jq '[.[].score] | add')
+
+      # Apply merged scorecard back to the output
+      _updated_json=$(echo "$_json_check" | jq --argjson sc "$_new_scorecard" --argjson t "$_new_total" '
+        .scorecard = $sc | .score = $t
+      ')
+
+      _old_total=$(echo "$_json_check" | jq '[.scorecard[].score] | add' 2>/dev/null || echo "?")
+      if [ "$_old_total" != "$_new_total" ]; then
+        echo "  Score merge: LLM total ${_old_total} → clamped total ${_new_total}" >&2
+        # Log which categories were clamped
+        echo "$_new_scorecard" | jq -r 'to_entries[] | select(.value.reason | test("\\[clamped")) | "    ↳ \(.key): \(.value.reason | match("\\[clamped.*\\]").string)"' 2>/dev/null >&2 || true
+      fi
+
+      # Embed previous scorecard as hidden HTML comment for next re-review extraction
+      _scorecard_comment="<!-- SCORECARD_JSON
+$(echo "$_new_scorecard" | jq -c '.')
+SCORECARD_JSON -->"
+
+      _updated_json=$(echo "$_updated_json" | jq --arg sc "$_scorecard_comment" '
+        .summary = .summary + "\n\n" + $sc
+      ')
+
+      { echo '```json'; echo "$_updated_json"; echo '```'; } > "$CLAUDE_OUT"
+    fi
   fi
 fi
 
