@@ -1,5 +1,7 @@
 #!/bin/bash
 # diffhound — AI-powered PR code review
+# Ensure ~/.local/bin is in PATH (for claude CLI installed via npm)
+export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
 # Multi-model pipeline: Claude (agentic) → Codex+Gemini (peer review) → Haiku (voice rewrite)
 # https://github.com/shubhamattri/diffhound
 
@@ -47,6 +49,27 @@ _health_check || exit 1
 PR_NUMBER="${1:-}"
 AUTO_POST=false
 FAST_MODE=false
+LEARN_MODE=false
+REPO_ARG=""
+
+for _arg in "${@:2}"; do
+  case "$_arg" in
+    --auto-post) AUTO_POST=true ;;
+    --fast)      FAST_MODE=true ;;
+    --learn)     LEARN_MODE=true ;;
+    --repo=*)    REPO_ARG="${_arg#--repo=}" ;;
+    --repo)      ;; # value captured by next iteration hack below
+  esac
+done
+
+# Handle --repo value (positional after flag)
+_prev=""
+for _arg in "${@:2}"; do
+  if [ "$_prev" = "--repo" ]; then
+    REPO_ARG="$_arg"
+  fi
+  _prev="$_arg"
+done
 
 # ── Configurable defaults (override via env vars) ────────────
 REPO_PATH="${REVIEW_REPO_PATH:-}"
@@ -88,28 +111,7 @@ if [ -z "$PR_NUMBER" ]; then
   exit 1
 fi
 
-LEARN_MODE=false
 
-REPO_ARG=""
-
-for _arg in "${@:2}"; do
-  case "$_arg" in
-    --auto-post) AUTO_POST=true ;;
-    --fast)      FAST_MODE=true ;;
-    --learn)     LEARN_MODE=true ;;
-    --repo=*)    REPO_ARG="${_arg#--repo=}" ;;
-    --repo)      ;; # value captured by next iteration hack below
-  esac
-done
-
-# Handle --repo value (positional after flag)
-_prev=""
-for _arg in "${@:2}"; do
-  if [ "$_prev" = "--repo" ]; then
-    REPO_ARG="$_arg"
-  fi
-  _prev="$_arg"
-done
 
 if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
   echo "Error: PR_NUMBER must be numeric" >&2
