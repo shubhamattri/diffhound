@@ -17,6 +17,13 @@
 
 set -uo pipefail
 
+# ── Helper functions are always defined (safe to source) ──
+# Main body only runs when invoked directly, not when sourced.
+_RAG_SOURCED=false
+if [ "${BASH_SOURCE[0]}" != "${0}" ] 2>/dev/null; then
+  _RAG_SOURCED=true
+fi
+
 # Platform compat
 if [ "$(uname -s)" = "Darwin" ]; then
   _TIMEOUT_CMD="gtimeout"
@@ -24,6 +31,12 @@ if [ "$(uname -s)" = "Darwin" ]; then
 else
   _TIMEOUT_CMD="timeout"
 fi
+
+# ── Main body: only run when invoked directly (not sourced) ──
+if [ "$_RAG_SOURCED" = true ]; then
+  # Skip to helper function definitions at the bottom
+  :
+else
 
 DIFF_FILE="${1:-}"
 REPO_PATH="${2:-}"
@@ -335,3 +348,76 @@ done
 rm -f "$_SEC2" "$_SEC3" "$_SEC4" "$_SEC5" "$_SEC6" "$_SEC7"
 
 echo "# END RAG CONTEXT"
+
+fi  # end _RAG_SOURCED guard
+
+# ── RAG Helper Functions (used by hybrid large diff strategy) ────────────────
+# These are always defined, whether sourced or invoked directly.
+
+# Filter RAG context to only sections relevant to given files.
+# Sections are delimited by "### filename" or "## N. SECTION_NAME" headers.
+# $1 = rag_context_file, $2 = manifest_file (TSV: filepath\tpriority), $3 = output_file
+_filter_rag_for_files() {
+  local rag_file="$1"
+  local manifest_file="$2"
+  local output_file="$3"
+
+  # Extract file basenames and directory names from manifest for matching
+  local match_patterns=""
+  while IFS=$'\t' read -r file _prio; do
+    [ -z "$file" ] && continue
+    local basename="${file##*/}"
+    local dirname="${file%/*}"
+    match_patterns+="${basename}|${dirname##*/}|"
+  done < "$manifest_file"
+  match_patterns="${match_patterns%|}"  # Remove trailing |
+
+  [ -z "$match_patterns" ] && { cp "$rag_file" "$output_file"; return; }
+
+  # Extract sections whose headers mention any of the relevant files/dirs
+  awk -v patterns="$match_patterns" '
+    /^##/ {
+      if (relevant) printf "%s", buf
+      buf = $0 "\n"
+      relevant = 0
+      n = split(patterns, pats, "|")
+      for (i = 1; i <= n; i++) {
+        if (index($0, pats[i]) > 0) { relevant = 1; break }
+      }
+      next
+    }
+    { buf = buf $0 "\n" }
+    END { if (relevant) printf "%s", buf }
+  ' "$rag_file" > "$output_file"
+
+  # If nothing matched, include header sections (general context)
+  if [ ! -s "$output_file" ]; then
+    head -c 15360 "$rag_file" > "$output_file"
+  fi
+}
+
+# Trim RAG context to a max byte size, cutting at section boundaries.
+# $1 = rag_file (modified in place), $2 = max_bytes
+_trim_rag() {
+  local rag_file="$1"
+  local max_bytes="${2:-40960}"
+
+  local current_size
+  current_size=$(wc -c < "$rag_file" | tr -d ' ')
+  [ "$current_size" -le "$max_bytes" ] && return
+
+  # Truncate at a section boundary (## header) nearest to max_bytes
+  local tmp
+  tmp=$(mktemp -t "rag-trim.XXXXXX")
+  head -c "$max_bytes" "$rag_file" > "$tmp"
+  # Find last section header and truncate there for clean cut
+  local last_header_line
+  last_header_line=$(grep -n '^## ' "$tmp" | tail -1 | cut -d: -f1)
+  if [ -n "$last_header_line" ] && [ "$last_header_line" -gt 5 ]; then
+    head -n "$((last_header_line - 1))" "$tmp" > "$rag_file"
+    echo "# [RAG trimmed to ${max_bytes} bytes — remaining sections omitted]" >> "$rag_file"
+  else
+    mv "$tmp" "$rag_file"
+  fi
+  rm -f "$tmp"
+}

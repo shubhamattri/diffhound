@@ -20,6 +20,7 @@ source "${LIB_DIR}/spinner.sh"
 source "${LIB_DIR}/platform.sh"
 source "${LIB_DIR}/parser.sh"
 source "${LIB_DIR}/github.sh"
+source "${LIB_DIR}/rag.sh" 2>/dev/null || true  # for _filter_rag_for_files, _trim_rag
 
 # ── Verify dependencies ─────────────────────────────────────
 _check_deps
@@ -51,14 +52,16 @@ AUTO_POST=false
 FAST_MODE=false
 LEARN_MODE=false
 REPO_ARG=""
+FORCE_MONOLITHIC=false
 
 for _arg in "${@:2}"; do
   case "$_arg" in
-    --auto-post) AUTO_POST=true ;;
-    --fast)      FAST_MODE=true ;;
-    --learn)     LEARN_MODE=true ;;
-    --repo=*)    REPO_ARG="${_arg#--repo=}" ;;
-    --repo)      ;; # value captured by next iteration hack below
+    --auto-post)          AUTO_POST=true ;;
+    --fast)               FAST_MODE=true ;;
+    --learn)              LEARN_MODE=true ;;
+    --force-monolithic)   FORCE_MONOLITHIC=true ;;
+    --repo=*)             REPO_ARG="${_arg#--repo=}" ;;
+    --repo)               ;; # value captured by next iteration hack below
   esac
 done
 
@@ -723,7 +726,9 @@ cleanup() {
         "${EXISTING_COMMENTS_FILE:-}" "${EXISTING_REVIEWS_FILE:-}" "${THREADS_SUMMARY_FILE:-}" \
         "${INCREMENTAL_DIFF_FILE:-}" "${INCREMENTAL_FILES_LIST:-}" \
         "${_USER_TMP:-}" "${VOICE_EXAMPLES_FILE:-}" "${RAG_CONTEXT_FILE:-}" \
-        "${VERIFY_PROMPT:-}" "${VERIFY_OUT:-}"
+        "${VERIFY_PROMPT:-}" "${VERIFY_OUT:-}" \
+        "${CLEANED_DIFF:-}" "${COMPRESSED_DIFF:-}" "${TRIAGE_FILE:-}" "${PR_SUMMARY_HEADER_FILE:-}"
+  [ -n "${CHUNK_DIR:-}" ] && rm -rf "$CHUNK_DIR" 2>/dev/null || true
 
   # Post failure comment if review crashed mid-way
   if [ "$exit_code" -ne 0 ] && [ -n "${REPO_OWNER:-}" ] && [ -n "${REPO_NAME:-}" ] && [ -n "${PR_NUMBER:-}" ]; then
@@ -735,6 +740,510 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+
+# ============================================================
+# HYBRID LARGE DIFF STRATEGY — Functions (v2)
+# 4-tier router: SMALL (≤30KB) → MEDIUM (30-80KB) → LARGE (80-200KB) → HUGE (200KB+)
+# ============================================================
+
+# ── Diff Preprocessor: strip noise from diff before routing ──────────────────
+# Strips lockfiles, generated code, source maps, snapshots, compiled output, binary diffs.
+# For MEDIUM+ tiers (when $1 = "strip-deletions"), also strips deletion-only hunks.
+# Pure bash/awk, zero LLM cost.
+_preprocess_diff() {
+  local raw_diff="$1"
+  local output_file="$2"
+  local strip_deletions="${3:-false}"
+
+  # Patterns to always skip (lockfiles, generated, compiled, binary)
+  local skip_patterns='(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|\.lock$|\.generated\.|\.min\.|\.bundle\.|\.map$|__snapshots__|dist/|build/|\.next/|\.jpg$|\.jpeg$|\.png$|\.gif$|\.svg$|\.ico$|\.woff|\.ttf$|\.eot$|\.pdf$)'
+
+  # Also apply .diffhound.yml skip_files if present
+  local extra_skip=""
+  local config_file="${REPO_PATH}/.diffhound.yml"
+  if [ -f "$config_file" ]; then
+    extra_skip=$(grep -A100 'skip_files:' "$config_file" 2>/dev/null \
+      | grep '^ *- ' | sed 's/^ *- //' | tr '\n' '|' | sed 's/|$//' || true)
+  fi
+
+  # Build combined pattern
+  local full_pattern="$skip_patterns"
+  [ -n "$extra_skip" ] && full_pattern="${skip_patterns}|($extra_skip)"
+
+  # Phase 1: Strip entire file diffs that match skip patterns
+  $_AWK_CMD -v pat="$full_pattern" '
+    BEGIN { skip = 0 }
+    /^diff --git/ {
+      skip = 0
+      if (match($0, pat)) { skip = 1; next }
+    }
+    skip { next }
+    { print }
+  ' "$raw_diff" > "${output_file}.phase1"
+
+  if [ "$strip_deletions" = "true" ]; then
+    # Phase 2: Strip deletion-only hunks (Qodo technique)
+    # A deletion-only hunk has - lines but no + lines (only deletions, no additions)
+    $_AWK_CMD '
+      /^@@/ {
+        if (hunk != "" && has_add) printf "%s", hunk
+        hunk = $0 "\n"; has_add = 0; next
+      }
+      /^diff --git/ {
+        if (hunk != "" && has_add) printf "%s", hunk
+        hunk = ""; has_add = 0; print; next
+      }
+      hunk != "" {
+        hunk = hunk $0 "\n"
+        if (/^\+[^+]/ || /^\+$/) has_add = 1
+        next
+      }
+      { print }
+      END { if (hunk != "" && has_add) printf "%s", hunk }
+    ' "${output_file}.phase1" > "$output_file"
+    rm -f "${output_file}.phase1"
+  else
+    mv "${output_file}.phase1" "$output_file"
+  fi
+}
+
+# ── Size Router: determine tier based on cleaned diff size ───────────────────
+_route_tier() {
+  local size_bytes="$1"
+  if [ "$size_bytes" -le 30720 ]; then
+    echo "SMALL"
+  elif [ "$size_bytes" -le 81920 ]; then
+    echo "MEDIUM"
+  elif [ "$size_bytes" -le 204800 ]; then
+    echo "LARGE"
+  else
+    echo "HUGE"
+  fi
+}
+
+# ── Medium Tier Compression: reduce context lines + trim RAG ─────────────────
+_compress_medium() {
+  local diff_file="$1"
+  local output_file="$2"
+  # Reduce unchanged context lines from 3 to 1 per hunk.
+  # IMPORTANT: only compress inside hunks — leave diff/file headers untouched.
+  $_AWK_CMD '
+    /^diff --git/ { in_hunk=0; print; next }
+    /^@@/ { in_hunk=1; ctx=0; print; next }
+    in_hunk && /^[+-]/ { ctx=0; print; next }
+    in_hunk { ctx++; if (ctx <= 1) print; next }
+    { print }
+  ' "$diff_file" > "$output_file"
+}
+
+# ── File Triage via Haiku (large/huge only) ──────────────────────────────────
+# Extracts per-file stats, feeds to Haiku for priority classification.
+# Output: filepath\tpriority\treason (TSV) written to $2
+_triage_files() {
+  local diff_file="$1"
+  local output_file="$2"
+
+  # Extract per-file stats: filename, additions, deletions, hunk count
+  local file_stats
+  file_stats=$($_AWK_CMD '
+    /^diff --git/ {
+      if (file != "") printf "%s\t%d\t%d\t%d\n", file, adds, dels, hunks
+      file = ""; adds = 0; dels = 0; hunks = 0
+      # Extract filename from diff --git line as fallback (handles deleted files)
+      n = split($0, parts, " b/")
+      if (n >= 2) { pending_file = parts[n]; sub(/"$/, "", pending_file) }
+    }
+    /^\+\+\+ b\// { file = substr($0, 7); sub(/"$/, "", file) }
+    /^\+\+\+ \/dev\/null/ { file = pending_file }
+    /^@@/ { hunks++ }
+    /^\+[^+]/ { adds++ }
+    /^-[^-]/ { dels++ }
+    END { if (file != "") printf "%s\t%d\t%d\t%d\n", file, adds, dels, hunks }
+  ' "$diff_file")
+
+  # Extract first 10 lines of each file's diff for context
+  local file_previews
+  file_previews=$($_AWK_CMD '
+    /^diff --git/ {
+      count = 0; printing = 1
+    }
+    printing && count < 12 {
+      print; count++
+      if (count >= 12) { printing = 0; print "..." }
+    }
+  ' "$diff_file")
+
+  # Build triage prompt
+  local triage_prompt="Classify each file by review priority. Output ONLY TSV lines: filepath<TAB>priority<TAB>reason
+
+Priority levels:
+- CRITICAL: migrations, auth, payments, queue processors, API contracts, security
+- STANDARD: normal business logic, services, resolvers, controllers
+- LOW: tests, configs, type-only files, documentation, .env.example
+- SKIP: auto-generated, purely deletion-only, lock files
+
+File stats (file, +lines, -lines, hunks):
+${file_stats}
+
+First 10 lines of each file diff:
+${file_previews}
+
+Output format (TSV, one line per file, no headers, no explanation):
+path/to/file.ts	CRITICAL	migration with schema change
+path/to/test.ts	LOW	test file"
+
+  local triage_result=""
+  local _saved_key="${ANTHROPIC_API_KEY:-}"
+  unset ANTHROPIC_API_KEY
+  triage_result=$(printf '%s' "$triage_prompt" | \
+    $_TIMEOUT_CMD 30 claude -p --model claude-haiku-4-5-20251001 2>/dev/null || true)
+  [ -n "$_saved_key" ] && export ANTHROPIC_API_KEY="$_saved_key"
+
+  if [ -n "$triage_result" ]; then
+    # Filter to only valid TSV lines with known priorities
+    printf '%s\n' "$triage_result" | grep -E $'^[^[:space:]]+\t(CRITICAL|STANDARD|LOW|SKIP)\t' > "$output_file" || true
+  fi
+
+  # Fallback: if Haiku failed or returned nothing, use file extension heuristics
+  if [ ! -s "$output_file" ]; then
+    while IFS=$'\t' read -r file adds dels hunks; do
+      [ -z "$file" ] && continue
+      local priority="STANDARD"
+      local reason="default"
+      case "$file" in
+        *migration*|*migrate*) priority="CRITICAL"; reason="migration" ;;
+        *auth*|*login*|*session*|*permission*) priority="CRITICAL"; reason="auth-related" ;;
+        *payment*|*billing*|*invoice*) priority="CRITICAL"; reason="payment-related" ;;
+        *queue*|*processor*|*job*|*worker*) priority="CRITICAL"; reason="queue/job processor" ;;
+        *.test.*|*.spec.*|*__tests__*) priority="LOW"; reason="test file" ;;
+        *.config.*|*.env*|*tsconfig*) priority="LOW"; reason="config file" ;;
+        *.d.ts) priority="LOW"; reason="type declarations only" ;;
+        *.md|*.txt|*.yml|*.yaml) priority="LOW"; reason="documentation/config" ;;
+      esac
+      # Pure deletion files → SKIP
+      if [ "$adds" -eq 0 ] && [ "$dels" -gt 0 ]; then
+        priority="SKIP"; reason="deletion-only"
+      fi
+      printf '%s\t%s\t%s\n' "$file" "$priority" "$reason"
+    done <<< "$file_stats" > "$output_file"
+  fi
+}
+
+# ── PR Summary Header (large/huge only) ─────────────────────────────────────
+# Haiku generates a compact structured summary. Every chunk receives this for cross-file awareness.
+_build_pr_summary_header() {
+  local diff_file="$1"
+  local triage_file="$2"
+  local pr_title="$3"
+  local pr_body="$4"
+
+  # Build file map from triage
+  local file_map=""
+  while IFS=$'\t' read -r file prio reason; do
+    [ -z "$file" ] && continue
+    file_map+="  ${prio}: ${file} (${reason})"$'\n'
+  done < "$triage_file"
+
+  local summary_prompt="Generate a concise PR summary header (max 2KB) for code reviewers.
+
+PR Title: ${pr_title}
+PR Description: ${pr_body:0:500}
+
+File Classification:
+${file_map}
+
+Output this exact structure:
+## PR CHANGE MAP
+[2-3 sentence overview of what this PR does]
+
+## FILE GROUPS
+[group related files by feature/domain, 1 line per group]
+
+## CROSS-FILE DEPENDENCIES
+[which files call/import each other, based on names and paths]
+
+## KEY PATTERNS TO WATCH
+[what types of bugs are most likely given these file types]
+
+## RISK AREAS
+[highest risk files and why]
+
+Be concise. This header is prepended to each review chunk for context."
+
+  local _saved_key="${ANTHROPIC_API_KEY:-}"
+  unset ANTHROPIC_API_KEY
+  local summary_result
+  summary_result=$(printf '%s' "$summary_prompt" | \
+    $_TIMEOUT_CMD 30 claude -p --model claude-haiku-4-5-20251001 2>/dev/null || true)
+  [ -n "$_saved_key" ] && export ANTHROPIC_API_KEY="$_saved_key"
+
+  if [ -n "$summary_result" ]; then
+    printf '%s\n' "$summary_result"
+  else
+    # Fallback: minimal header from triage data
+    printf '## PR CHANGE MAP\n%s\n\n## FILES\n%s\n' "$pr_title" "$file_map"
+  fi
+}
+
+# ── Chunk Builder: bin-pack files into ≤30KB chunks ──────────────────────────
+# Sorts by priority (CRITICAL first) then size (largest first).
+# Outputs chunk files to $CHUNK_DIR/chunk-N.diff and chunk-N.manifest
+_build_review_chunks() {
+  local diff_file="$1"
+  local triage_file="$2"
+  local chunk_dir="$3"
+  local max_chunk_bytes=30720  # 30KB
+
+  mkdir -p "$chunk_dir"
+
+  # Extract individual file diffs into temp files and measure sizes
+  local file_diffs_dir="${chunk_dir}/file-diffs"
+  mkdir -p "$file_diffs_dir"
+
+  # Extract individual file diffs. Handle both quoted and unquoted paths.
+  # Use +++ line (always present, unambiguous) to get the filename.
+  $_AWK_CMD -v outdir="$file_diffs_dir" '
+    /^diff --git/ {
+      if (file != "") close(outdir "/" file)
+      file = ""
+      pending = $0 "\n"
+      next
+    }
+    /^\+\+\+ / {
+      # +++ b/path or +++ "b/path" or +++ /dev/null
+      f = $0
+      sub(/^\+\+\+ "?b\//, "", f)
+      sub(/"$/, "", f)
+      if (f == "/dev/null" || f == "") { file = ""; pending = ""; next }
+      gsub(/\//, "_SLASH_", f)
+      file = f
+      if (pending != "") { printf "%s", pending > (outdir "/" file); pending = "" }
+      print >> (outdir "/" file)
+      next
+    }
+    pending != "" { pending = pending $0 "\n"; next }
+    file != "" { print >> (outdir "/" file) }
+    END { if (file != "") close(outdir "/" file) }
+  ' "$diff_file"
+
+  # Build sorted file list: priority order (CRITICAL=1, STANDARD=2, LOW=3), then by size desc
+  local _sort_tmp="${chunk_dir}/sort-input.tmp"
+  : > "$_sort_tmp"
+  while IFS=$'\t' read -r file prio reason; do
+    [ -z "$file" ] && continue
+    [ "$prio" = "SKIP" ] && continue
+    local safe_name="${file//\//_SLASH_}"
+    local fsize=0
+    [ -f "${file_diffs_dir}/${safe_name}" ] && fsize=$(wc -c < "${file_diffs_dir}/${safe_name}" | tr -d ' ')
+    local sort_key=2
+    if [ "$prio" = "CRITICAL" ]; then sort_key=1
+    elif [ "$prio" = "STANDARD" ]; then sort_key=2
+    elif [ "$prio" = "LOW" ]; then sort_key=3
+    fi
+    printf '%d\t%d\t%s\t%s\n' "$sort_key" "$fsize" "$file" "$prio" >> "$_sort_tmp"
+  done < "$triage_file"
+  local sorted_files
+  sorted_files=$(sort -t$'\t' -k1,1n -k2,2rn "$_sort_tmp")
+  rm -f "$_sort_tmp"
+
+  # Bin-pack into chunks
+  local chunk_num=0
+  local current_size=0
+
+  # Start first chunk
+  : > "${chunk_dir}/chunk-${chunk_num}.diff"
+  : > "${chunk_dir}/chunk-${chunk_num}.manifest"
+
+  while IFS=$'\t' read -r sort_key fsize file prio; do
+    [ -z "$file" ] && continue
+    local safe_name="${file//\//_SLASH_}"
+    local file_diff="${file_diffs_dir}/${safe_name}"
+    [ ! -f "$file_diff" ] && continue
+
+    # If adding this file exceeds chunk limit, start new chunk
+    if [ "$current_size" -gt 0 ] && [ $((current_size + fsize)) -gt "$max_chunk_bytes" ]; then
+      chunk_num=$((chunk_num + 1))
+      current_size=0
+      : > "${chunk_dir}/chunk-${chunk_num}.diff"
+      : > "${chunk_dir}/chunk-${chunk_num}.manifest"
+    fi
+
+    cat "$file_diff" >> "${chunk_dir}/chunk-${chunk_num}.diff"
+    printf '%s\t%s\n' "$file" "$prio" >> "${chunk_dir}/chunk-${chunk_num}.manifest"
+    current_size=$((current_size + fsize))
+  done <<< "$sorted_files"
+
+  # Cleanup file diffs
+  rm -rf "$file_diffs_dir"
+
+  # Return chunk count (0-indexed, so add 1)
+  echo $((chunk_num + 1))
+}
+
+# ── Parallel Chunk Review ────────────────────────────────────────────────────
+# Launches claude -p for each chunk in parallel. Collects results.
+_review_chunks_parallel() {
+  local chunk_dir="$1"
+  local chunk_count="$2"
+  local pr_summary_header="$3"
+  local rag_context_file="$4"
+  local repo_path="$5"
+
+  local chunked_prompt_file="${LIB_DIR}/prompt-chunked.txt"
+  local pids=()
+
+  local _saved_key="${ANTHROPIC_API_KEY:-}"
+  unset ANTHROPIC_API_KEY
+
+  for ((i=0; i<chunk_count; i++)); do
+    local chunk_diff="${chunk_dir}/chunk-${i}.diff"
+    local chunk_manifest="${chunk_dir}/chunk-${i}.manifest"
+    local chunk_out="${chunk_dir}/chunk-${i}.out"
+    local chunk_prompt="${chunk_dir}/chunk-${i}.prompt"
+
+    [ ! -s "$chunk_diff" ] && continue
+
+    # Get file list for this chunk
+    local file_list
+    file_list=$(cut -f1 "$chunk_manifest" | tr '\n' ', ')
+
+    # Filter RAG to relevant files
+    local chunk_rag="${chunk_dir}/chunk-${i}.rag"
+    if [ -s "$rag_context_file" ]; then
+      _filter_rag_for_files "$rag_context_file" "$chunk_manifest" "$chunk_rag"
+      # Trim to 15KB per chunk
+      _trim_rag "$chunk_rag" 15360
+    else
+      : > "$chunk_rag"
+    fi
+
+    # Build chunk prompt
+    {
+      cat "$chunked_prompt_file"
+      echo ""
+      echo "---"
+      echo ""
+      echo "# PR SUMMARY (applies to entire PR — your chunk is a subset)"
+      echo "$pr_summary_header"
+      echo ""
+      echo "---"
+      echo ""
+      echo "# YOUR CHUNK: files [${file_list}]"
+      echo ""
+      echo "# DIFF (this chunk only)"
+      echo ""
+      cat "$chunk_diff"
+      if [ -s "$chunk_rag" ]; then
+        echo ""
+        echo "---"
+        echo ""
+        echo "# CODEBASE CONTEXT (RAG — filtered for this chunk's files)"
+        echo ""
+        cat "$chunk_rag"
+      fi
+    } > "$chunk_prompt"
+
+    # Launch claude in background with timeout
+    (
+      if ! $_TIMEOUT_CMD 300 claude -p \
+          --allowedTools "Read,Bash" \
+          --add-dir "$repo_path" \
+          --dangerously-skip-permissions \
+          --output-format text \
+          < "$chunk_prompt" > "$chunk_out" 2>&1; then
+        # Fallback: non-agentic mode
+        $_TIMEOUT_CMD 180 claude -p < "$chunk_prompt" > "$chunk_out" 2>&1 || \
+          echo "CHUNK_${i}_FAILED" > "$chunk_out"
+      fi
+    ) &
+    pids+=($!)
+  done
+
+  # Wait for all chunks
+  for pid in "${pids[@]}"; do
+    wait "$pid" 2>/dev/null || true
+  done
+
+  [ -n "$_saved_key" ] && export ANTHROPIC_API_KEY="$_saved_key"
+}
+
+# ── Findings Merger: combine chunk outputs into single review ────────────────
+_merge_chunk_findings() {
+  local chunk_dir="$1"
+  local chunk_count="$2"
+  local output_file="$3"
+
+  # If only 1 chunk, pass through
+  if [ "$chunk_count" -eq 1 ] && [ -s "${chunk_dir}/chunk-0.out" ]; then
+    cp "${chunk_dir}/chunk-0.out" "$output_file"
+    return
+  fi
+
+  # Collect all chunk outputs
+  local all_findings=""
+  for ((i=0; i<chunk_count; i++)); do
+    local chunk_out="${chunk_dir}/chunk-${i}.out"
+    [ ! -s "$chunk_out" ] && continue
+    all_findings+="
+## CHUNK $((i+1)) FINDINGS (files: $(cut -f1 "${chunk_dir}/chunk-${i}.manifest" 2>/dev/null | tr '\n' ', '))
+$(cat "$chunk_out")
+"
+  done
+
+  # Merge via Haiku
+  local merge_prompt="Merge these code review findings from separate chunks into a single unified review.
+
+${all_findings}
+
+YOUR TASK:
+1. Deduplicate: if two chunks flag the same issue, keep the most detailed version
+2. Link cross-file findings: if chunk A mentions a function and chunk B reviews its caller, connect them
+3. Resolve CROSS_FILE_NOTES: check if concerns raised in one chunk are answered by another chunk's findings
+4. Produce a single FINDINGS_START...FINDINGS_END block with all unique findings
+5. Produce a single SCORECARD_START...SCORECARD_END with overall scores
+
+Use the same output format as the individual chunks but with a unified scorecard:
+
+### FINDINGS_START
+FINDING: file/path.ts:LINE:SEVERITY
+WHAT: ...
+EVIDENCE: ...
+IMPACT: ...
+OPTIONS: ...
+UNVERIFIABLE: ...
+### FINDINGS_END
+
+### SCORECARD_START
+Security: X/25 — [reason]
+Tests: X/20 — [reason]
+Observability: X/10 — [reason]
+Performance: X/15 — [reason]
+Readability: X/15 — [reason]
+Compatibility: X/15 — [reason]
+Total: X/100 — REQUEST_CHANGES|APPROVE|COMMENT
+
+Blocking: [file:line list or NONE]
+ShouldFix: [file:line list or NONE]
+Nits: [file:line list or NONE]
+Checklist: [verification steps]
+### SCORECARD_END"
+
+  local merge_result=""
+  local _saved_key="${ANTHROPIC_API_KEY:-}"
+  unset ANTHROPIC_API_KEY
+  merge_result=$(printf '%s' "$merge_prompt" | \
+    $_TIMEOUT_CMD 60 claude -p --model claude-haiku-4-5-20251001 2>/dev/null || true)
+  [ -n "$_saved_key" ] && export ANTHROPIC_API_KEY="$_saved_key"
+
+  if [ -n "$merge_result" ]; then
+    printf '%s\n' "$merge_result" > "$output_file"
+  else
+    # Fallback: concatenate all chunk outputs
+    for ((i=0; i<chunk_count; i++)); do
+      [ -s "${chunk_dir}/chunk-${i}.out" ] && cat "${chunk_dir}/chunk-${i}.out"
+    done > "$output_file"
+  fi
+}
 
 # ============================================================
 # STEP 0.5: FETCH EXISTING COMMENTS & DETECT RE-REVIEW MODE
@@ -905,6 +1414,88 @@ else
   spinner_stop "RAG context unavailable — proceeding with diff only"
   echo "" > "$RAG_CONTEXT_FILE"
 fi
+
+# ============================================================
+# STEP 1.5: PREPROCESS DIFF + ROUTE BY SIZE TIER
+# ============================================================
+CLEANED_DIFF=$(mktemp -t "pr-${PR_NUMBER}-cleaned.XXXXXX")
+
+# Preprocess: strip lockfiles, generated code, binaries, source maps.
+# NOTE: We do NOT strip deletion-only hunks — deleted guards/checks must be reviewed.
+_preprocess_diff "$DIFF_FILE" "$CLEANED_DIFF" "false"
+CLEANED_SIZE=$(wc -c < "$CLEANED_DIFF" | tr -d ' ')
+REVIEW_TIER=$(_route_tier "$CLEANED_SIZE")
+
+# Override: --force-monolithic flag bypasses tier routing (escape hatch)
+if [ "$FORCE_MONOLITHIC" = true ]; then
+  REVIEW_TIER="SMALL"
+fi
+
+RAW_DIFF_SIZE=$(wc -c < "$DIFF_FILE" | tr -d ' ')
+echo "  📏 Diff: ${RAW_DIFF_SIZE}B raw → ${CLEANED_SIZE}B cleaned → tier: ${REVIEW_TIER}"
+
+# ============================================================
+# TIER ROUTING: SMALL uses existing monolithic path, others diverge
+# ============================================================
+
+if [ "$REVIEW_TIER" = "LARGE" ] || [ "$REVIEW_TIER" = "HUGE" ]; then
+  # ── LARGE/HUGE: Triage → Summary → Chunk → Parallel Review → Merge ──
+  spinner_start "Triaging files for chunked review..."
+  TRIAGE_FILE=$(mktemp -t "pr-${PR_NUMBER}-triage.XXXXXX")
+  _triage_files "$CLEANED_DIFF" "$TRIAGE_FILE"
+  TRIAGE_COUNT=$(wc -l < "$TRIAGE_FILE" | tr -d ' ')
+  CRITICAL_COUNT=$(grep -c $'\tCRITICAL\t' "$TRIAGE_FILE" || true)
+  SKIP_COUNT=$(grep -c $'\tSKIP\t' "$TRIAGE_FILE" || true)
+  spinner_stop "Triage complete: ${TRIAGE_COUNT} files (${CRITICAL_COUNT} critical, ${SKIP_COUNT} skipped)"
+
+  # Safety: log skipped files so user can audit — never silently drop code
+  if [ "$SKIP_COUNT" -gt 0 ]; then
+    echo "  ⚠️  Skipped files (not reviewed — deletion-only or auto-generated):"
+    grep $'\tSKIP\t' "$TRIAGE_FILE" | while IFS=$'\t' read -r _f _p _r; do
+      echo "     ↳ $_f ($_r)"
+    done
+  fi
+
+  spinner_start "Building PR summary header..."
+  PR_SUMMARY_HEADER_FILE=$(mktemp -t "pr-${PR_NUMBER}-summary-hdr.XXXXXX")
+  PR_SUMMARY_HEADER=$(_build_pr_summary_header "$CLEANED_DIFF" "$TRIAGE_FILE" "$PR_TITLE" "$PR_BODY")
+  printf '%s\n' "$PR_SUMMARY_HEADER" > "$PR_SUMMARY_HEADER_FILE"
+  spinner_stop "PR summary header ready"
+
+  spinner_start "Building review chunks..."
+  CHUNK_DIR=$(mktemp -d -t "pr-${PR_NUMBER}-chunks.XXXXXX")
+  CHUNK_COUNT=$(_build_review_chunks "$CLEANED_DIFF" "$TRIAGE_FILE" "$CHUNK_DIR")
+  spinner_stop "Built ${CHUNK_COUNT} chunk(s)"
+
+  _TOTAL_PASSES=$((CHUNK_COUNT + 2))  # chunks + peer + voice
+  [ "$FAST_MODE" = "true" ] && _TOTAL_PASSES=$((CHUNK_COUNT + 1))
+  spinner_start "Reviewing ${CHUNK_COUNT} chunks in parallel (pass 1/${_TOTAL_PASSES})..."
+  _review_chunks_parallel "$CHUNK_DIR" "$CHUNK_COUNT" "$PR_SUMMARY_HEADER" "$RAG_CONTEXT_FILE" "$REPO_PATH"
+  spinner_stop "Parallel chunk review complete"
+
+  spinner_start "Merging findings from ${CHUNK_COUNT} chunks..."
+  _merge_chunk_findings "$CHUNK_DIR" "$CHUNK_COUNT" "$CLAUDE_OUT"
+  spinner_stop "Findings merged"
+
+elif [ "$REVIEW_TIER" = "MEDIUM" ]; then
+  # ── MEDIUM: Compress diff + trim RAG → single Claude call ──
+  COMPRESSED_DIFF=$(mktemp -t "pr-${PR_NUMBER}-compressed.XXXXXX")
+  _compress_medium "$CLEANED_DIFF" "$COMPRESSED_DIFF"
+  COMPRESSED_SIZE=$(wc -c < "$COMPRESSED_DIFF" | tr -d ' ')
+  echo "  📦 Medium tier: compressed ${CLEANED_SIZE}B → ${COMPRESSED_SIZE}B"
+
+  # Trim RAG to 40KB for medium tier
+  _trim_rag "$RAG_CONTEXT_FILE" 40960
+
+  # Use compressed diff as the diff source for the standard prompt path
+  cp "$COMPRESSED_DIFF" "$DIFF_FILE"
+
+  # Fall through to standard STEP 2 + STEP 3 below
+  :
+fi
+
+# ── For SMALL and MEDIUM tiers: use standard monolithic prompt + Claude call ──
+if [ "$REVIEW_TIER" = "SMALL" ] || [ "$REVIEW_TIER" = "MEDIUM" ]; then
 
 # ============================================================
 # STEP 2: BUILD THE FULL REVIEW PROMPT
@@ -1422,6 +2013,8 @@ fi
 export ANTHROPIC_API_KEY="$_SAVED_API_KEY"
 spinner_stop "Pass 1 complete"
 
+fi  # end SMALL/MEDIUM tier monolithic path
+
 # ============================================================
 # STEP 4: PEER REVIEW — CODEX + GEMINI (skipped in --fast mode)
 # ============================================================
@@ -1432,6 +2025,26 @@ if [ "$FAST_MODE" != "true" ]; then
   spinner_start "Cross-checking findings (pass 2/${_TOTAL_PASSES})..."
 
   PEER_PROMPT_FILE=$(mktemp -t "pr-${PR_NUMBER}-peer.XXXXXX")
+
+  # For LARGE/HUGE: send only CRITICAL-file diffs to keep peer prompt under 30KB
+  _PEER_DIFF_CONTENT=""
+  if [ "$REVIEW_TIER" = "LARGE" ] || [ "$REVIEW_TIER" = "HUGE" ]; then
+    if [ -f "${TRIAGE_FILE:-}" ]; then
+      _critical_files=$(grep $'\tCRITICAL\t' "$TRIAGE_FILE" | cut -f1 || true)
+      if [ -n "$_critical_files" ]; then
+        _PEER_DIFF_CONTENT=$(while IFS= read -r _cf; do
+          $_AWK_CMD -v file="$_cf" '
+            /^diff --git/ { printing = (index($0, "b/" file) > 0) }
+            printing { print }
+          ' "$CLEANED_DIFF"
+        done <<< "$_critical_files")
+      fi
+    fi
+    [ -z "$_PEER_DIFF_CONTENT" ] && _PEER_DIFF_CONTENT=$(head -c 30720 "$CLEANED_DIFF")
+  else
+    _PEER_DIFF_CONTENT=$(cat "$DIFF_FILE")
+  fi
+
   cat > "$PEER_PROMPT_FILE" << PEER_EOF
 I need a peer review of this engineering analysis. Do NOT run any tools or execute code. Text response only.
 
@@ -1442,7 +2055,7 @@ Code review PR. A primary reviewer produced FINDING blocks below. You also have 
 $(cat "$CLAUDE_OUT")
 
 ## Full PR Diff
-$(cat "$DIFF_FILE")
+${_PEER_DIFF_CONTENT}
 
 ## Your Task (engineering only — no style concerns)
 1. For each BLOCKING finding: do you agree? If wrong or overstated, explain why with diff evidence.
