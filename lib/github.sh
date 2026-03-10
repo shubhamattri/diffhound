@@ -117,7 +117,7 @@ index_voice_comments() {
   local cache_dir="${4:-}"
 
   [ -f "$new_comments_file" ] || { echo "0"; return 0; }
-  [ -f "$voice_jsonl" ] || { echo "0"; return 0; }
+  [ -f "$voice_jsonl" ] || touch "$voice_jsonl"
 
   local indexed=0
   while IFS= read -r comment_line; do

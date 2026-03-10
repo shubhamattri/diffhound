@@ -165,10 +165,22 @@ _learn_from_pr() {
       --argjson cid "$cid" \
       '.[] | select(.id == $cid) | .body')
 
-    # Record the feedback pair: reviewer comment + dev reply
+    # Record the feedback pair: reviewer comment + dev reply (with dedup)
     local feedback_file="$REVIEW_CACHE_DIR/pr-${pr}-feedback.jsonl"
     while IFS= read -r reply_body; do
       [ -z "$reply_body" ] && continue
+
+      # ── Dedup: skip if same reviewer_comment prefix + dev_reply prefix already exists ──
+      local _rc_prefix="${orig_comment:0:80}"
+      local _dr_prefix="${reply_body:0:80}"
+      if [ -f "$feedback_file" ]; then
+        local _is_dup
+        _is_dup=$(jq -r --arg rcp "$_rc_prefix" --arg drp "$_dr_prefix" \
+          'select((.reviewer_comment | startswith($rcp)) and (.dev_reply | startswith($drp))) | "dup"' \
+          "$feedback_file" 2>/dev/null | head -1 || true)
+        [ "$_is_dup" = "dup" ] && continue
+      fi
+
       printf '%s\n' "$(jq -nc \
         --arg review "$orig_comment" \
         --arg reply "$reply_body" \
@@ -193,6 +205,9 @@ _learn_from_pr() {
   if [ "$replied" -gt 0 ]; then
     _respond_to_dev_replies "$pr" "$repo_owner" "$repo_name" "$all_comments"
   fi
+
+  # ── Distill false positives into learned patterns ──
+  _distill_false_positives "$pr" "$repo_owner" "$repo_name"
 }
 
 # ── Respond to dev replies with AI-generated conversational replies ──
@@ -322,6 +337,127 @@ Rules:
   done <<< "$reviewer_ids"
 
   [ "$responded" -gt 0 ] && echo "  🗣️  $responded AI responses posted to dev replies"
+}
+
+# ── Distill false positives into learned patterns ────────────────────────────
+# Reads feedback.jsonl, checks if Diffhound conceded, extracts lessons via Haiku
+_distill_false_positives() {
+  local pr="$1" repo_owner="$2" repo_name="$3"
+  local feedback_file="$REVIEW_CACHE_DIR/pr-${pr}-feedback.jsonl"
+  local patterns_file="$HOME/.diffhound/learned-patterns.jsonl"
+
+  [ -f "$feedback_file" ] || return 0
+  mkdir -p "$HOME/.diffhound"
+  [ -f "$patterns_file" ] || touch "$patterns_file"
+
+  # Fetch all PR comments for thread context
+  local all_comments
+  all_comments=$(gh api \
+    -H "Accept: application/vnd.github+json" \
+    "/repos/${repo_owner}/${repo_name}/pulls/${pr}/comments" \
+    --paginate \
+    --jq "[.[] | {id, user: .user.login, body, in_reply_to_id}]" \
+    2>/dev/null || echo "[]")
+
+  # Concession phrases that indicate Diffhound acknowledged a false positive
+  local concession_pattern="you're right|you are right|fair point|good point|acknowledged|missed that|makes sense|my mistake|correct|apologies|you're correct|actually fine|not an issue|false positive"
+
+  local distilled=0
+  local skipped=0
+
+  while IFS= read -r entry; do
+    [ -z "$entry" ] && continue
+
+    # Skip already distilled entries
+    local is_distilled
+    is_distilled=$(printf '%s' "$entry" | jq -r '.distilled // false')
+    [ "$is_distilled" = "true" ] && { skipped=$((skipped + 1)); continue; }
+
+    local reviewer_comment dev_reply
+    reviewer_comment=$(printf '%s' "$entry" | jq -r '.reviewer_comment')
+    dev_reply=$(printf '%s' "$entry" | jq -r '.dev_reply')
+
+    # Skip blank/whitespace-only dev replies
+    [ -z "$(printf '%s' "$dev_reply" | tr -d '[:space:]')" ] && continue
+
+    # Check if Diffhound replied with concession to this thread
+    local reviewer_replied_concession=false
+
+    # Find the reviewer comment ID that matches this body prefix
+    local rc_prefix="${reviewer_comment:0:80}"
+    local matching_cid
+    matching_cid=$(printf '%s' "$all_comments" | jq -r \
+      --arg login "$REVIEWER_LOGIN" --arg prefix "$rc_prefix" \
+      '[.[] | select(.user == $login and .in_reply_to_id == null and (.body | startswith($prefix)))] | .[0].id // empty')
+
+    if [ -n "$matching_cid" ]; then
+      # Check replies from reviewer that contain concession phrases
+      local reviewer_concession
+      reviewer_concession=$(printf '%s' "$all_comments" | jq -r \
+        --argjson parent "$matching_cid" --arg login "$REVIEWER_LOGIN" \
+        '[.[] | select(.in_reply_to_id == $parent and .user == $login)] | .[].body' 2>/dev/null || true)
+
+      if [ -n "$reviewer_concession" ] && printf '%s' "$reviewer_concession" | grep -qiE "$concession_pattern"; then
+        reviewer_replied_concession=true
+      fi
+    fi
+
+    [ "$reviewer_replied_concession" = false ] && continue
+
+    # ── Extract lesson via Claude Haiku ──
+    local lesson_prompt
+    lesson_prompt="Extract a single one-line lesson from this false positive in code review.
+
+REVIEWER COMMENT (false positive):
+${reviewer_comment:0:500}
+
+DEV REPLY (correction):
+${dev_reply:0:500}
+
+Write EXACTLY one line in this format: Do not flag X when Y because Z.
+No preamble, no explanation, just the one line."
+
+    local lesson=""
+    local _saved_key="${ANTHROPIC_API_KEY:-}"
+    unset ANTHROPIC_API_KEY
+    lesson=$(printf '%s' "$lesson_prompt" | claude -p --model claude-haiku-4-5-20251001 2>/dev/null | head -1 || true)
+    [ -n "$_saved_key" ] && export ANTHROPIC_API_KEY="$_saved_key"
+
+    [ -z "$lesson" ] && continue
+    # Sanitize: remove leading "- " or "* " if present
+    lesson="${lesson#- }"
+    lesson="${lesson#\* }"
+
+    # ── Dedup: skip if same lesson prefix already in patterns ──
+    local lesson_prefix="${lesson:0:60}"
+    local _lesson_dup
+    _lesson_dup=$(jq -r --arg lp "$lesson_prefix" \
+      'select(.lesson | startswith($lp)) | "dup"' \
+      "$patterns_file" 2>/dev/null | head -1 || true)
+    [ "$_lesson_dup" = "dup" ] && continue
+
+    # Append lesson
+    jq -nc \
+      --argjson pr "$pr" \
+      --arg category "general" \
+      --arg lesson "$lesson" \
+      --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      '{pr: $pr, category: $category, lesson: $lesson, timestamp: $ts}' \
+      >> "$patterns_file"
+    distilled=$((distilled + 1))
+  done < "$feedback_file"
+
+  # ── Mark all entries as distilled (idempotency) ──
+  if [ "$distilled" -gt 0 ] || [ "$skipped" -gt 0 ]; then
+    local _tmp_feedback
+    _tmp_feedback=$(mktemp -t "feedback-distill.XXXXXX")
+    jq -c '. + {distilled: true}' "$feedback_file" > "$_tmp_feedback" 2>/dev/null \
+      && mv "$_tmp_feedback" "$feedback_file" \
+      || rm -f "$_tmp_feedback"
+  fi
+
+  [ "$distilled" -gt 0 ] && echo "  🧠 Distilled $distilled false positive lesson(s)"
+  return 0
 }
 
 # ── --learn early exit ──────────────────────────────────────
@@ -1321,6 +1457,21 @@ fi
   echo "$_MERGE_INSTRUCTION"
   echo ""
   echo "$VOICE_EXAMPLES_CONTENT"
+
+  # ── Inject learned patterns (false positive lessons) ──
+  _learned_patterns_file="$HOME/.diffhound/learned-patterns.jsonl"
+  if [ -f "$_learned_patterns_file" ] && [ -s "$_learned_patterns_file" ]; then
+    _pattern_lines=$(jq -r '.lesson' "$_learned_patterns_file" 2>/dev/null | sort -u | head -30)
+    if [ -n "$_pattern_lines" ]; then
+      echo ""
+      echo "## LEARNED PATTERNS — DO NOT REPEAT THESE MISTAKES"
+      while IFS= read -r _pl; do
+        [ -z "$_pl" ] && continue
+        echo "- $_pl"
+      done <<< "$_pattern_lines"
+      echo ""
+    fi
+  fi
   echo ""
   echo "## ENGINEERING FINDINGS (Claude)"
   cat "$CLAUDE_OUT"
