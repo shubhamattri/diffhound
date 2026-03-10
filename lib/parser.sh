@@ -86,9 +86,11 @@ parse_summary() {
         "| \(.key | gsub("_"; " ") | ascii_upcase) (\(.value.max)%) | \(.value.score)/\(.value.max) | \(.value.reason) |"
       '
       local total verdict
-      total=$(echo "$json_content" | jq -r '.score')
+      total=$(echo "$json_content" | jq -r '[.scorecard[]? | .score] | add // 0')
+      local total_max
+      total_max=$(echo "$json_content" | jq -r '[.scorecard[]? | .max] | add // 100')
       verdict=$(echo "$json_content" | jq -r '.verdict')
-      echo "| **Total** | **${total}/100** | **${verdict}** |"
+      echo "| **Total** | **${total}/${total_max}** | **${verdict}** |"
       echo ""
       echo "## Verification & Test Checklist"
       echo "$json_content" | jq -r '(.checklist // [])[] | "- [ ] \(.)"'
@@ -103,6 +105,58 @@ parse_summary() {
   else
     cat "$structured_file" > "$summary_file"
   fi
+
+  _normalize_markdown_scorecard_total "$summary_file"
+}
+
+# Recompute the markdown scorecard total from per-category rows.
+# This prevents model arithmetic mistakes from leaking into posted reviews.
+_normalize_markdown_scorecard_total() {
+  local summary_file="$1"
+  [ -f "$summary_file" ] || return 0
+
+  local tmp_file
+  tmp_file=$(mktemp -t "diffhound-summary.XXXXXX")
+
+  awk '
+    function trim(s) {
+      gsub(/^[ \t]+|[ \t]+$/, "", s)
+      return s
+    }
+    {
+      lines[NR] = $0
+      if ($0 !~ /^\|/) next
+
+      split($0, cols, /\|/)
+      col1 = trim(cols[2])
+      col2 = trim(cols[3])
+      col3 = trim(cols[4])
+
+      clean_col1 = col1
+      clean_col2 = col2
+      gsub(/\*/, "", clean_col1)
+      gsub(/\*/, "", clean_col2)
+
+      if (tolower(clean_col1) == "total") {
+        total_row = NR
+        total_verdict = col3
+        next
+      }
+
+      if (clean_col2 ~ /^[0-9]+\/[0-9]+$/) {
+        split(clean_col2, score_parts, "/")
+        score_sum += score_parts[1]
+        max_sum += score_parts[2]
+        found_scores = 1
+      }
+    }
+    END {
+      if (found_scores && total_row > 0 && max_sum > 0) {
+        lines[total_row] = "| **Total** | **" score_sum "/" max_sum "** | " total_verdict " |"
+      }
+      for (i = 1; i <= NR; i++) print lines[i]
+    }
+  ' "$summary_file" > "$tmp_file" && mv "$tmp_file" "$summary_file" || rm -f "$tmp_file"
 }
 
 # Parse review verdict from summary (3-method fallback)
