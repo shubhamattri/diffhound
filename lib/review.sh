@@ -1289,6 +1289,20 @@ if [ "$REVIEWER_COMMENT_COUNT" -gt 0 ]; then
     '[.[] | select(.user == $login)] | sort_by(.submitted_at) | last | .commit_id // empty' \
     "$EXISTING_REVIEWS_FILE" 2>/dev/null || echo "")
 
+  # Extract previous scorecard from the last review body for score anchoring
+  PREV_SCORECARD=""
+  _last_review_body=$(jq -r --arg login "$REVIEWER_LOGIN" \
+    '[.[] | select(.user == $login)] | sort_by(.submitted_at) | last | .body // empty' \
+    "$EXISTING_REVIEWS_FILE" 2>/dev/null || echo "")
+
+  if [ -n "$_last_review_body" ]; then
+    # Try to extract scorecard table rows from markdown (| Category | X/Y | reason |)
+    _scorecard_lines=$(echo "$_last_review_body" | grep -E '^\|[^|]+\|[[:space:]]*[0-9]+/[0-9]+' | grep -v 'Total' || true)
+    if [ -n "$_scorecard_lines" ]; then
+      PREV_SCORECARD="$_scorecard_lines"
+    fi
+  fi
+
   if [ -n "$LAST_REVIEWED_SHA" ]; then
     spinner_stop "Re-review mode — ${REVIEWER_COMMENT_COUNT} comments, last reviewed at ${LAST_REVIEWED_SHA:0:8}"
   else
@@ -1883,6 +1897,30 @@ REREVIEW_HEADER
   echo "" >> "$PROMPT_FILE"
   echo "---" >> "$PROMPT_FILE"
   echo "" >> "$PROMPT_FILE"
+
+  # Inject previous scorecard for score anchoring (prevents wild swings between reviews)
+  if [ -n "$PREV_SCORECARD" ]; then
+    {
+      echo "## SCORE ANCHORING (critical — prevents score instability)"
+      echo ""
+      echo "Your PREVIOUS scorecard for this PR:"
+      echo ""
+      echo "| Category | Score | Notes |"
+      echo "|----------|-------|-------|"
+      echo "$PREV_SCORECARD"
+      echo ""
+      echo "ANCHORING RULES:"
+      echo "- For categories where NO code changed since last review: CARRY FORWARD the previous score and reason. Do not re-evaluate."
+      echo "- For categories where code DID change: re-evaluate, but your new score must be within +/- 3 points of the previous score UNLESS you can cite a specific code change that justifies a larger delta."
+      echo "- If a BLOCKING issue was fixed: the affected category score should go UP, not down."
+      echo "- If new code introduced a problem: the affected category score should go DOWN, with evidence."
+      echo "- NEVER swing a category by more than 5 points without explicit justification tied to a specific diff line."
+      echo "- The scorecard should converge across reviews, not oscillate. A developer fixing your findings should see their score improve, not randomly change."
+      echo ""
+      echo "---"
+      echo ""
+    } >> "$PROMPT_FILE"
+  fi
 
   # If incremental diff is available, add focused review instructions
   if [ -n "$INCREMENTAL_DIFF_FILE" ] && [ -s "$INCREMENTAL_DIFF_FILE" ]; then
