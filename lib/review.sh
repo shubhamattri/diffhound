@@ -2307,7 +2307,27 @@ PEER_EOF
     echo "GEMINI_UNAVAILABLE" > "$GEMINI_OUT") &
   GEMINI_PID=$!
 
-  wait $CODEX_PID $GEMINI_PID 2>/dev/null || true
+  # Wait with 180s timeout — Codex hangs on websocket disconnects (seen on PRs #35, #45, #47).
+  # Watchdog: background a sleep+kill, then wait for the real PIDs.
+  _PEER_TIMEOUT=180
+  ( sleep "$_PEER_TIMEOUT" && kill $CODEX_PID $GEMINI_PID 2>/dev/null ) &
+  _WATCHDOG_PID=$!
+
+  wait $CODEX_PID 2>/dev/null || true
+  wait $GEMINI_PID 2>/dev/null || true
+
+  # Kill the watchdog if peers finished before timeout
+  kill $_WATCHDOG_PID 2>/dev/null || true
+  wait $_WATCHDOG_PID 2>/dev/null || true
+
+  # If Codex was killed by watchdog, mark as unavailable
+  if kill -0 $CODEX_PID 2>/dev/null; then
+    kill $CODEX_PID 2>/dev/null || true
+    echo "CODEX_UNAVAILABLE" > "$CODEX_OUT"
+  fi
+  [ -s "$CODEX_OUT" ] || echo "CODEX_UNAVAILABLE" > "$CODEX_OUT"
+  [ -s "$GEMINI_OUT" ] || echo "GEMINI_UNAVAILABLE" > "$GEMINI_OUT"
+
   CODEX_CONTENT=$(cat "$CODEX_OUT")
   GEMINI_CONTENT=$(cat "$GEMINI_OUT")
   spinner_stop "Pass 2 complete"
