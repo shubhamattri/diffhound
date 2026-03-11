@@ -2908,15 +2908,30 @@ parse_summary "$REVIEW_STRUCTURED" "$REVIEW_SUMMARY"
 
 # Fallback: if voice rewrite produced 0 comments but Claude's JSON has findings,
 # use Claude's output directly. This catches cases where Haiku outputs free text
-# instead of the structured COMMENT: format (seen on PR #42).
-_voice_comment_count=$(grep -c "^COMMENT:" "${REVIEW_STRUCTURED}.comments" 2>/dev/null || echo "0")
+# instead of the structured COMMENT: format (seen on PRs #42, #45, #46).
+_voice_comment_count=$(grep -c "^COMMENT:" "${REVIEW_STRUCTURED}.comments" 2>/dev/null | head -1 || echo "0")
+_voice_comment_count=${_voice_comment_count:-0}
 if [ "$_voice_comment_count" -eq 0 ]; then
+  # Try extracting JSON from Claude's output (may or may not have ```json fences)
   _claude_json=$(_extract_json "$CLAUDE_OUT" 2>/dev/null || true)
+  if [ -z "$_claude_json" ]; then
+    # No fences — try parsing the whole file as JSON
+    _claude_json=$(jq '.' "$CLAUDE_OUT" 2>/dev/null || true)
+  fi
   _claude_findings=$(echo "$_claude_json" | jq '.findings | length' 2>/dev/null || echo "0")
   if [ "${_claude_findings:-0}" -gt 0 ]; then
     echo "  Voice rewrite lost findings — falling back to Claude's JSON output" >&2
-    parse_comments "$CLAUDE_OUT" "${REVIEW_STRUCTURED}.comments"
-    parse_summary "$CLAUDE_OUT" "$REVIEW_SUMMARY"
+    # Ensure CLAUDE_OUT has fences for parse_comments to work
+    if ! grep -q '^```json' "$CLAUDE_OUT" 2>/dev/null; then
+      _fenced_tmp=$(mktemp -t "pr-${PR_NUMBER}-fenced.XXXXXX")
+      { echo '```json'; echo "$_claude_json"; echo '```'; } > "$_fenced_tmp"
+      parse_comments "$_fenced_tmp" "${REVIEW_STRUCTURED}.comments"
+      parse_summary "$_fenced_tmp" "$REVIEW_SUMMARY"
+      rm -f "$_fenced_tmp"
+    else
+      parse_comments "$CLAUDE_OUT" "${REVIEW_STRUCTURED}.comments"
+      parse_summary "$CLAUDE_OUT" "$REVIEW_SUMMARY"
+    fi
   fi
 fi
 
