@@ -2,6 +2,9 @@
 # diffhound — AI-powered PR code review
 # Ensure ~/.local/bin is in PATH (for claude CLI installed via npm)
 export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
+
+# Source .profile for env vars (ANTHROPIC_API_KEY etc.) — needed for non-interactive SSH
+[ -f "$HOME/.profile" ] && . "$HOME/.profile" 2>/dev/null || true
 # Multi-model pipeline: Claude (agentic) → Codex+Gemini (peer review) → Haiku (voice rewrite)
 # https://github.com/shubhamattri/diffhound
 
@@ -1795,6 +1798,8 @@ You MUST output valid JSON. No text before or after the JSON block. Wrap in \`\`
 
 SCORE RULE (critical): The "score" field MUST equal the sum of all scorecard category scores. Do NOT guess or estimate — add them: security.score + tests.score + observability.score + performance.score + readability.score + compatibility.score = score. Double-check your arithmetic.
 
+RE-REVIEW SCORE RULE: When re-reviewing after fixes, if a category has NO new issues, its score MUST be >= the previous review's score. Do NOT deduct points with generic notes like "no regressions" or "no changes" — that is not a reason to lose points. Only deduct if you can cite a SPECIFIC file:line that justifies the deduction. If all prior blockers are fixed, the score should go UP, not down.
+
 LINE NUMBER RULES (critical — wrong lines cause GitHub to reject the comment):
 - LINE must be a line number from the \`+\` side of the diff (i.e. a line shown with \`+\` prefix or unchanged context line inside a hunk)
 - Count from the \`@@ +NEW,count @@\` hunk header to find the correct line number
@@ -2081,50 +2086,81 @@ fi
 spinner_start "Analyzing code (pass 1/${_TOTAL_PASSES})......"
 
 # Pass 1: Claude non-agentic — uses Max subscription (claude.ai auth), NOT the API key.
-# Unset ANTHROPIC_API_KEY temporarily so claude CLI doesn't fall back to pay-per-use billing.
-# The key is restored after this block for the curl-based Haiku call in Pass 3+4.
+# Unset ANTHROPIC_API_KEY temporarily so claude CLI uses OAuth (Max subscription = free).
+# The key is restored after this block for the curl-based Haiku calls.
 _SAVED_API_KEY="${ANTHROPIC_API_KEY:-}"
 unset ANTHROPIC_API_KEY
 
-# Pre-fetch full file contents for changed files (replaces agentic tool calls)
+# Pre-fetch file contents for changed files (replaces agentic tool calls)
+# Budget: max 20KB total context to prevent prompt bloat
 _CONTEXT_FILE=$(mktemp -t "pr-${PR_NUMBER}-context.XXXXXX")
+_CONTEXT_BUDGET=20000  # bytes
+_CONTEXT_USED=0
 {
   echo ""
-  echo "# FULL FILE CONTENTS (for changed files — use these to verify findings)"
+  echo "# FILE CONTENTS (changed files — for verifying findings)"
   echo ""
-  # Extract changed file paths from diff
+  # Only include source files (skip tests, configs, lockfiles)
   grep '^diff --git' "$DIFF_FILE" 2>/dev/null | sed 's|^diff --git a/.* b/||' | sort -u | while read -r _cf; do
     [ -z "$_cf" ] && continue
+    # Skip test files and large generated files
+    case "$_cf" in
+      *test*|*spec*|*__test__*|*.lock|*.min.*|*package-lock*|*yarn.lock*) continue ;;
+    esac
     _full_path="${REPO_PATH}/${_cf}"
     if [ -f "$_full_path" ]; then
-      echo "### FILE: ${_cf}"
-      echo '```'
-      head -200 "$_full_path" 2>/dev/null || true
-      _total_lines=$(wc -l < "$_full_path" 2>/dev/null || echo "0")
-      if [ "${_total_lines:-0}" -gt 200 ]; then
-        echo "... (truncated at 200/${_total_lines} lines)"
+      _file_size=$(wc -c < "$_full_path" 2>/dev/null || echo "0")
+      # Skip files larger than 8KB (likely not reviewable inline)
+      [ "${_file_size:-0}" -gt 8000 ] && continue
+      # Check budget
+      [ "$_CONTEXT_USED" -ge "$_CONTEXT_BUDGET" ] && break
+      _snippet=$(head -150 "$_full_path" 2>/dev/null)
+      _snippet_size=${#_snippet}
+      if [ $((_CONTEXT_USED + _snippet_size)) -le "$_CONTEXT_BUDGET" ]; then
+        echo "### FILE: ${_cf}"
+        echo '```'
+        echo "$_snippet"
+        _total_lines=$(wc -l < "$_full_path" 2>/dev/null || echo "0")
+        [ "${_total_lines:-0}" -gt 150 ] && echo "... (truncated at 150/${_total_lines} lines)"
+        echo '```'
+        echo ""
+        _CONTEXT_USED=$((_CONTEXT_USED + _snippet_size))
       fi
-      echo '```'
-      echo ""
     fi
   done
 } > "$_CONTEXT_FILE"
+
+_ctx_size=$(wc -c < "$_CONTEXT_FILE" 2>/dev/null || echo "0")
+echo "  File context: ${_ctx_size}B (budget: ${_CONTEXT_BUDGET}B)" >&2
 
 # Append file context to prompt
 cat "$_CONTEXT_FILE" >> "$PROMPT_FILE"
 rm -f "$_CONTEXT_FILE"
 
 # Non-agentic pass: no tools needed, all context is inline
-if ! $_TIMEOUT_CMD 180 claude -p \
+# Scale timeout with prompt size: base 180s + 1s per 300 chars, capped at 480s
+# Non-agentic is faster than agentic but large prompts (50KB+) still need 3-5 min
+_PROMPT_BYTES=$(wc -c < "$PROMPT_FILE" 2>/dev/null || echo "0")
+_CLAUDE_TIMEOUT=$(( 180 + _PROMPT_BYTES / 300 ))
+[ "$_CLAUDE_TIMEOUT" -gt 480 ] && _CLAUDE_TIMEOUT=480
+[ "$_CLAUDE_TIMEOUT" -lt 180 ] && _CLAUDE_TIMEOUT=180
+echo "  [debug] prompt=${_PROMPT_BYTES}B, timeout=${_CLAUDE_TIMEOUT}s" >&2
+if ! $_TIMEOUT_CMD "$_CLAUDE_TIMEOUT" claude -p \
     --output-format text \
-    < "$PROMPT_FILE" > "$CLAUDE_OUT" 2>&1; then
+    < "$PROMPT_FILE" > "$CLAUDE_OUT" 2>"${CLAUDE_OUT}.stderr"; then
+  echo "  [debug] claude failed — out=$(wc -c < "$CLAUDE_OUT" 2>/dev/null)B stderr=$(cat "${CLAUDE_OUT}.stderr" 2>/dev/null | head -3)" >&2
   # Check if partial output is usable (timeout may kill mid-write but JSON is complete)
   _partial_json=$(_extract_json "$CLAUDE_OUT" 2>/dev/null || true)
+  echo "  [debug] extract_json length=${#_partial_json}" >&2
   if [ -n "$_partial_json" ] && echo "$_partial_json" | jq -e '.findings' >/dev/null 2>&1; then
     spinner_fail "Analysis timed out but output is usable — continuing"
   else
-    spinner_fail "Primary pass failed — retrying without file context"
-    if ! $_TIMEOUT_CMD 120 claude -p --output-format text < "$PROMPT_FILE" > "$CLAUDE_OUT" 2>&1; then
+    # Preserve prompt for debugging
+    cp "$PROMPT_FILE" /tmp/debug-prompt-last.txt 2>/dev/null || true
+    cp "$CLAUDE_OUT" /tmp/debug-claude-out-last.txt 2>/dev/null || true
+    cp "${CLAUDE_OUT}.stderr" /tmp/debug-claude-err-last.txt 2>/dev/null || true
+    spinner_fail "Primary pass failed — retrying"
+    if ! $_TIMEOUT_CMD 360 claude -p --output-format text < "$PROMPT_FILE" > "$CLAUDE_OUT" 2>&1; then
       _partial_json=$(_extract_json "$CLAUDE_OUT" 2>/dev/null || true)
       if [ -z "$_partial_json" ] || ! echo "$_partial_json" | jq -e '.findings' >/dev/null 2>&1; then
         spinner_fail "Analysis failed"
@@ -2170,28 +2206,46 @@ SCORECARD_JSON -->"
 fi
 
 # ── Script-owned score merging for re-reviews ──────────────────
-# Instead of asking the LLM to anchor scores (unreliable), the script
-# clamps each category to ±5 of the previous review's score. This
-# prevents wild swings while still allowing meaningful score changes.
+# Two modes:
+# 1. MONOTONIC (no new blockers/should-fix): scores can only go UP or stay flat
+#    Rationale: if all prior issues are fixed and nothing new is flagged, the LLM
+#    shouldn't randomly deduct points with generic notes like "no regressions"
+# 2. BOUNDED (new issues found): clamp each category to ±5 of previous score
 if [ "$IS_REREVIEW" = true ] && [ -n "$PREV_SCORECARD_JSON" ]; then
   _json_check=$(_extract_json "$CLAUDE_OUT" 2>/dev/null || true)
   if [ -n "$_json_check" ] && echo "$_json_check" | jq -e '.scorecard' >/dev/null 2>&1; then
-    _merged_json=$(echo "$_json_check" | jq --argjson prev "$PREV_SCORECARD_JSON" '
+    # Determine if there are new BLOCKING or SHOULD-FIX findings
+    _new_blocking=$(echo "$_json_check" | jq '[.findings[]? | select(.severity == "BLOCKING" or .severity == "SHOULD-FIX")] | length' 2>/dev/null || echo "0")
+    _score_mode="monotonic"
+    [ "${_new_blocking:-0}" -gt 0 ] && _score_mode="bounded"
+
+    _merged_json=$(echo "$_json_check" | jq --argjson prev "$PREV_SCORECARD_JSON" --arg mode "$_score_mode" '
       .scorecard as $new |
       reduce ($new | keys[]) as $cat ($new;
         if $prev[$cat] then
           .[$cat].score as $ns |
           $prev[$cat].score as $ps |
-          if ($ns - $ps) > 5 then
-            .[$cat].score = ($ps + 5) |
-            .[$cat].reason = .[$cat].reason + " [clamped: LLM scored \($ns), prev \($ps)]"
-          elif ($ps - $ns) > 5 then
-            .[$cat].score = ($ps - 5) |
-            .[$cat].reason = .[$cat].reason + " [clamped: LLM scored \($ns), prev \($ps)]"
-          else . end
+          if $mode == "monotonic" then
+            # No new issues: scores can only go UP or stay flat
+            if $ns < $ps then
+              .[$cat].score = $ps |
+              .[$cat].reason = .[$cat].reason + " [held: no new issues justify drop from \($ps)]"
+            else . end
+          else
+            # New issues found: allow ±5 swing
+            if ($ns - $ps) > 5 then
+              .[$cat].score = ($ps + 5) |
+              .[$cat].reason = .[$cat].reason + " [clamped: LLM scored \($ns), prev \($ps)]"
+            elif ($ps - $ns) > 5 then
+              .[$cat].score = ($ps - 5) |
+              .[$cat].reason = .[$cat].reason + " [clamped: LLM scored \($ns), prev \($ps)]"
+            else . end
+          end
         else . end
       ) | { scorecard: . }
     ' 2>/dev/null || true)
+
+    echo "  Score mode: ${_score_mode} (new blocking/should-fix: ${_new_blocking:-0})" >&2
 
     if [ -n "$_merged_json" ] && echo "$_merged_json" | jq -e '.scorecard' >/dev/null 2>&1; then
       _new_scorecard=$(echo "$_merged_json" | jq '.scorecard')
@@ -2346,7 +2400,7 @@ PEER_EOF
 
   # Wait with 180s timeout — Codex hangs on websocket disconnects (seen on PRs #35, #45, #47).
   # Watchdog: background a sleep+kill, then wait for the real PIDs.
-  _PEER_TIMEOUT=180
+  _PEER_TIMEOUT=90
   ( sleep "$_PEER_TIMEOUT" && kill $CODEX_PID $GEMINI_PID 2>/dev/null ) &
   _WATCHDOG_PID=$!
 
