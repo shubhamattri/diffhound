@@ -1016,7 +1016,7 @@ _build_review_chunks() {
   local diff_file="$1"
   local triage_file="$2"
   local chunk_dir="$3"
-  local max_chunk_bytes=30720  # 30KB
+  local max_chunk_bytes=102400  # 100KB — Claude handles 200K tokens, fewer chunks = fewer cross-chunk hallucinations
 
   mkdir -p "$chunk_dir"
 
@@ -1163,6 +1163,8 @@ _review_chunks_parallel() {
   local rag_context_file="$4"
   local repo_path="$5"
   local pr_manifest="${6:-}"
+  local is_rereview="${7:-false}"
+  local threads_file="${8:-}"
 
   local chunked_prompt_file="${LIB_DIR}/prompt-chunked.txt"
   local pids=()
@@ -1207,6 +1209,21 @@ _review_chunks_parallel() {
         echo "---"
         echo ""
       fi
+      # Inject re-review context so chunks know about existing threads
+      if [ "$is_rereview" = true ] && [ -n "$threads_file" ] && [ -s "$threads_file" ]; then
+        echo "# RE-REVIEW MODE — EXISTING REVIEW THREADS"
+        echo ""
+        echo "This is a RE-REVIEW, not a first review. Previous review comments exist."
+        echo "Your job is to check if THIS CHUNK's changes address any existing threads."
+        echo "Do NOT re-flag issues that are already in the thread list below (unless still broken)."
+        echo "Do NOT invent new non-security issues in unchanged code."
+        echo "ONLY flag NEW issues introduced by the incremental changes."
+        echo ""
+        cat "$threads_file"
+        echo ""
+        echo "---"
+        echo ""
+      fi
       echo "# PR SUMMARY (applies to entire PR — your chunk is a subset)"
       echo "$pr_summary_header"
       echo ""
@@ -1229,14 +1246,14 @@ _review_chunks_parallel() {
 
     # Launch claude in background with timeout
     (
-      if ! $_TIMEOUT_CMD 300 claude -p \
+      if ! $_TIMEOUT_CMD 480 claude -p \
           --allowedTools "Read,Bash" \
           --add-dir "$repo_path" \
           --dangerously-skip-permissions \
           --output-format text \
           < "$chunk_prompt" > "$chunk_out" 2>&1; then
         # Fallback: non-agentic mode
-        $_TIMEOUT_CMD 180 claude -p < "$chunk_prompt" > "$chunk_out" 2>&1 || \
+        $_TIMEOUT_CMD 300 claude -p < "$chunk_prompt" > "$chunk_out" 2>&1 || \
           echo "CHUNK_${i}_FAILED" > "$chunk_out"
       fi
     ) &
@@ -1621,17 +1638,41 @@ if [ "$REVIEW_TIER" = "LARGE" ] || [ "$REVIEW_TIER" = "HUGE" ]; then
 
   spinner_start "Building review chunks..."
   CHUNK_DIR=$(mktemp -d -t "pr-${PR_NUMBER}-chunks.XXXXXX")
-  CHUNK_COUNT=$(_build_review_chunks "$CLEANED_DIFF" "$TRIAGE_FILE" "$CHUNK_DIR")
+
+  # FIX: For re-reviews, chunk ONLY the incremental diff (what actually changed)
+  # This prevents re-discovering "issues" in unchanged code on every push
+  _CHUNK_SOURCE="$CLEANED_DIFF"
+  _CHUNK_TRIAGE="$TRIAGE_FILE"
+  if [ "$IS_REREVIEW" = true ] && [ -s "${INCREMENTAL_DIFF_FILE:-}" ]; then
+    # Preprocess incremental diff same as full diff
+    _INCR_CLEANED=$(mktemp -t "pr-${PR_NUMBER}-incr-cleaned.XXXXXX")
+    _preprocess_diff "$INCREMENTAL_DIFF_FILE" "$_INCR_CLEANED" "false"
+    _INCR_CLEAN_SIZE=$(wc -c < "$_INCR_CLEANED" | tr -d ' ')
+
+    # Only use incremental if it's meaningfully smaller (>30% reduction)
+    if [ "$_INCR_CLEAN_SIZE" -gt 0 ] && [ "$_INCR_CLEAN_SIZE" -lt $(( CLEANED_SIZE * 70 / 100 )) ]; then
+      _CHUNK_SOURCE="$_INCR_CLEANED"
+      # Re-triage only the changed files
+      _CHUNK_TRIAGE=$(mktemp -t "pr-${PR_NUMBER}-incr-triage.XXXXXX")
+      _triage_files "$_INCR_CLEANED" "$_CHUNK_TRIAGE"
+      echo "  ↻ Re-review: chunking incremental diff only (${_INCR_CLEAN_SIZE}B vs ${CLEANED_SIZE}B full)"
+    else
+      echo "  ↻ Re-review: incremental diff ~same size as full — using full diff"
+      rm -f "$_INCR_CLEANED" 2>/dev/null
+    fi
+  fi
+
+  CHUNK_COUNT=$(_build_review_chunks "$_CHUNK_SOURCE" "$_CHUNK_TRIAGE" "$CHUNK_DIR")
   spinner_stop "Built ${CHUNK_COUNT} chunk(s)"
 
-  # Build PR-wide manifest so each chunk knows what exists in other chunks
+  # Build PR-wide manifest (always from FULL diff so chunks see all files)
   _PR_MANIFEST="${CHUNK_DIR}/pr-manifest.txt"
   _build_pr_manifest "$CLEANED_DIFF" "$TRIAGE_FILE" "$_PR_MANIFEST"
 
   _TOTAL_PASSES=$((CHUNK_COUNT + 2))  # chunks + peer + voice
   [ "$FAST_MODE" = "true" ] && _TOTAL_PASSES=$((CHUNK_COUNT + 1))
   spinner_start "Reviewing ${CHUNK_COUNT} chunks in parallel (pass 1/${_TOTAL_PASSES})..."
-  _review_chunks_parallel "$CHUNK_DIR" "$CHUNK_COUNT" "$PR_SUMMARY_HEADER" "$RAG_CONTEXT_FILE" "$REPO_PATH" "$_PR_MANIFEST"
+  _review_chunks_parallel "$CHUNK_DIR" "$CHUNK_COUNT" "$PR_SUMMARY_HEADER" "$RAG_CONTEXT_FILE" "$REPO_PATH" "$_PR_MANIFEST" "$IS_REREVIEW" "${THREADS_SUMMARY_FILE:-}"
   spinner_stop "Parallel chunk review complete"
 
   spinner_start "Merging findings from ${CHUNK_COUNT} chunks..."
