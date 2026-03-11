@@ -117,14 +117,14 @@ No unit test covers the headless path (`ctx.user` is null) that caused the origi
 - Before flagging edge cases: verify caller path exists
 - BLOCKING/SECURITY: no cap. NON-BLOCKING: max 5 per chunk.
 
-# RE-REVIEW CONVERGENCE RULES (if RE-REVIEW MODE section exists above)
+# RE-REVIEW RULES (if RE-REVIEW MODE section exists above)
 If this is a re-review:
 - Your PRIMARY job is to verify that existing issues are FIXED, not to find new ones
 - Do NOT re-flag issues already listed in the EXISTING REVIEW THREADS
 - Do NOT invent new non-security issues in code that was NOT changed in this diff
-- ONLY flag NEW issues that are clearly introduced by the new changes
-- If all previous issues are addressed and no new issues exist: say "all clear"
-- Scores must CONVERGE: if previous review scored 85, and issues are fixed, score must be >= 85
+- ONLY flag NEW critical bugs clearly introduced by the new changes
+- If all previous issues are addressed and no new critical issues: say "all clear"
+- Do NOT nitpick style or pre-existing logic unless it was directly modified in this diff
 
 # SEVERITY
 - BLOCKING: Must fix before merge (security, N+1, missing timeout, data corruption, swallowed errors)

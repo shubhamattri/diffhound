@@ -1209,17 +1209,34 @@ _review_chunks_parallel() {
         echo "---"
         echo ""
       fi
-      # Inject re-review context so chunks know about existing threads
+      # Inject re-review context — ONLY threads relevant to THIS chunk's files
       if [ "$is_rereview" = true ] && [ -n "$threads_file" ] && [ -s "$threads_file" ]; then
-        echo "# RE-REVIEW MODE — EXISTING REVIEW THREADS"
+        # Filter threads to only include files in this chunk (prevents cross-chunk hallucination)
+        local _chunk_threads="${chunk_dir}/chunk-${i}.threads"
+        local _chunk_files_pattern=""
+        while IFS=$'\t' read -r _cf _cp; do
+          [ -n "$_chunk_files_pattern" ] && _chunk_files_pattern+="|"
+          _chunk_files_pattern+="$_cf"
+        done < "$chunk_manifest"
+        if [ -n "$_chunk_files_pattern" ]; then
+          grep -E "$_chunk_files_pattern" "$threads_file" > "$_chunk_threads" 2>/dev/null || true
+        else
+          : > "$_chunk_threads"
+        fi
+
+        echo "# RE-REVIEW MODE"
         echo ""
-        echo "This is a RE-REVIEW, not a first review. Previous review comments exist."
-        echo "Your job is to check if THIS CHUNK's changes address any existing threads."
-        echo "Do NOT re-flag issues that are already in the thread list below (unless still broken)."
-        echo "Do NOT invent new non-security issues in unchanged code."
-        echo "ONLY flag NEW issues introduced by the incremental changes."
+        echo "This is a RE-REVIEW. Previous review comments exist for your files."
+        echo "- Do NOT re-flag issues already listed below (unless still broken in the new diff)"
+        echo "- Do NOT invent new non-security issues in code that was NOT changed"
+        echo "- ONLY flag issues clearly introduced by the new changes"
         echo ""
-        cat "$threads_file"
+        if [ -s "$_chunk_threads" ]; then
+          echo "## Existing threads for YOUR files:"
+          cat "$_chunk_threads"
+        else
+          echo "## No existing threads for your files — treat as fresh review for these files"
+        fi
         echo ""
         echo "---"
         echo ""
@@ -1649,8 +1666,17 @@ if [ "$REVIEW_TIER" = "LARGE" ] || [ "$REVIEW_TIER" = "HUGE" ]; then
     _preprocess_diff "$INCREMENTAL_DIFF_FILE" "$_INCR_CLEANED" "false"
     _INCR_CLEAN_SIZE=$(wc -c < "$_INCR_CLEANED" | tr -d ' ')
 
+    # Guard: empty incremental = merge commit or no real changes. Skip chunking entirely.
+    if [ "$_INCR_CLEAN_SIZE" -eq 0 ]; then
+      echo "  ↻ Re-review: incremental diff is empty (merge commit?) — nothing to re-review"
+      rm -f "$_INCR_CLEANED" 2>/dev/null
+      # Clean up and exit — no new code to review
+      echo "  ✅ No new code changes since last review. Skipping."
+      exit 0
+    fi
+
     # Only use incremental if it's meaningfully smaller (>30% reduction)
-    if [ "$_INCR_CLEAN_SIZE" -gt 0 ] && [ "$_INCR_CLEAN_SIZE" -lt $(( CLEANED_SIZE * 70 / 100 )) ]; then
+    if [ "$_INCR_CLEAN_SIZE" -lt $(( CLEANED_SIZE * 70 / 100 )) ]; then
       _CHUNK_SOURCE="$_INCR_CLEANED"
       # Re-triage only the changed files
       _CHUNK_TRIAGE=$(mktemp -t "pr-${PR_NUMBER}-incr-triage.XXXXXX")
