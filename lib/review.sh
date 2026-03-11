@@ -2193,6 +2193,7 @@ fi
 # ============================================================
 CODEX_CONTENT=""
 GEMINI_CONTENT=""
+PEER_COVERAGE=""
 
 _RUN_PEER_REVIEW=false
 _PEER_MODE="fresh"  # "fresh" = aggressive gap-hunt, "rereview" = incremental-only + softened
@@ -2330,7 +2331,18 @@ PEER_EOF
 
   CODEX_CONTENT=$(cat "$CODEX_OUT")
   GEMINI_CONTENT=$(cat "$GEMINI_OUT")
-  spinner_stop "Pass 2 complete"
+
+  # Track peer review coverage for transparency
+  _PEER_COUNT=0
+  _PEER_NAMES=""
+  if [ -n "$CODEX_CONTENT" ] && [ "$CODEX_CONTENT" != "CODEX_UNAVAILABLE" ]; then
+    _PEER_COUNT=$((_PEER_COUNT + 1)); _PEER_NAMES="Codex"
+  fi
+  if [ -n "$GEMINI_CONTENT" ] && [ "$GEMINI_CONTENT" != "GEMINI_UNAVAILABLE" ]; then
+    _PEER_COUNT=$((_PEER_COUNT + 1)); _PEER_NAMES="${_PEER_NAMES:+$_PEER_NAMES + }Gemini"
+  fi
+  PEER_COVERAGE="${_PEER_COUNT}/2 peer models (${_PEER_NAMES:-none})"
+  spinner_stop "Pass 2 complete — ${PEER_COVERAGE}"
 fi
 
 # SYNTH_FINDINGS points to Claude's raw output for Voice RAG category detection.
@@ -2451,14 +2463,12 @@ Evidence: \(.value.evidence // "none")
 
       # Parse verification results and filter findings
       if [ -n "$_verify_resp" ]; then
-        _verify_json
         _verify_json=$(echo "$_verify_resp" | sed -n '/^```json/,/^```/{/^```/d;p;}' 2>/dev/null || echo "$_verify_resp")
 
         if echo "$_verify_json" | jq -e '.verifications' >/dev/null 2>&1; then
           _dropped=0; _downgraded=0
 
           # Build filtered findings JSON
-          _filtered_json
           _filtered_json=$(echo "$_FINDINGS_JSON" | jq --argjson verifications "$(echo "$_verify_json" | jq '.verifications')" '
             # Filter findings based on verification results
             .findings = [
@@ -2895,6 +2905,12 @@ rm -f "${SYNTH_FINDINGS:-}" "${VOICE_EXAMPLES_FILE:-}" 2>/dev/null || true
 # ============================================================
 parse_comments "$REVIEW_STRUCTURED" "${REVIEW_STRUCTURED}.comments"
 parse_summary "$REVIEW_STRUCTURED" "$REVIEW_SUMMARY"
+
+# Append peer review coverage note to summary
+if [ -n "${PEER_COVERAGE:-}" ]; then
+  echo "" >> "$REVIEW_SUMMARY"
+  echo "*Cross-checked by ${PEER_COVERAGE}.*" >> "$REVIEW_SUMMARY"
+fi
 
 COMMENT_COUNT=$(grep -c "^COMMENT:" "${REVIEW_STRUCTURED}.comments" || true)
 REPLY_COUNT_PREVIEW=$(grep -c "^REPLY:" "${REVIEW_STRUCTURED}.comments" || true)
