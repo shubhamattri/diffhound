@@ -2086,14 +2086,14 @@ spinner_start "Analyzing code (pass 1/${_TOTAL_PASSES})......"
 _SAVED_API_KEY="${ANTHROPIC_API_KEY:-}"
 unset ANTHROPIC_API_KEY
 
-if ! $_TIMEOUT_CMD 300 claude -p \
+if ! $_TIMEOUT_CMD 480 claude -p \
     --allowedTools "Read,Bash" \
     --add-dir "$REPO_PATH" \
     --dangerously-skip-permissions \
     --output-format text \
     < "$PROMPT_FILE" > "$CLAUDE_OUT" 2>&1; then
   spinner_fail "Agentic pass failed — falling back to standard analysis"
-  if ! $_TIMEOUT_CMD 180 claude -p --output-format text < "$PROMPT_FILE" > "$CLAUDE_OUT" 2>&1; then
+  if ! $_TIMEOUT_CMD 300 claude -p --output-format text < "$PROMPT_FILE" > "$CLAUDE_OUT" 2>&1; then
     spinner_fail "Analysis failed"
     cat "$CLAUDE_OUT" >&2
     export ANTHROPIC_API_KEY="$_SAVED_API_KEY"
