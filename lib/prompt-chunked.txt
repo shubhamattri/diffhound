@@ -118,13 +118,16 @@ No unit test covers the headless path (`ctx.user` is null) that caused the origi
 - BLOCKING/SECURITY: no cap. NON-BLOCKING: max 5 per chunk.
 
 # RE-REVIEW RULES (if RE-REVIEW MODE section exists above)
-If this is a re-review:
-- Your PRIMARY job is to verify that existing issues are FIXED, not to find new ones
-- Do NOT re-flag issues already listed in the EXISTING REVIEW THREADS
-- Do NOT invent new non-security issues in code that was NOT changed in this diff
-- ONLY flag NEW critical bugs clearly introduced by the new changes
-- If all previous issues are addressed and no new critical issues: say "all clear"
-- Do NOT nitpick style or pre-existing logic unless it was directly modified in this diff
+If this is a re-review, follow the CONTEXTUAL BLINDERS approach:
+- TASK 1: Verify each existing thread — is the concern FIXED? Report THREAD_STATUS for each.
+- TASK 2: Scan for regressions — did any fix INTRODUCE a new problem?
+- TASK 3: Check security-sensitive files with FULL scrutiny (auth, permissions, migrations, secrets)
+- Changed files (listed in TASK 2 above): flag ANY real issue — blocking, should-fix, security
+- Unchanged files: ONLY flag security vulnerabilities or data corruption. Nothing else.
+- If the first review missed a real bug and you see it now: FLAG IT (note: "missed in round 1")
+- Do NOT re-flag issues already in the threads (unless still broken in current code)
+- Do NOT nitpick style, naming, or formatting on ANY file (changed or not)
+- Security/auth/permissions: ALWAYS full scrutiny regardless of change status
 
 # SEVERITY
 - BLOCKING: Must fix before merge (security, N+1, missing timeout, data corruption, swallowed errors)

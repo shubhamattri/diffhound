@@ -1016,7 +1016,7 @@ _build_review_chunks() {
   local diff_file="$1"
   local triage_file="$2"
   local chunk_dir="$3"
-  local max_chunk_bytes=102400  # 100KB — Claude handles 200K tokens, fewer chunks = fewer cross-chunk hallucinations
+  local max_chunk_bytes=51200  # 50KB — balance between cross-chunk blindness (too small) and attention drift (too large)
 
   mkdir -p "$chunk_dir"
 
@@ -1165,6 +1165,7 @@ _review_chunks_parallel() {
   local pr_manifest="${6:-}"
   local is_rereview="${7:-false}"
   local threads_file="${8:-}"
+  local incr_files="${9:-}"
 
   local chunked_prompt_file="${LIB_DIR}/prompt-chunked.txt"
   local pids=()
@@ -1209,34 +1210,85 @@ _review_chunks_parallel() {
         echo "---"
         echo ""
       fi
-      # Inject re-review context — ONLY threads relevant to THIS chunk's files
-      if [ "$is_rereview" = true ] && [ -n "$threads_file" ] && [ -s "$threads_file" ]; then
-        # Filter threads to only include files in this chunk (prevents cross-chunk hallucination)
+      # Inject re-review context with CONTEXTUAL BLINDERS approach:
+      # - Full diff visibility (already provided as chunk diff)
+      # - Scoped instructions: what to complain about depends on file type + change status
+      if [ "$is_rereview" = true ]; then
+        # Filter threads to only this chunk's files
         local _chunk_threads="${chunk_dir}/chunk-${i}.threads"
-        local _chunk_files_pattern=""
-        while IFS=$'\t' read -r _cf _cp; do
-          [ -n "$_chunk_files_pattern" ] && _chunk_files_pattern+="|"
-          _chunk_files_pattern+="$_cf"
-        done < "$chunk_manifest"
-        if [ -n "$_chunk_files_pattern" ]; then
-          grep -E "$_chunk_files_pattern" "$threads_file" > "$_chunk_threads" 2>/dev/null || true
+        if [ -n "$threads_file" ] && [ -s "$threads_file" ]; then
+          local _chunk_files_pattern=""
+          while IFS=$'\t' read -r _cf _cp; do
+            [ -n "$_chunk_files_pattern" ] && _chunk_files_pattern+="|"
+            _chunk_files_pattern+="$_cf"
+          done < "$chunk_manifest"
+          if [ -n "$_chunk_files_pattern" ]; then
+            grep -E "$_chunk_files_pattern" "$threads_file" > "$_chunk_threads" 2>/dev/null || true
+          else
+            : > "$_chunk_threads"
+          fi
         else
           : > "$_chunk_threads"
         fi
 
-        echo "# RE-REVIEW MODE"
+        # Determine which files in this chunk were changed incrementally
+        local _chunk_incr_files="${chunk_dir}/chunk-${i}.incr-files"
+        local _chunk_has_security_files=false
+        : > "$_chunk_incr_files"
+        if [ -n "$incr_files" ] && [ -s "$incr_files" ]; then
+          while IFS=$'\t' read -r _cf _cp; do
+            if grep -qF "$_cf" "$incr_files" 2>/dev/null; then
+              echo "$_cf" >> "$_chunk_incr_files"
+            fi
+            # Check for security-sensitive files
+            case "$_cf" in
+              *auth*|*permission*|*rbac*|*acl*|*security*|*secret*|*token*|*session*|*middleware/auth*|*guard*|*policy*|*migration*|*\.env*) _chunk_has_security_files=true ;;
+            esac
+          done < "$chunk_manifest"
+        fi
+
+        echo "# RE-REVIEW MODE — CONTEXTUAL BLINDERS"
         echo ""
-        echo "This is a RE-REVIEW. Previous review comments exist for your files."
-        echo "- Do NOT re-flag issues already listed below (unless still broken in the new diff)"
-        echo "- Do NOT invent new non-security issues in code that was NOT changed"
-        echo "- ONLY flag issues clearly introduced by the new changes"
+        echo "This is a RE-REVIEW. You see the FULL diff for context, but your feedback is SCOPED."
         echo ""
+        echo "## TASK 1: Verify existing threads (highest priority)"
         if [ -s "$_chunk_threads" ]; then
-          echo "## Existing threads for YOUR files:"
+          echo "Check each thread below — is the concern now FIXED in the current code?"
+          echo ""
           cat "$_chunk_threads"
         else
-          echo "## No existing threads for your files — treat as fresh review for these files"
+          echo "(No existing threads for your files)"
         fi
+        echo ""
+        echo "## TASK 2: Scan for regressions and new critical issues"
+        if [ -s "$_chunk_incr_files" ]; then
+          echo "Files changed since last review (FULL SCRUTINY on these):"
+          sed 's/^/  - /' "$_chunk_incr_files"
+          echo ""
+          echo "Files NOT changed since last review (LIMITED SCRUTINY — security/data-corruption only):"
+          while IFS=$'\t' read -r _cf _cp; do
+            if ! grep -qF "$_cf" "$_chunk_incr_files" 2>/dev/null; then
+              echo "  - $_cf (unchanged — only flag security/data-corruption)"
+            fi
+          done < "$chunk_manifest"
+        else
+          echo "All files in this chunk should receive FULL scrutiny (no incremental info available)."
+        fi
+        echo ""
+        if [ "$_chunk_has_security_files" = true ]; then
+          echo "## ⚠ SECURITY-SENSITIVE FILES DETECTED"
+          echo "Files matching auth/permissions/migrations/secrets patterns found in this chunk."
+          echo "These files ALWAYS get FULL scrutiny regardless of change status."
+          echo "Check: auth bypass, privilege escalation, missing guards, removed checks."
+          echo ""
+        fi
+        echo "## SCOPING RULES:"
+        echo "- Changed files: flag ANY real issue (blocking, should-fix, security)"
+        echo "- Unchanged files: ONLY flag security vulnerabilities or data corruption"
+        echo "- Security-sensitive files (auth, permissions, migrations): ALWAYS full scrutiny"
+        echo "- Do NOT re-flag issues already in the threads above (unless still broken)"
+        echo "- Do NOT nitpick style, naming, or formatting on ANY file"
+        echo "- If the first review missed a real bug and you see it now: FLAG IT (with note: missed in round 1)"
         echo ""
         echo "---"
         echo ""
@@ -1463,9 +1515,10 @@ fi
 THREADS_SUMMARY_FILE=$(mktemp -t "pr-${PR_NUMBER}-threads.XXXXXX")
 
 jq -r --arg login "$REVIEWER_LOGIN" '
-  # Group by thread: top-level comments and their replies
+  # ONLY include threads started by the reviewer (Diffhound), not other humans or bots.
+  # This prevents external comments from suppressing the reviewer own findings.
   . as $all |
-  [ .[] | select(.in_reply_to_id == null) ] |
+  [ .[] | select(.in_reply_to_id == null and .user == $login) ] |
   .[] |
   . as $top |
   "THREAD at \(.path):\(.line // "general")\n" +
@@ -1656,36 +1709,32 @@ if [ "$REVIEW_TIER" = "LARGE" ] || [ "$REVIEW_TIER" = "HUGE" ]; then
   spinner_start "Building review chunks..."
   CHUNK_DIR=$(mktemp -d -t "pr-${PR_NUMBER}-chunks.XXXXXX")
 
-  # FIX: For re-reviews, chunk ONLY the incremental diff (what actually changed)
-  # This prevents re-discovering "issues" in unchanged code on every push
+  # Re-reviews ALWAYS chunk the FULL diff (prevents temporal context loss).
+  # But we also compute which files changed incrementally so the prompt can
+  # apply "contextual blinders" — full visibility, scoped complaints.
   _CHUNK_SOURCE="$CLEANED_DIFF"
   _CHUNK_TRIAGE="$TRIAGE_FILE"
+  _INCR_FILES_LIST=""
   if [ "$IS_REREVIEW" = true ] && [ -s "${INCREMENTAL_DIFF_FILE:-}" ]; then
-    # Preprocess incremental diff same as full diff
+    # Preprocess incremental diff to extract changed file list
     _INCR_CLEANED=$(mktemp -t "pr-${PR_NUMBER}-incr-cleaned.XXXXXX")
     _preprocess_diff "$INCREMENTAL_DIFF_FILE" "$_INCR_CLEANED" "false"
     _INCR_CLEAN_SIZE=$(wc -c < "$_INCR_CLEANED" | tr -d ' ')
 
-    # Guard: empty incremental = merge commit or no real changes. Skip chunking entirely.
+    # Guard: empty incremental = merge commit or no real changes
     if [ "$_INCR_CLEAN_SIZE" -eq 0 ]; then
       echo "  ↻ Re-review: incremental diff is empty (merge commit?) — nothing to re-review"
       rm -f "$_INCR_CLEANED" 2>/dev/null
-      # Clean up and exit — no new code to review
       echo "  ✅ No new code changes since last review. Skipping."
       exit 0
     fi
 
-    # Only use incremental if it's meaningfully smaller (>30% reduction)
-    if [ "$_INCR_CLEAN_SIZE" -lt $(( CLEANED_SIZE * 70 / 100 )) ]; then
-      _CHUNK_SOURCE="$_INCR_CLEANED"
-      # Re-triage only the changed files
-      _CHUNK_TRIAGE=$(mktemp -t "pr-${PR_NUMBER}-incr-triage.XXXXXX")
-      _triage_files "$_INCR_CLEANED" "$_CHUNK_TRIAGE"
-      echo "  ↻ Re-review: chunking incremental diff only (${_INCR_CLEAN_SIZE}B vs ${CLEANED_SIZE}B full)"
-    else
-      echo "  ↻ Re-review: incremental diff ~same size as full — using full diff"
-      rm -f "$_INCR_CLEANED" 2>/dev/null
-    fi
+    # Build list of incrementally changed files (for contextual blinders)
+    _INCR_FILES_LIST=$(mktemp -t "pr-${PR_NUMBER}-incr-files.XXXXXX")
+    grep '^diff --git' "$_INCR_CLEANED" | sed 's|^diff --git a/.* b/||' | sort -u > "$_INCR_FILES_LIST"
+    _INCR_FILE_COUNT=$(wc -l < "$_INCR_FILES_LIST" | tr -d ' ')
+    echo "  ↻ Re-review: full diff for context, ${_INCR_FILE_COUNT} files changed since last review"
+    rm -f "$_INCR_CLEANED" 2>/dev/null
   fi
 
   CHUNK_COUNT=$(_build_review_chunks "$_CHUNK_SOURCE" "$_CHUNK_TRIAGE" "$CHUNK_DIR")
@@ -1698,7 +1747,7 @@ if [ "$REVIEW_TIER" = "LARGE" ] || [ "$REVIEW_TIER" = "HUGE" ]; then
   _TOTAL_PASSES=$((CHUNK_COUNT + 2))  # chunks + peer + voice
   [ "$FAST_MODE" = "true" ] && _TOTAL_PASSES=$((CHUNK_COUNT + 1))
   spinner_start "Reviewing ${CHUNK_COUNT} chunks in parallel (pass 1/${_TOTAL_PASSES})..."
-  _review_chunks_parallel "$CHUNK_DIR" "$CHUNK_COUNT" "$PR_SUMMARY_HEADER" "$RAG_CONTEXT_FILE" "$REPO_PATH" "$_PR_MANIFEST" "$IS_REREVIEW" "${THREADS_SUMMARY_FILE:-}"
+  _review_chunks_parallel "$CHUNK_DIR" "$CHUNK_COUNT" "$PR_SUMMARY_HEADER" "$RAG_CONTEXT_FILE" "$REPO_PATH" "$_PR_MANIFEST" "$IS_REREVIEW" "${THREADS_SUMMARY_FILE:-}" "${_INCR_FILES_LIST:-}"
   spinner_stop "Parallel chunk review complete"
 
   spinner_start "Merging findings from ${CHUNK_COUNT} chunks..."
