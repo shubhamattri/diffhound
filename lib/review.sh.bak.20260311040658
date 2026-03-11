@@ -2,9 +2,6 @@
 # diffhound — AI-powered PR code review
 # Ensure ~/.local/bin is in PATH (for claude CLI installed via npm)
 export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
-
-# Source .profile for env vars (ANTHROPIC_API_KEY etc.) — needed for non-interactive SSH
-[ -f "$HOME/.profile" ] && . "$HOME/.profile" 2>/dev/null || true
 # Multi-model pipeline: Claude (agentic) → Codex+Gemini (peer review) → Haiku (voice rewrite)
 # https://github.com/shubhamattri/diffhound
 
@@ -480,40 +477,33 @@ _respond_to_dev_replies() {
       fi
     fi
 
-    # Build the prompt (use temp file to avoid quote-breaking from comment bodies)
-    local _prompt_file
-    _prompt_file=$(mktemp -t "respond-prompt-${pr}.XXXXXX")
-    {
-      cat << 'RESPOND_RULES'
-You are a code reviewer replying to a developer's response on a PR comment.
-RESPOND_RULES
-      echo ""
-      echo "YOUR ORIGINAL COMMENT:"
-      printf '%s\n' "$original_comment"
-      echo ""
-      echo "DEVELOPER'S REPLY:"
-      printf '%s\n' "$dev_reply"
-      echo ""
-      if [ -n "$code_context" ]; then
-        echo "CODE CONTEXT (${file_path} around the comment):"
-        printf '%s\n' "$code_context"
-        echo ""
-      fi
-      cat << 'RESPOND_RULES_END'
+    # Build the prompt
+    local prompt
+    prompt="You are a code reviewer replying to a developer's response on a PR comment.
+
+YOUR ORIGINAL COMMENT:
+${original_comment}
+
+DEVELOPER'S REPLY:
+${dev_reply}
+"
+    if [ -n "$code_context" ]; then
+      prompt+="
+CODE CONTEXT (${file_path} around the comment):
+${code_context}
+"
+    fi
+
+    prompt+="
 Rules:
-- If dev says "fixed"/"done" → reply "thanks, will verify on next push" (1 line)
+- If dev says \"fixed\"/\"done\" → reply \"thanks, will verify on next push\" (1 line)
 - If dev chose an option you suggested → acknowledge briefly
-- If dev says "intentional" → accept if reasonable, push back with evidence if not
+- If dev says \"intentional\" → accept if reasonable, push back with evidence if not
 - If dev asks a question → answer concisely
 - If dev disagrees → re-evaluate honestly. Concede if they're right.
 - Keep replies to 1-3 sentences. Same casual voice as your review comments.
 - NEVER repeat the original concern verbatim. The thread already has it.
-- NEVER mention AI, automated review, or any tool name.
-RESPOND_RULES_END
-    } > "$_prompt_file"
-    local prompt
-    prompt=$(cat "$_prompt_file")
-    rm -f "$_prompt_file"
+- NEVER mention AI, automated review, or any tool name."
 
     # Call Claude Haiku via API (fast + cheap)
     local ai_reply=""
@@ -629,27 +619,17 @@ _distill_false_positives() {
     [ "$reviewer_replied_concession" = false ] && continue
 
     # ── Extract lesson via Claude Haiku ──
-    local _lesson_prompt_file
-    _lesson_prompt_file=$(mktemp -t "lesson-prompt-${pr}.XXXXXX")
-    {
-      cat << 'LESSON_RULES'
-Extract a single one-line lesson from this false positive in code review.
-LESSON_RULES
-      echo ""
-      echo "REVIEWER COMMENT (false positive):"
-      printf '%s\n' "${reviewer_comment:0:500}"
-      echo ""
-      echo "DEV REPLY (correction):"
-      printf '%s\n' "${dev_reply:0:500}"
-      echo ""
-      cat << 'LESSON_RULES_END'
-Write EXACTLY one line in this format: Do not flag X when Y because Z.
-No preamble, no explanation, just the one line.
-LESSON_RULES_END
-    } > "$_lesson_prompt_file"
     local lesson_prompt
-    lesson_prompt=$(cat "$_lesson_prompt_file")
-    rm -f "$_lesson_prompt_file"
+    lesson_prompt="Extract a single one-line lesson from this false positive in code review.
+
+REVIEWER COMMENT (false positive):
+${reviewer_comment:0:500}
+
+DEV REPLY (correction):
+${dev_reply:0:500}
+
+Write EXACTLY one line in this format: Do not flag X when Y because Z.
+No preamble, no explanation, just the one line."
 
     local lesson=""
     local _saved_key="${ANTHROPIC_API_KEY:-}"
@@ -1815,8 +1795,6 @@ You MUST output valid JSON. No text before or after the JSON block. Wrap in \`\`
 
 SCORE RULE (critical): The "score" field MUST equal the sum of all scorecard category scores. Do NOT guess or estimate — add them: security.score + tests.score + observability.score + performance.score + readability.score + compatibility.score = score. Double-check your arithmetic.
 
-RE-REVIEW SCORE RULE: When re-reviewing after fixes, if a category has NO new issues, its score MUST be >= the previous review's score. Do NOT deduct points with generic notes like "no regressions" or "no changes" — that is not a reason to lose points. Only deduct if you can cite a SPECIFIC file:line that justifies the deduction. If all prior blockers are fixed, the score should go UP, not down.
-
 LINE NUMBER RULES (critical — wrong lines cause GitHub to reject the comment):
 - LINE must be a line number from the \`+\` side of the diff (i.e. a line shown with \`+\` prefix or unchanged context line inside a hunk)
 - Count from the \`@@ +NEW,count @@\` hunk header to find the correct line number
@@ -2087,7 +2065,7 @@ RAG_HEADER
 fi
 
 # ============================================================
-# STEP 3: RUN CLAUDE — NON-AGENTIC PASS (inline context, no tools)
+# STEP 3: RUN CLAUDE — AGENTIC PASS (primary review with tools)
 # ============================================================
 echo ""
 echo ""
@@ -2102,78 +2080,26 @@ if [ "$IS_REREVIEW" = true ] && [ "$REREVIEW_DEPTH" = "shallow" ]; then
 fi
 spinner_start "Analyzing code (pass 1/${_TOTAL_PASSES})......"
 
-# Pass 1: Claude non-agentic — uses Max subscription (claude.ai auth), NOT the API key.
-# Unset ANTHROPIC_API_KEY temporarily so claude CLI uses OAuth (Max subscription = free).
-# The key is restored after this block for the curl-based Haiku calls.
+# Pass 1: Claude agentic — uses Max subscription (claude.ai auth), NOT the API key.
+# Unset ANTHROPIC_API_KEY temporarily so claude CLI doesn't fall back to pay-per-use billing.
+# The key is restored after this block for the curl-based Haiku call in Pass 3+4.
 _SAVED_API_KEY="${ANTHROPIC_API_KEY:-}"
 unset ANTHROPIC_API_KEY
 
-# Pre-fetch file contents for changed files (replaces agentic tool calls)
-# Budget: max 20KB total context to prevent prompt bloat
-_CONTEXT_FILE=$(mktemp -t "pr-${PR_NUMBER}-context.XXXXXX")
-_CONTEXT_BUDGET=20000  # bytes
-_CONTEXT_USED=0
-{
-  echo ""
-  echo "# FILE CONTENTS (changed files — for verifying findings)"
-  echo ""
-  # Only include source files (skip tests, configs, lockfiles)
-  grep '^diff --git' "$DIFF_FILE" 2>/dev/null | sed 's|^diff --git a/.* b/||' | sort -u | while read -r _cf; do
-    [ -z "$_cf" ] && continue
-    # Skip test files and large generated files
-    case "$_cf" in
-      *test*|*spec*|*__test__*|*.lock|*.min.*|*package-lock*|*yarn.lock*) continue ;;
-    esac
-    _full_path="${REPO_PATH}/${_cf}"
-    if [ -f "$_full_path" ]; then
-      _file_size=$(wc -c < "$_full_path" 2>/dev/null || echo "0")
-      # Skip files larger than 8KB (likely not reviewable inline)
-      [ "${_file_size:-0}" -gt 8000 ] && continue
-      # Check budget
-      [ "$_CONTEXT_USED" -ge "$_CONTEXT_BUDGET" ] && break
-      _snippet=$(head -150 "$_full_path" 2>/dev/null)
-      _snippet_size=${#_snippet}
-      if [ $((_CONTEXT_USED + _snippet_size)) -le "$_CONTEXT_BUDGET" ]; then
-        echo "### FILE: ${_cf}"
-        echo '```'
-        echo "$_snippet"
-        _total_lines=$(wc -l < "$_full_path" 2>/dev/null || echo "0")
-        [ "${_total_lines:-0}" -gt 150 ] && echo "... (truncated at 150/${_total_lines} lines)"
-        echo '```'
-        echo ""
-        _CONTEXT_USED=$((_CONTEXT_USED + _snippet_size))
-      fi
-    fi
-  done
-} > "$_CONTEXT_FILE"
-
-_ctx_size=$(wc -c < "$_CONTEXT_FILE" 2>/dev/null || echo "0")
-echo "  File context: ${_ctx_size}B (budget: ${_CONTEXT_BUDGET}B)" >&2
-
-# Append file context to prompt
-cat "$_CONTEXT_FILE" >> "$PROMPT_FILE"
-rm -f "$_CONTEXT_FILE"
-
-# Non-agentic pass: no tools needed, all context is inline
-# Scale timeout with prompt size: base 180s + 1s per 300 chars, capped at 480s
-# Non-agentic is faster than agentic but large prompts (50KB+) still need 3-5 min
-_PROMPT_BYTES=$(wc -c < "$PROMPT_FILE" 2>/dev/null || echo "0")
-_CLAUDE_TIMEOUT=$(( 180 + _PROMPT_BYTES / 300 ))
-[ "$_CLAUDE_TIMEOUT" -gt 480 ] && _CLAUDE_TIMEOUT=480
-[ "$_CLAUDE_TIMEOUT" -lt 180 ] && _CLAUDE_TIMEOUT=180
-echo "  [debug] prompt=${_PROMPT_BYTES}B, timeout=${_CLAUDE_TIMEOUT}s" >&2
-if ! $_TIMEOUT_CMD "$_CLAUDE_TIMEOUT" claude -p \
+if ! $_TIMEOUT_CMD 600 claude -p \
+    --allowedTools "Read,Bash" \
+    --add-dir "$REPO_PATH" \
+    --dangerously-skip-permissions \
     --output-format text \
-    < "$PROMPT_FILE" > "$CLAUDE_OUT" 2>"${CLAUDE_OUT}.stderr"; then
-  echo "  [debug] claude failed — out=$(wc -c < "$CLAUDE_OUT" 2>/dev/null)B stderr=$(cat "${CLAUDE_OUT}.stderr" 2>/dev/null | head -3)" >&2
+    < "$PROMPT_FILE" > "$CLAUDE_OUT" 2>&1; then
   # Check if partial output is usable (timeout may kill mid-write but JSON is complete)
   _partial_json=$(_extract_json "$CLAUDE_OUT" 2>/dev/null || true)
-  echo "  [debug] extract_json length=${#_partial_json}" >&2
   if [ -n "$_partial_json" ] && echo "$_partial_json" | jq -e '.findings' >/dev/null 2>&1; then
-    spinner_fail "Analysis timed out but output is usable — continuing"
+    spinner_fail "Agentic pass timed out but output is usable — continuing"
   else
-    spinner_fail "Primary pass failed — retrying"
-    if ! $_TIMEOUT_CMD 360 claude -p --output-format text < "$PROMPT_FILE" > "$CLAUDE_OUT" 2>&1; then
+    spinner_fail "Agentic pass failed — falling back to standard analysis"
+    if ! $_TIMEOUT_CMD 480 claude -p --output-format text < "$PROMPT_FILE" > "$CLAUDE_OUT" 2>&1; then
+      # Same check: partial output may still be usable
       _partial_json=$(_extract_json "$CLAUDE_OUT" 2>/dev/null || true)
       if [ -z "$_partial_json" ] || ! echo "$_partial_json" | jq -e '.findings' >/dev/null 2>&1; then
         spinner_fail "Analysis failed"
@@ -2219,46 +2145,28 @@ SCORECARD_JSON -->"
 fi
 
 # ── Script-owned score merging for re-reviews ──────────────────
-# Two modes:
-# 1. MONOTONIC (no new blockers/should-fix): scores can only go UP or stay flat
-#    Rationale: if all prior issues are fixed and nothing new is flagged, the LLM
-#    shouldn't randomly deduct points with generic notes like "no regressions"
-# 2. BOUNDED (new issues found): clamp each category to ±5 of previous score
+# Instead of asking the LLM to anchor scores (unreliable), the script
+# clamps each category to ±5 of the previous review's score. This
+# prevents wild swings while still allowing meaningful score changes.
 if [ "$IS_REREVIEW" = true ] && [ -n "$PREV_SCORECARD_JSON" ]; then
   _json_check=$(_extract_json "$CLAUDE_OUT" 2>/dev/null || true)
   if [ -n "$_json_check" ] && echo "$_json_check" | jq -e '.scorecard' >/dev/null 2>&1; then
-    # Determine if there are new BLOCKING or SHOULD-FIX findings
-    _new_blocking=$(echo "$_json_check" | jq '[.findings[]? | select(.severity == "BLOCKING" or .severity == "SHOULD-FIX")] | length' 2>/dev/null || echo "0")
-    _score_mode="monotonic"
-    [ "${_new_blocking:-0}" -gt 0 ] && _score_mode="bounded"
-
-    _merged_json=$(echo "$_json_check" | jq --argjson prev "$PREV_SCORECARD_JSON" --arg mode "$_score_mode" '
+    _merged_json=$(echo "$_json_check" | jq --argjson prev "$PREV_SCORECARD_JSON" '
       .scorecard as $new |
       reduce ($new | keys[]) as $cat ($new;
         if $prev[$cat] then
           .[$cat].score as $ns |
           $prev[$cat].score as $ps |
-          if $mode == "monotonic" then
-            # No new issues: scores can only go UP or stay flat
-            if $ns < $ps then
-              .[$cat].score = $ps |
-              .[$cat].reason = .[$cat].reason + " [held: no new issues justify drop from \($ps)]"
-            else . end
-          else
-            # New issues found: allow ±5 swing
-            if ($ns - $ps) > 5 then
-              .[$cat].score = ($ps + 5) |
-              .[$cat].reason = .[$cat].reason + " [clamped: LLM scored \($ns), prev \($ps)]"
-            elif ($ps - $ns) > 5 then
-              .[$cat].score = ($ps - 5) |
-              .[$cat].reason = .[$cat].reason + " [clamped: LLM scored \($ns), prev \($ps)]"
-            else . end
-          end
+          if ($ns - $ps) > 5 then
+            .[$cat].score = ($ps + 5) |
+            .[$cat].reason = .[$cat].reason + " [clamped: LLM scored \($ns), prev \($ps)]"
+          elif ($ps - $ns) > 5 then
+            .[$cat].score = ($ps - 5) |
+            .[$cat].reason = .[$cat].reason + " [clamped: LLM scored \($ns), prev \($ps)]"
+          else . end
         else . end
       ) | { scorecard: . }
     ' 2>/dev/null || true)
-
-    echo "  Score mode: ${_score_mode} (new blocking/should-fix: ${_new_blocking:-0})" >&2
 
     if [ -n "$_merged_json" ] && echo "$_merged_json" | jq -e '.scorecard' >/dev/null 2>&1; then
       _new_scorecard=$(echo "$_merged_json" | jq '.scorecard')
@@ -2413,7 +2321,7 @@ PEER_EOF
 
   # Wait with 180s timeout — Codex hangs on websocket disconnects (seen on PRs #35, #45, #47).
   # Watchdog: background a sleep+kill, then wait for the real PIDs.
-  _PEER_TIMEOUT=90
+  _PEER_TIMEOUT=180
   ( sleep "$_PEER_TIMEOUT" && kill $CODEX_PID $GEMINI_PID 2>/dev/null ) &
   _WATCHDOG_PID=$!
 
@@ -2477,11 +2385,6 @@ if [ "$FAST_MODE" != "true" ]; then
     _FINDING_COUNT=$(echo "$_FINDINGS_JSON" | jq '.findings | length')
 
     if [ "$_FINDING_COUNT" -gt 0 ]; then
-      # Short-circuit: skip verification for low-finding, non-blocking reviews
-      _has_blocking=$(echo "$_FINDINGS_JSON" | jq '[.findings[] | select(.severity == "BLOCKING")] | length' 2>/dev/null || echo "0")
-      if [ "$_FINDING_COUNT" -le 3 ] && [ "${_has_blocking:-0}" -eq 0 ]; then
-        spinner_stop "Low-risk review (${_FINDING_COUNT} findings, no blockers) — verification skipped"
-      else
       # Build verification prompt with all findings + context
       {
         cat << 'VERIFY_SYS'
@@ -2624,7 +2527,6 @@ Evidence: \(.value.evidence // "none")
       else
         spinner_stop "Verification call failed — using unfiltered findings"
       fi
-    fi  # end short-circuit check
     else
       spinner_stop "No findings to verify"
     fi
@@ -2642,25 +2544,6 @@ fi
 VOICE_JSONL="$HOME/.diffhound/voice-examples.jsonl"
 VOICE_EXAMPLES_FILE=$(mktemp -t "pr-${PR_NUMBER}-voice.XXXXXX")
 
-# Dynamic example cap: reduce examples when findings are large to keep Haiku focused
-_FINDINGS_TOKEN_EST=0
-if [ -s "$CLAUDE_OUT" ]; then
-  _FINDINGS_TOKEN_EST=$(wc -c < "$CLAUDE_OUT" | awk '{printf "%d", $1 / 4}')  # ~4 chars per token
-fi
-if [ "$_RUN_PEER_REVIEW" = true ]; then
-  [ -n "${CODEX_CONTENT:-}" ] && [ "$CODEX_CONTENT" != "CODEX_UNAVAILABLE" ] && \
-    _FINDINGS_TOKEN_EST=$((_FINDINGS_TOKEN_EST + ${#CODEX_CONTENT} / 4))
-  [ -n "${GEMINI_CONTENT:-}" ] && [ "$GEMINI_CONTENT" != "GEMINI_UNAVAILABLE" ] && \
-    _FINDINGS_TOKEN_EST=$((_FINDINGS_TOKEN_EST + ${#GEMINI_CONTENT} / 4))
-fi
-_MAX_EXAMPLES=8
-_MAX_PATTERNS=30
-if [ "$_FINDINGS_TOKEN_EST" -gt 1500 ]; then
-  _MAX_EXAMPLES=4
-  _MAX_PATTERNS=10
-  echo "  Large findings (~${_FINDINGS_TOKEN_EST} tokens) — capping examples=${_MAX_EXAMPLES}, patterns=${_MAX_PATTERNS}" >&2
-fi
-
 if [ -f "$VOICE_JSONL" ] && [ -s "$SYNTH_FINDINGS" ]; then
   echo "## REAL EXAMPLES — STUDY THESE CAREFULLY" >> "$VOICE_EXAMPLES_FILE"
   echo "" >> "$VOICE_EXAMPLES_FILE"
@@ -2677,9 +2560,9 @@ if [ -f "$VOICE_JSONL" ] && [ -s "$SYNTH_FINDINGS" ]; then
   add_examples_for_pattern() {
     local pattern="$1"
     local label="$2"
-    [ "$EXAMPLE_COUNT" -ge "${_MAX_EXAMPLES:-8}" ] && return
+    [ "$EXAMPLE_COUNT" -ge 8 ] && return
     while IFS= read -r line; do
-      [ "$EXAMPLE_COUNT" -ge "${_MAX_EXAMPLES:-8}" ] && break
+      [ "$EXAMPLE_COUNT" -ge 8 ] && break
       [ -z "$line" ] && continue
       cat_val=$(echo "$line" | jq -r '.category // ""' 2>/dev/null)
       subcat_val=$(echo "$line" | jq -r '.subcategory // ""' 2>/dev/null)
@@ -2775,64 +2658,6 @@ EXAMPLE F — nit, simplification:
 ---
 CANONICAL_FALLBACK
 )
-fi
-
-
-# ── Pre-merge peer findings at script level (avoids overloading Haiku) ──────
-_MERGED_FINDINGS_FILE=""
-if [ "$_RUN_PEER_REVIEW" = true ]; then
-  _MERGED_FINDINGS_FILE=$(mktemp -t "pr-${PR_NUMBER}-merged.XXXXXX")
-
-  # Start with Claude's findings as base
-  _claude_merge_json=$(_extract_json "$CLAUDE_OUT" 2>/dev/null || true)
-  if [ -n "$_claude_merge_json" ] && echo "$_claude_merge_json" | jq -e '.findings' >/dev/null 2>&1; then
-    echo "$_claude_merge_json" | jq '.findings' > "$_MERGED_FINDINGS_FILE"
-  else
-    echo "[]" > "$_MERGED_FINDINGS_FILE"
-  fi
-
-  # Extract structured findings from Codex/Gemini text output
-  for _peer_label in CODEX GEMINI; do
-    _peer_text=""
-    [ "$_peer_label" = "CODEX" ] && _peer_text="$CODEX_CONTENT"
-    [ "$_peer_label" = "GEMINI" ] && _peer_text="$GEMINI_CONTENT"
-    [ -z "$_peer_text" ] && continue
-    [ "$_peer_text" = "CODEX_UNAVAILABLE" ] && continue
-    [ "$_peer_text" = "GEMINI_UNAVAILABLE" ] && continue
-
-    # Try extracting JSON findings from peer output
-    _peer_json=$(echo "$_peer_text" | sed -n '/```json/,/```/{/```/d;p;}' 2>/dev/null | jq '.findings // []' 2>/dev/null || echo "[]")
-    if [ "$_peer_json" != "null" ] && [ "$_peer_json" != "[]" ] && [ -n "$_peer_json" ]; then
-      # Merge: append peer findings tagged with source
-      _merged=$(jq -s --arg src "$_peer_label" \
-        '.[0] + [.[1][] | . + {source: $src}]' \
-        "$_MERGED_FINDINGS_FILE" <(echo "$_peer_json") 2>/dev/null || cat "$_MERGED_FINDINGS_FILE")
-      echo "$_merged" > "$_MERGED_FINDINGS_FILE"
-    fi
-  done
-
-  # Deduplicate by file:line proximity (±3 lines = same finding), keep highest severity
-  _deduped=$(jq '
-    def sev_rank: if . == "BLOCKING" then 3 elif . == "SHOULD-FIX" then 2 elif . == "NIT" then 1 else 0 end;
-    group_by(.file) | map(
-      sort_by(.line) |
-      reduce .[] as $f ([];
-        if length == 0 then [$f]
-        else
-          .[-1] as $last |
-          if ($last.file == $f.file) and (($f.line - $last.line) | fabs <= 3) then
-            if ($f.severity | sev_rank) > ($last.severity | sev_rank) then
-              .[:-1] + [$f]
-            else . end
-          else . + [$f] end
-        end
-      )
-    ) | flatten
-  ' "$_MERGED_FINDINGS_FILE" 2>/dev/null || cat "$_MERGED_FINDINGS_FILE")
-
-  echo "$_deduped" > "$_MERGED_FINDINGS_FILE"
-  _merge_count=$(echo "$_deduped" | jq 'length' 2>/dev/null || echo "?")
-  echo "  Pre-merged findings: ${_merge_count} unique (from Claude + peers)" >&2
 fi
 
 # ============================================================
@@ -2951,7 +2776,7 @@ _USER_TMP=$(mktemp -t "pr-${PR_NUMBER}-user.XXXXXX")
 _SEVERITY_RULE="CRITICAL RULE — READ FIRST: Never start a comment body with a severity label or emoji flag. The word BLOCKING, BLOCKER, SHOULD-FIX, or NIT must NEVER appear at the start of a comment body. It belongs only in the COMMENT: metadata tag. No emoji prefixes either. For ALL severities: dive straight into the observation. No formulaic opener, no visual flag."
 
 if [ "$_RUN_PEER_REVIEW" = true ]; then
-  _MERGE_INSTRUCTION="Here are pre-merged engineering findings (already deduplicated across models). Your ONLY job is to rewrite each finding as a COMMENT: line in the engineer's voice. Do NOT merge, synthesize, or analyze — just rewrite the voice.
+  _MERGE_INSTRUCTION="Here are three engineering analyses. First merge them: use the highest severity where ≥2 models agree, discard speculative findings with no diff evidence, no attribution tags in output. Then rewrite the merged result in the engineer's voice.
 
 ${_SEVERITY_RULE}"
 else
@@ -2968,7 +2793,7 @@ fi
   # ── Inject learned patterns (false positive lessons) ──
   _learned_patterns_file="$HOME/.diffhound/learned-patterns.jsonl"
   if [ -f "$_learned_patterns_file" ] && [ -s "$_learned_patterns_file" ]; then
-    _pattern_lines=$(jq -r '.lesson' "$_learned_patterns_file" 2>/dev/null | sort -u | head -"${_MAX_PATTERNS:-30}")
+    _pattern_lines=$(jq -r '.lesson' "$_learned_patterns_file" 2>/dev/null | sort -u | head -30)
     if [ -n "$_pattern_lines" ]; then
       echo ""
       echo "## LEARNED PATTERNS — DO NOT REPEAT THESE MISTAKES"
@@ -2983,16 +2808,7 @@ fi
   echo "## ENGINEERING FINDINGS (Claude)"
   cat "$CLAUDE_OUT"
 
-  if [ "$_RUN_PEER_REVIEW" = true ] && [ -n "${_MERGED_FINDINGS_FILE:-}" ] && [ -s "${_MERGED_FINDINGS_FILE:-/dev/null}" ]; then
-    # Use pre-merged findings instead of raw peer outputs (smaller input for Haiku)
-    echo ""
-    echo "## ALL FINDINGS (pre-merged from Claude + Codex + Gemini)"
-    echo "These findings are already deduplicated and severity-escalated. Rewrite each as a COMMENT: line."
-    echo '```json'
-    jq '.' "$_MERGED_FINDINGS_FILE" 2>/dev/null || cat "$_MERGED_FINDINGS_FILE"
-    echo '```'
-  elif [ "$_RUN_PEER_REVIEW" = true ]; then
-    # Fallback: raw peer outputs if merge failed
+  if [ "$_RUN_PEER_REVIEW" = true ]; then
     if [ -n "$CODEX_CONTENT" ] && [ "$CODEX_CONTENT" != "CODEX_UNAVAILABLE" ]; then
       echo ""
       echo "## CODEX FINDINGS"
@@ -3032,20 +2848,6 @@ VOICE FOR REPLIES: same casual voice — "hey, took another look —", "actually
 If correcting: evidence first, tone stays collegial. Never snarky, never formal.
 REREVIEW_BLOCK
   fi
-
-  echo ""
-  echo "## OUTPUT FORMAT REMINDER (CRITICAL — follow this exactly)"
-  echo "You MUST output in this exact structured format. Do NOT output free text analysis."
-  echo "### INLINE_COMMENTS_START"
-  echo "COMMENT: path/file.ts:LINE:SEVERITY — [comment body in engineer voice]"
-  echo "(one COMMENT: line per finding — do NOT skip any)"
-  echo "### INLINE_COMMENTS_END"
-  echo "### SUMMARY_START"
-  echo "[review body with scorecard table]"
-  echo "### SUMMARY_END"
-  echo ""
-  echo "If you output anything other than this format, the review will FAIL. Every finding MUST become a COMMENT: line."
-
 } > "$_USER_TMP"
 
 # ── Call API with prompt caching (only if API key has credits, else claude CLI) ─
@@ -3107,7 +2909,7 @@ rm -f "$_USER_TMP"
   || spinner_stop "Pass ${_STYLE_PASS_NUM} complete — review ready"
 
 # Cleanup extra temp files
-rm -f "${SYNTH_FINDINGS:-}" "${VOICE_EXAMPLES_FILE:-}" "${_MERGED_FINDINGS_FILE:-}" 2>/dev/null || true
+rm -f "${SYNTH_FINDINGS:-}" "${VOICE_EXAMPLES_FILE:-}" 2>/dev/null || true
 
 # ============================================================
 # PARSE OUTPUT
