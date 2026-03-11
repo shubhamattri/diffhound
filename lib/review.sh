@@ -1106,6 +1106,54 @@ _build_review_chunks() {
   echo $((chunk_num + 1))
 }
 
+# ── PR-wide file manifest for cross-chunk awareness ─────────────────────────
+# Extracts key definitions (classes, functions, exports) from each file's diff
+# so chunk reviewers know what exists in OTHER chunks without tool calls.
+_build_pr_manifest() {
+  local diff_file="$1"
+  local triage_file="$2"
+  local output_file="$3"
+
+  {
+    echo "## ALL FILES IN THIS PR (your chunk is a subset)"
+    echo "Use this manifest to avoid false positives about missing code."
+    echo "If something is listed here, it EXISTS — do NOT flag it as missing."
+    echo ""
+    # List every file with its priority
+    while IFS=$'\t' read -r file prio reason; do
+      [ -z "$file" ] && continue
+      echo "### ${file} [${prio}]"
+      # Extract key definitions from this file's diff (+ lines only)
+      $_AWK_CMD -v target="$file" '
+        /^diff --git/ { in_file = (index($0, "b/" target) > 0) }
+        in_file && /^\+/ {
+          line = substr($0, 2)
+          # Python: class/def/async def
+          if (line ~ /^[[:space:]]*(class |def |async def )[A-Za-z_]/) { print "  - " line }
+          # TypeScript/JS: export, function, class, interface, enum, const
+          else if (line ~ /^[[:space:]]*(export |function |class |interface |enum |const |type )[A-Za-z_]/) { print "  - " line }
+          # Config: key assignments (settings, env vars)
+          else if (line ~ /^[[:space:]]*[A-Za-z_]+[[:space:]]*[:=].*/) {
+            # Only capture top-level config-like assignments (not deep nesting)
+            if (line ~ /^[[:space:]]{0,4}[A-Za-z_]/) { print "  - " line }
+          }
+        }
+      ' "$diff_file" | head -15
+      echo ""
+    done < "$triage_file"
+  } > "$output_file"
+
+  # Cap manifest at 8KB to prevent prompt bloat
+  local _msize
+  _msize=$(wc -c < "$output_file" | tr -d ' ')
+  if [ "$_msize" -gt 8192 ]; then
+    head -c 8192 "$output_file" > "${output_file}.tmp"
+    echo "" >> "${output_file}.tmp"
+    echo "[manifest truncated — use Read/Bash tools to verify anything not listed]" >> "${output_file}.tmp"
+    mv "${output_file}.tmp" "$output_file"
+  fi
+}
+
 # ── Parallel Chunk Review ────────────────────────────────────────────────────
 # Launches claude -p for each chunk in parallel. Collects results.
 _review_chunks_parallel() {
@@ -1114,6 +1162,7 @@ _review_chunks_parallel() {
   local pr_summary_header="$3"
   local rag_context_file="$4"
   local repo_path="$5"
+  local pr_manifest="${6:-}"
 
   local chunked_prompt_file="${LIB_DIR}/prompt-chunked.txt"
   local pids=()
@@ -1149,6 +1198,15 @@ _review_chunks_parallel() {
       echo ""
       echo "---"
       echo ""
+      # Inject PR-wide manifest so this chunk knows what exists in other chunks
+      if [ -n "$pr_manifest" ] && [ -s "$pr_manifest" ]; then
+        echo "# CROSS-CHUNK AWARENESS (READ THIS FIRST)"
+        echo ""
+        cat "$pr_manifest"
+        echo ""
+        echo "---"
+        echo ""
+      fi
       echo "# PR SUMMARY (applies to entire PR — your chunk is a subset)"
       echo "$pr_summary_header"
       echo ""
@@ -1566,10 +1624,14 @@ if [ "$REVIEW_TIER" = "LARGE" ] || [ "$REVIEW_TIER" = "HUGE" ]; then
   CHUNK_COUNT=$(_build_review_chunks "$CLEANED_DIFF" "$TRIAGE_FILE" "$CHUNK_DIR")
   spinner_stop "Built ${CHUNK_COUNT} chunk(s)"
 
+  # Build PR-wide manifest so each chunk knows what exists in other chunks
+  _PR_MANIFEST="${CHUNK_DIR}/pr-manifest.txt"
+  _build_pr_manifest "$CLEANED_DIFF" "$TRIAGE_FILE" "$_PR_MANIFEST"
+
   _TOTAL_PASSES=$((CHUNK_COUNT + 2))  # chunks + peer + voice
   [ "$FAST_MODE" = "true" ] && _TOTAL_PASSES=$((CHUNK_COUNT + 1))
   spinner_start "Reviewing ${CHUNK_COUNT} chunks in parallel (pass 1/${_TOTAL_PASSES})..."
-  _review_chunks_parallel "$CHUNK_DIR" "$CHUNK_COUNT" "$PR_SUMMARY_HEADER" "$RAG_CONTEXT_FILE" "$REPO_PATH"
+  _review_chunks_parallel "$CHUNK_DIR" "$CHUNK_COUNT" "$PR_SUMMARY_HEADER" "$RAG_CONTEXT_FILE" "$REPO_PATH" "$_PR_MANIFEST"
   spinner_stop "Parallel chunk review complete"
 
   spinner_start "Merging findings from ${CHUNK_COUNT} chunks..."

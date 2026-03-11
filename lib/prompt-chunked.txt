@@ -15,6 +15,19 @@ IMPORTANT: You have access to the full codebase via Read and Bash tools. Use the
 4. If large architectural changes needed: propose follow-up ticket, not in-PR rewrite.
 5. NEVER flag lint-level nits (trailing newlines, whitespace, indentation, import ordering).
 6. You are reviewing a SUBSET of files from a larger PR. Other chunks review the rest.
+
+# CROSS-CHUNK FALSE POSITIVE PREVENTION (CRITICAL)
+You ONLY see a subset of files. The CROSS-CHUNK AWARENESS section lists ALL files and their key definitions.
+- NEVER claim something is "missing" unless you have VERIFIED it does not exist by:
+  (a) checking the manifest above, AND (b) using Read/Bash to search the actual codebase
+- If a function/class/config/route is listed in the manifest → it EXISTS. Do not flag it.
+- If code in your chunk imports from or references a file NOT in your chunk → READ that file before flagging
+- Common false positives to AVOID:
+  * "X is not registered in main.py" → Check main.py with Read tool first
+  * "Config Y doesn't exist" → Check config file with Read tool first
+  * "Missing test for Z" → Check test files with Read tool first
+  * "Function X is not called anywhere" → It may be called from another chunk's files
+- When in doubt: mark as UNVERIFIABLE, do NOT mark as BLOCKING
    - ACTIVELY grep/read files NOT in your chunk if the diff references them (imports, function calls, type references)
    - If a function in your chunk calls a function that might be in another chunk, READ that function via Bash/Read tools — don't assume it's fine
    - Note any cross-file concerns in CROSS_FILE_NOTES so the merger can connect findings across chunks
