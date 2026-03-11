@@ -1448,8 +1448,8 @@ jq -r --arg login "$REVIEWER_LOGIN" '
 # STEP 0.6: FETCH DIFF (full + incremental for re-reviews)
 # ============================================================
 
-# Edge case: no new commits since last review — skip entirely
-if [ "$IS_REREVIEW" = true ] && [ -n "$LAST_REVIEWED_SHA" ] && [ "$LAST_REVIEWED_SHA" = "$HEAD_SHA" ]; then
+# Edge case: no new commits since last review — skip entirely (unless --force-full)
+if [ "$IS_REREVIEW" = true ] && [ -n "$LAST_REVIEWED_SHA" ] && [ "$LAST_REVIEWED_SHA" = "$HEAD_SHA" ] && [ "$FORCE_FULL" != true ]; then
   echo ""
   echo "  ✅ No new commits since last review (${LAST_REVIEWED_SHA:0:8}). Nothing to re-review."
   echo "  → https://github.com/${REPO_OWNER}/${REPO_NAME}/pull/${PR_NUMBER}"
