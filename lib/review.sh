@@ -2065,7 +2065,7 @@ RAG_HEADER
 fi
 
 # ============================================================
-# STEP 3: RUN CLAUDE — AGENTIC PASS (primary review with tools)
+# STEP 3: RUN CLAUDE — NON-AGENTIC PASS (inline context, no tools)
 # ============================================================
 echo ""
 echo ""
@@ -2080,26 +2080,51 @@ if [ "$IS_REREVIEW" = true ] && [ "$REREVIEW_DEPTH" = "shallow" ]; then
 fi
 spinner_start "Analyzing code (pass 1/${_TOTAL_PASSES})......"
 
-# Pass 1: Claude agentic — uses Max subscription (claude.ai auth), NOT the API key.
+# Pass 1: Claude non-agentic — uses Max subscription (claude.ai auth), NOT the API key.
 # Unset ANTHROPIC_API_KEY temporarily so claude CLI doesn't fall back to pay-per-use billing.
 # The key is restored after this block for the curl-based Haiku call in Pass 3+4.
 _SAVED_API_KEY="${ANTHROPIC_API_KEY:-}"
 unset ANTHROPIC_API_KEY
 
-if ! $_TIMEOUT_CMD 600 claude -p \
-    --allowedTools "Read,Bash" \
-    --add-dir "$REPO_PATH" \
-    --dangerously-skip-permissions \
+# Pre-fetch full file contents for changed files (replaces agentic tool calls)
+_CONTEXT_FILE=$(mktemp -t "pr-${PR_NUMBER}-context.XXXXXX")
+{
+  echo ""
+  echo "# FULL FILE CONTENTS (for changed files — use these to verify findings)"
+  echo ""
+  # Extract changed file paths from diff
+  grep '^diff --git' "$DIFF_FILE" 2>/dev/null | sed 's|^diff --git a/.* b/||' | sort -u | while read -r _cf; do
+    [ -z "$_cf" ] && continue
+    _full_path="${REPO_PATH}/${_cf}"
+    if [ -f "$_full_path" ]; then
+      echo "### FILE: ${_cf}"
+      echo '```'
+      head -200 "$_full_path" 2>/dev/null || true
+      _total_lines=$(wc -l < "$_full_path" 2>/dev/null || echo "0")
+      if [ "${_total_lines:-0}" -gt 200 ]; then
+        echo "... (truncated at 200/${_total_lines} lines)"
+      fi
+      echo '```'
+      echo ""
+    fi
+  done
+} > "$_CONTEXT_FILE"
+
+# Append file context to prompt
+cat "$_CONTEXT_FILE" >> "$PROMPT_FILE"
+rm -f "$_CONTEXT_FILE"
+
+# Non-agentic pass: no tools needed, all context is inline
+if ! $_TIMEOUT_CMD 180 claude -p \
     --output-format text \
     < "$PROMPT_FILE" > "$CLAUDE_OUT" 2>&1; then
   # Check if partial output is usable (timeout may kill mid-write but JSON is complete)
   _partial_json=$(_extract_json "$CLAUDE_OUT" 2>/dev/null || true)
   if [ -n "$_partial_json" ] && echo "$_partial_json" | jq -e '.findings' >/dev/null 2>&1; then
-    spinner_fail "Agentic pass timed out but output is usable — continuing"
+    spinner_fail "Analysis timed out but output is usable — continuing"
   else
-    spinner_fail "Agentic pass failed — falling back to standard analysis"
-    if ! $_TIMEOUT_CMD 480 claude -p --output-format text < "$PROMPT_FILE" > "$CLAUDE_OUT" 2>&1; then
-      # Same check: partial output may still be usable
+    spinner_fail "Primary pass failed — retrying without file context"
+    if ! $_TIMEOUT_CMD 120 claude -p --output-format text < "$PROMPT_FILE" > "$CLAUDE_OUT" 2>&1; then
       _partial_json=$(_extract_json "$CLAUDE_OUT" 2>/dev/null || true)
       if [ -z "$_partial_json" ] || ! echo "$_partial_json" | jq -e '.findings' >/dev/null 2>&1; then
         spinner_fail "Analysis failed"
@@ -2385,6 +2410,11 @@ if [ "$FAST_MODE" != "true" ]; then
     _FINDING_COUNT=$(echo "$_FINDINGS_JSON" | jq '.findings | length')
 
     if [ "$_FINDING_COUNT" -gt 0 ]; then
+      # Short-circuit: skip verification for low-finding, non-blocking reviews
+      _has_blocking=$(echo "$_FINDINGS_JSON" | jq '[.findings[] | select(.severity == "BLOCKING")] | length' 2>/dev/null || echo "0")
+      if [ "$_FINDING_COUNT" -le 3 ] && [ "${_has_blocking:-0}" -eq 0 ]; then
+        spinner_stop "Low-risk review (${_FINDING_COUNT} findings, no blockers) — verification skipped"
+      else
       # Build verification prompt with all findings + context
       {
         cat << 'VERIFY_SYS'
@@ -2527,6 +2557,7 @@ Evidence: \(.value.evidence // "none")
       else
         spinner_stop "Verification call failed — using unfiltered findings"
       fi
+    fi  # end short-circuit check
     else
       spinner_stop "No findings to verify"
     fi
@@ -2544,6 +2575,25 @@ fi
 VOICE_JSONL="$HOME/.diffhound/voice-examples.jsonl"
 VOICE_EXAMPLES_FILE=$(mktemp -t "pr-${PR_NUMBER}-voice.XXXXXX")
 
+# Dynamic example cap: reduce examples when findings are large to keep Haiku focused
+_FINDINGS_TOKEN_EST=0
+if [ -s "$CLAUDE_OUT" ]; then
+  _FINDINGS_TOKEN_EST=$(wc -c < "$CLAUDE_OUT" | awk '{printf "%d", $1 / 4}')  # ~4 chars per token
+fi
+if [ "$_RUN_PEER_REVIEW" = true ]; then
+  [ -n "${CODEX_CONTENT:-}" ] && [ "$CODEX_CONTENT" != "CODEX_UNAVAILABLE" ] && \
+    _FINDINGS_TOKEN_EST=$((_FINDINGS_TOKEN_EST + ${#CODEX_CONTENT} / 4))
+  [ -n "${GEMINI_CONTENT:-}" ] && [ "$GEMINI_CONTENT" != "GEMINI_UNAVAILABLE" ] && \
+    _FINDINGS_TOKEN_EST=$((_FINDINGS_TOKEN_EST + ${#GEMINI_CONTENT} / 4))
+fi
+_MAX_EXAMPLES=8
+_MAX_PATTERNS=30
+if [ "$_FINDINGS_TOKEN_EST" -gt 1500 ]; then
+  _MAX_EXAMPLES=4
+  _MAX_PATTERNS=10
+  echo "  Large findings (~${_FINDINGS_TOKEN_EST} tokens) — capping examples=${_MAX_EXAMPLES}, patterns=${_MAX_PATTERNS}" >&2
+fi
+
 if [ -f "$VOICE_JSONL" ] && [ -s "$SYNTH_FINDINGS" ]; then
   echo "## REAL EXAMPLES — STUDY THESE CAREFULLY" >> "$VOICE_EXAMPLES_FILE"
   echo "" >> "$VOICE_EXAMPLES_FILE"
@@ -2560,9 +2610,9 @@ if [ -f "$VOICE_JSONL" ] && [ -s "$SYNTH_FINDINGS" ]; then
   add_examples_for_pattern() {
     local pattern="$1"
     local label="$2"
-    [ "$EXAMPLE_COUNT" -ge 8 ] && return
+    [ "$EXAMPLE_COUNT" -ge "${_MAX_EXAMPLES:-8}" ] && return
     while IFS= read -r line; do
-      [ "$EXAMPLE_COUNT" -ge 8 ] && break
+      [ "$EXAMPLE_COUNT" -ge "${_MAX_EXAMPLES:-8}" ] && break
       [ -z "$line" ] && continue
       cat_val=$(echo "$line" | jq -r '.category // ""' 2>/dev/null)
       subcat_val=$(echo "$line" | jq -r '.subcategory // ""' 2>/dev/null)
@@ -2658,6 +2708,64 @@ EXAMPLE F — nit, simplification:
 ---
 CANONICAL_FALLBACK
 )
+fi
+
+
+# ── Pre-merge peer findings at script level (avoids overloading Haiku) ──────
+_MERGED_FINDINGS_FILE=""
+if [ "$_RUN_PEER_REVIEW" = true ]; then
+  _MERGED_FINDINGS_FILE=$(mktemp -t "pr-${PR_NUMBER}-merged.XXXXXX")
+
+  # Start with Claude's findings as base
+  _claude_merge_json=$(_extract_json "$CLAUDE_OUT" 2>/dev/null || true)
+  if [ -n "$_claude_merge_json" ] && echo "$_claude_merge_json" | jq -e '.findings' >/dev/null 2>&1; then
+    echo "$_claude_merge_json" | jq '.findings' > "$_MERGED_FINDINGS_FILE"
+  else
+    echo "[]" > "$_MERGED_FINDINGS_FILE"
+  fi
+
+  # Extract structured findings from Codex/Gemini text output
+  for _peer_label in CODEX GEMINI; do
+    _peer_text=""
+    [ "$_peer_label" = "CODEX" ] && _peer_text="$CODEX_CONTENT"
+    [ "$_peer_label" = "GEMINI" ] && _peer_text="$GEMINI_CONTENT"
+    [ -z "$_peer_text" ] && continue
+    [ "$_peer_text" = "CODEX_UNAVAILABLE" ] && continue
+    [ "$_peer_text" = "GEMINI_UNAVAILABLE" ] && continue
+
+    # Try extracting JSON findings from peer output
+    _peer_json=$(echo "$_peer_text" | sed -n '/```json/,/```/{/```/d;p;}' 2>/dev/null | jq '.findings // []' 2>/dev/null || echo "[]")
+    if [ "$_peer_json" != "null" ] && [ "$_peer_json" != "[]" ] && [ -n "$_peer_json" ]; then
+      # Merge: append peer findings tagged with source
+      _merged=$(jq -s --arg src "$_peer_label" \
+        '.[0] + [.[1][] | . + {source: $src}]' \
+        "$_MERGED_FINDINGS_FILE" <(echo "$_peer_json") 2>/dev/null || cat "$_MERGED_FINDINGS_FILE")
+      echo "$_merged" > "$_MERGED_FINDINGS_FILE"
+    fi
+  done
+
+  # Deduplicate by file:line proximity (±3 lines = same finding), keep highest severity
+  _deduped=$(jq '
+    def sev_rank: if . == "BLOCKING" then 3 elif . == "SHOULD-FIX" then 2 elif . == "NIT" then 1 else 0 end;
+    group_by(.file) | map(
+      sort_by(.line) |
+      reduce .[] as $f ([];
+        if length == 0 then [$f]
+        else
+          .[-1] as $last |
+          if ($last.file == $f.file) and (($f.line - $last.line) | fabs <= 3) then
+            if ($f.severity | sev_rank) > ($last.severity | sev_rank) then
+              .[:-1] + [$f]
+            else . end
+          else . + [$f] end
+        end
+      )
+    ) | flatten
+  ' "$_MERGED_FINDINGS_FILE" 2>/dev/null || cat "$_MERGED_FINDINGS_FILE")
+
+  echo "$_deduped" > "$_MERGED_FINDINGS_FILE"
+  _merge_count=$(echo "$_deduped" | jq 'length' 2>/dev/null || echo "?")
+  echo "  Pre-merged findings: ${_merge_count} unique (from Claude + peers)" >&2
 fi
 
 # ============================================================
@@ -2776,7 +2884,7 @@ _USER_TMP=$(mktemp -t "pr-${PR_NUMBER}-user.XXXXXX")
 _SEVERITY_RULE="CRITICAL RULE — READ FIRST: Never start a comment body with a severity label or emoji flag. The word BLOCKING, BLOCKER, SHOULD-FIX, or NIT must NEVER appear at the start of a comment body. It belongs only in the COMMENT: metadata tag. No emoji prefixes either. For ALL severities: dive straight into the observation. No formulaic opener, no visual flag."
 
 if [ "$_RUN_PEER_REVIEW" = true ]; then
-  _MERGE_INSTRUCTION="Here are three engineering analyses. First merge them: use the highest severity where ≥2 models agree, discard speculative findings with no diff evidence, no attribution tags in output. Then rewrite the merged result in the engineer's voice.
+  _MERGE_INSTRUCTION="Here are pre-merged engineering findings (already deduplicated across models). Your ONLY job is to rewrite each finding as a COMMENT: line in the engineer's voice. Do NOT merge, synthesize, or analyze — just rewrite the voice.
 
 ${_SEVERITY_RULE}"
 else
@@ -2793,7 +2901,7 @@ fi
   # ── Inject learned patterns (false positive lessons) ──
   _learned_patterns_file="$HOME/.diffhound/learned-patterns.jsonl"
   if [ -f "$_learned_patterns_file" ] && [ -s "$_learned_patterns_file" ]; then
-    _pattern_lines=$(jq -r '.lesson' "$_learned_patterns_file" 2>/dev/null | sort -u | head -30)
+    _pattern_lines=$(jq -r '.lesson' "$_learned_patterns_file" 2>/dev/null | sort -u | head -"${_MAX_PATTERNS:-30}")
     if [ -n "$_pattern_lines" ]; then
       echo ""
       echo "## LEARNED PATTERNS — DO NOT REPEAT THESE MISTAKES"
@@ -2808,7 +2916,16 @@ fi
   echo "## ENGINEERING FINDINGS (Claude)"
   cat "$CLAUDE_OUT"
 
-  if [ "$_RUN_PEER_REVIEW" = true ]; then
+  if [ "$_RUN_PEER_REVIEW" = true ] && [ -n "${_MERGED_FINDINGS_FILE:-}" ] && [ -s "${_MERGED_FINDINGS_FILE:-/dev/null}" ]; then
+    # Use pre-merged findings instead of raw peer outputs (smaller input for Haiku)
+    echo ""
+    echo "## ALL FINDINGS (pre-merged from Claude + Codex + Gemini)"
+    echo "These findings are already deduplicated and severity-escalated. Rewrite each as a COMMENT: line."
+    echo '```json'
+    jq '.' "$_MERGED_FINDINGS_FILE" 2>/dev/null || cat "$_MERGED_FINDINGS_FILE"
+    echo '```'
+  elif [ "$_RUN_PEER_REVIEW" = true ]; then
+    # Fallback: raw peer outputs if merge failed
     if [ -n "$CODEX_CONTENT" ] && [ "$CODEX_CONTENT" != "CODEX_UNAVAILABLE" ]; then
       echo ""
       echo "## CODEX FINDINGS"
@@ -2848,6 +2965,20 @@ VOICE FOR REPLIES: same casual voice — "hey, took another look —", "actually
 If correcting: evidence first, tone stays collegial. Never snarky, never formal.
 REREVIEW_BLOCK
   fi
+
+  echo ""
+  echo "## OUTPUT FORMAT REMINDER (CRITICAL — follow this exactly)"
+  echo "You MUST output in this exact structured format. Do NOT output free text analysis."
+  echo "### INLINE_COMMENTS_START"
+  echo "COMMENT: path/file.ts:LINE:SEVERITY — [comment body in engineer voice]"
+  echo "(one COMMENT: line per finding — do NOT skip any)"
+  echo "### INLINE_COMMENTS_END"
+  echo "### SUMMARY_START"
+  echo "[review body with scorecard table]"
+  echo "### SUMMARY_END"
+  echo ""
+  echo "If you output anything other than this format, the review will FAIL. Every finding MUST become a COMMENT: line."
+
 } > "$_USER_TMP"
 
 # ── Call API with prompt caching (only if API key has credits, else claude CLI) ─
@@ -2909,7 +3040,7 @@ rm -f "$_USER_TMP"
   || spinner_stop "Pass ${_STYLE_PASS_NUM} complete — review ready"
 
 # Cleanup extra temp files
-rm -f "${SYNTH_FINDINGS:-}" "${VOICE_EXAMPLES_FILE:-}" 2>/dev/null || true
+rm -f "${SYNTH_FINDINGS:-}" "${VOICE_EXAMPLES_FILE:-}" "${_MERGED_FINDINGS_FILE:-}" 2>/dev/null || true
 
 # ============================================================
 # PARSE OUTPUT
