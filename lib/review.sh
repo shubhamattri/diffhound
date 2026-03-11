@@ -2086,18 +2086,29 @@ spinner_start "Analyzing code (pass 1/${_TOTAL_PASSES})......"
 _SAVED_API_KEY="${ANTHROPIC_API_KEY:-}"
 unset ANTHROPIC_API_KEY
 
-if ! $_TIMEOUT_CMD 480 claude -p \
+if ! $_TIMEOUT_CMD 600 claude -p \
     --allowedTools "Read,Bash" \
     --add-dir "$REPO_PATH" \
     --dangerously-skip-permissions \
     --output-format text \
     < "$PROMPT_FILE" > "$CLAUDE_OUT" 2>&1; then
-  spinner_fail "Agentic pass failed — falling back to standard analysis"
-  if ! $_TIMEOUT_CMD 300 claude -p --output-format text < "$PROMPT_FILE" > "$CLAUDE_OUT" 2>&1; then
-    spinner_fail "Analysis failed"
-    cat "$CLAUDE_OUT" >&2
-    export ANTHROPIC_API_KEY="$_SAVED_API_KEY"
-    exit 1
+  # Check if partial output is usable (timeout may kill mid-write but JSON is complete)
+  _partial_json=$(_extract_json "$CLAUDE_OUT" 2>/dev/null || true)
+  if [ -n "$_partial_json" ] && echo "$_partial_json" | jq -e '.findings' >/dev/null 2>&1; then
+    spinner_fail "Agentic pass timed out but output is usable — continuing"
+  else
+    spinner_fail "Agentic pass failed — falling back to standard analysis"
+    if ! $_TIMEOUT_CMD 480 claude -p --output-format text < "$PROMPT_FILE" > "$CLAUDE_OUT" 2>&1; then
+      # Same check: partial output may still be usable
+      _partial_json=$(_extract_json "$CLAUDE_OUT" 2>/dev/null || true)
+      if [ -z "$_partial_json" ] || ! echo "$_partial_json" | jq -e '.findings' >/dev/null 2>&1; then
+        spinner_fail "Analysis failed"
+        cat "$CLAUDE_OUT" >&2
+        export ANTHROPIC_API_KEY="$_SAVED_API_KEY"
+        exit 1
+      fi
+      spinner_fail "Fallback timed out but output is usable — continuing"
+    fi
   fi
 fi
 
