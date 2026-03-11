@@ -198,8 +198,9 @@ parse_verdict() {
 
   # Method 3: Derive from comment severities
   local has_blocking has_shouldfix
-  has_blocking=$(grep -ci ':BLOCKING' "$comments_file" 2>/dev/null || echo "0")
-  has_shouldfix=$(grep -ci ':SHOULD-FIX\|:SHOULD_FIX' "$comments_file" 2>/dev/null || echo "0")
+  has_blocking=$(grep -ci ':BLOCKING' "$comments_file" 2>/dev/null | head -1 || echo "0")
+  has_shouldfix=$(grep -ci ':SHOULD-FIX\|:SHOULD_FIX' "$comments_file" 2>/dev/null | head -1 || echo "0")
+  has_blocking=${has_blocking:-0}; has_shouldfix=${has_shouldfix:-0}
   if [ "$has_blocking" -gt 0 ]; then
     echo "REQUEST_CHANGES"
   elif [ "$has_shouldfix" -gt 0 ]; then

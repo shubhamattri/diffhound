@@ -2906,6 +2906,20 @@ rm -f "${SYNTH_FINDINGS:-}" "${VOICE_EXAMPLES_FILE:-}" 2>/dev/null || true
 parse_comments "$REVIEW_STRUCTURED" "${REVIEW_STRUCTURED}.comments"
 parse_summary "$REVIEW_STRUCTURED" "$REVIEW_SUMMARY"
 
+# Fallback: if voice rewrite produced 0 comments but Claude's JSON has findings,
+# use Claude's output directly. This catches cases where Haiku outputs free text
+# instead of the structured COMMENT: format (seen on PR #42).
+_voice_comment_count=$(grep -c "^COMMENT:" "${REVIEW_STRUCTURED}.comments" 2>/dev/null || echo "0")
+if [ "$_voice_comment_count" -eq 0 ]; then
+  _claude_json=$(_extract_json "$CLAUDE_OUT" 2>/dev/null || true)
+  _claude_findings=$(echo "$_claude_json" | jq '.findings | length' 2>/dev/null || echo "0")
+  if [ "${_claude_findings:-0}" -gt 0 ]; then
+    echo "  Voice rewrite lost findings — falling back to Claude's JSON output" >&2
+    parse_comments "$CLAUDE_OUT" "${REVIEW_STRUCTURED}.comments"
+    parse_summary "$CLAUDE_OUT" "$REVIEW_SUMMARY"
+  fi
+fi
+
 # Append peer review coverage note to summary
 if [ -n "${PEER_COVERAGE:-}" ]; then
   echo "" >> "$REVIEW_SUMMARY"
