@@ -3697,7 +3697,7 @@ if [ "$POST_REVIEW" = true ]; then
     _body_tmp=$(mktemp -t "pr-${PR_NUMBER}-body.XXXXXX")
 
     # Extract table lines (| rows) and everything else
-    local _in_table=false
+    _in_table=false
     while IFS= read -r _line; do
       if echo "$_line" | grep -q '^| Category'; then
         _in_table=true
@@ -3715,7 +3715,8 @@ if [ "$POST_REVIEW" = true ]; then
     done < "$REVIEW_SUMMARY"
 
     # Rebuild: first paragraph, then scorecard, then rest
-    local _found_break=false _seen_text=false
+    _found_break=false
+    _seen_text=false
     while IFS= read -r _line; do
       echo "$_line" >> "$_reorder_tmp"
       # Insert table after first blank line that follows actual text
