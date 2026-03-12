@@ -200,6 +200,8 @@ _SEC4=$(mktemp -t "rag-sec4.XXXXXX")
 _SEC5=$(mktemp -t "rag-sec5.XXXXXX")
 _SEC6=$(mktemp -t "rag-sec6.XXXXXX")
 _SEC7=$(mktemp -t "rag-sec7.XXXXXX")
+_SEC8=$(mktemp -t "rag-sec8.XXXXXX")
+_SEC9=$(mktemp -t "rag-sec9.XXXXXX")
 
 # ── Section 2: CALLERS of changed functions ──
 # Pre-extract function names for subshell use
@@ -333,11 +335,83 @@ $_TIMEOUT_CMD 15 bash -c '
 ' > "$_SEC7" 2>/dev/null &
 _PID7=$!
 
+# ── Section 8: CO-CHANGE ANALYSIS (files that frequently change together) ──
+$_TIMEOUT_CMD 15 bash -c '
+  echo "## 8. CO-CHANGE ANALYSIS (files that frequently change with these)"
+  echo ""
+  flagged=0
+  for file in $(cat "'"$_CHANGED_FILES_TMP"'"); do
+    [ -f "'"$REPO_PATH"'/$file" ] || continue
+    # Find files that co-changed with this file in last 50 commits
+    partners=$(cd "'"$REPO_PATH"'" && git log --name-only --pretty=format: -50 -- "$file" 2>/dev/null | \
+      grep -v "^$" | grep -v "^${file}$" | sort | uniq -c | sort -rn | head -5)
+    [ -z "$partners" ] && continue
+    echo "### Co-change partners of $file:"
+    while IFS= read -r line; do
+      [ -z "$line" ] && continue
+      count=$(echo "$line" | awk "{print \$1}")
+      partner=$(echo "$line" | awk "{print \$2}")
+      [ "$count" -lt 3 ] && continue  # only flag if co-changed 3+ times
+      # Check if partner is in this PR
+      if ! grep -qF "$partner" "'"$_CHANGED_FILES_TMP"'" 2>/dev/null; then
+        echo "  ⚠ $partner (co-changed ${count}x) — NOT in this PR"
+        flagged=$((flagged + 1))
+      else
+        echo "  ✓ $partner (co-changed ${count}x) — in this PR"
+      fi
+    done <<< "$partners"
+    echo ""
+  done
+  [ "$flagged" -eq 0 ] && echo "  (no missing co-change partners detected)"
+' > "$_SEC8" 2>/dev/null &
+_PID8=$!
+
+# ── Section 9: DEPENDENCY GRAPH (blast radius — who imports changed files) ──
+$_TIMEOUT_CMD 15 bash -c '
+  echo "## 9. DEPENDENCY GRAPH (blast radius — files importing changed code)"
+  echo ""
+  for file in $(cat "'"$_CHANGED_FILES_TMP"'"); do
+    # Derive importable name: strip extension, handle index files
+    basename_no_ext=$(echo "$file" | sed "s/\.[^.]*$//")
+    basename_only=$(basename "$basename_no_ext")
+    dir_name=$(dirname "$file")
+
+    # Search for imports/requires referencing this file
+    importers=$(cd "'"$REPO_PATH"'" && git grep -l \
+      "from.*[\"'"'"'].*${basename_only}[\"'"'"']\|require.*[\"'"'"'].*${basename_only}[\"'"'"']\|import.*${basename_only}" \
+      -- "*.ts" "*.js" "*.tsx" "*.vue" 2>/dev/null | \
+      grep -v "^${file}$" | grep -v "node_modules" | sort -u || true)
+    [ -z "$importers" ] && continue
+
+    total=$(echo "$importers" | wc -l | tr -d " ")
+    # Count how many are NOT in this PR
+    not_in_pr=0
+    not_in_pr_files=""
+    while IFS= read -r imp; do
+      [ -z "$imp" ] && continue
+      if ! grep -qF "$imp" "'"$_CHANGED_FILES_TMP"'" 2>/dev/null; then
+        not_in_pr=$((not_in_pr + 1))
+        not_in_pr_files="${not_in_pr_files}  - ${imp}"$'\''\n'\''
+      fi
+    done <<< "$importers"
+
+    echo "### $file — ${total} importers"
+    if [ "$not_in_pr" -gt 0 ]; then
+      echo "  ⚠ ${not_in_pr} importers NOT in this PR:"
+      printf "%s" "$not_in_pr_files" | head -10
+    else
+      echo "  ✓ All importers are included in this PR"
+    fi
+    echo ""
+  done
+' > "$_SEC9" 2>/dev/null &
+_PID9=$!
+
 # Wait for all background sections
-wait $_PID2 $_PID3 $_PID4 $_PID5 $_PID6 $_PID7 2>/dev/null || true
+wait $_PID2 $_PID3 $_PID4 $_PID5 $_PID6 $_PID7 $_PID8 $_PID9 2>/dev/null || true
 
 # Concatenate in priority order (callers + types first, then supporting context)
-for _secfile in "$_SEC2" "$_SEC3" "$_SEC4" "$_SEC5" "$_SEC6" "$_SEC7"; do
+for _secfile in "$_SEC2" "$_SEC3" "$_SEC4" "$_SEC5" "$_SEC6" "$_SEC7" "$_SEC8" "$_SEC9"; do
   _sec_content=$(cat "$_secfile" 2>/dev/null || true)
   if [ -n "$_sec_content" ]; then
     _emit "$_sec_content"$'\n'
@@ -345,7 +419,7 @@ for _secfile in "$_SEC2" "$_SEC3" "$_SEC4" "$_SEC5" "$_SEC6" "$_SEC7"; do
 done
 
 # Cleanup temp files
-rm -f "$_SEC2" "$_SEC3" "$_SEC4" "$_SEC5" "$_SEC6" "$_SEC7"
+rm -f "$_SEC2" "$_SEC3" "$_SEC4" "$_SEC5" "$_SEC6" "$_SEC7" "$_SEC8" "$_SEC9"
 
 echo "# END RAG CONTEXT"
 

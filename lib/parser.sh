@@ -94,6 +94,28 @@ parse_summary() {
       echo ""
       echo "## Verification & Test Checklist"
       echo "$json_content" | jq -r '(.checklist // [])[] | "- [ ] \(.)"'
+      # Requirement coverage from Jira integration
+      local has_req_cov
+      has_req_cov=$(echo "$json_content" | jq -e '.requirement_coverage.ticket // empty' 2>/dev/null || true)
+      if [ -n "$has_req_cov" ] && [ "$has_req_cov" != "null" ]; then
+        echo ""
+        echo "## Requirement Coverage ($(echo "$json_content" | jq -r '.requirement_coverage.ticket'))"
+        echo "### Addressed"
+        echo "$json_content" | jq -r '(.requirement_coverage.addressed // [])[] | "- ✅ \(.)"'
+        local missing_count
+        missing_count=$(echo "$json_content" | jq -r '(.requirement_coverage.missing // []) | length' | tr -d '[:space:]')
+        missing_count=${missing_count:-0}
+        if [ "$missing_count" -gt 0 ] 2>/dev/null; then
+          echo "### Missing"
+          echo "$json_content" | jq -r '(.requirement_coverage.missing // [])[] | "- ⚠️ \(.)"'
+        fi
+        local req_notes
+        req_notes=$(echo "$json_content" | jq -r '.requirement_coverage.notes // empty')
+        if [ -n "$req_notes" ]; then
+          echo ""
+          echo "*${req_notes}*"
+        fi
+      fi
     } > "$summary_file"
     return 0
   fi
@@ -198,9 +220,12 @@ parse_verdict() {
 
   # Method 3: Derive from comment severities
   local has_blocking has_shouldfix
-  has_blocking=$(grep -ci ':BLOCKING' "$comments_file" 2>/dev/null | head -1 || echo "0")
-  has_shouldfix=$(grep -ci ':SHOULD-FIX\|:SHOULD_FIX' "$comments_file" 2>/dev/null | head -1 || echo "0")
-  has_blocking=${has_blocking:-0}; has_shouldfix=${has_shouldfix:-0}
+  has_blocking=$(grep -ci ':BLOCKING' "$comments_file" 2>/dev/null | head -1 || true)
+  has_blocking=$(echo "${has_blocking:-0}" | tr -d '[:space:]')
+  has_blocking=${has_blocking:-0}
+  has_shouldfix=$(grep -ciE ':SHOULD[-_]FIX' "$comments_file" 2>/dev/null | head -1 || true)
+  has_shouldfix=$(echo "${has_shouldfix:-0}" | tr -d '[:space:]')
+  has_shouldfix=${has_shouldfix:-0}
   if [ "$has_blocking" -gt 0 ]; then
     echo "REQUEST_CHANGES"
   elif [ "$has_shouldfix" -gt 0 ]; then

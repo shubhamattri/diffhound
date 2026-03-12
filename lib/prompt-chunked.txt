@@ -158,6 +158,12 @@ UNVERIFIABLE: [yes/no]
 - Shared state (DB tables, queues, cron jobs) that other chunks' files also touch
 - Any finding that depends on code you couldn't fully verify because it's in another chunk
 
+### REQUIREMENT_COVERAGE (only if JIRA context was provided above)
+TICKET: BX-1234
+ADDRESSED: requirement 1 the code implements, requirement 2
+MISSING: acceptance criteria not covered by code changes
+NOTES: any caveats about partial coverage
+
 FINDING RULES:
 - LINE must be a + line visible in the diff. Never approximate.
 - Use EXACT file path from the diff.

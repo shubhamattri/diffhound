@@ -24,6 +24,8 @@ source "${LIB_DIR}/platform.sh"
 source "${LIB_DIR}/parser.sh"
 source "${LIB_DIR}/github.sh"
 source "${LIB_DIR}/rag.sh" 2>/dev/null || true  # for _filter_rag_for_files, _trim_rag
+source "${LIB_DIR}/jira.sh" 2>/dev/null || true  # for _extract_jira_ticket, _fetch_jira_ticket
+source "${LIB_DIR}/lint.sh" 2>/dev/null || true  # for _run_static_analysis
 
 # ── Verify dependencies ─────────────────────────────────────
 _check_deps
@@ -711,7 +713,7 @@ echo "────────────────────────�
 spinner_start "Fetching PR metadata..."
 REPO_OWNER=$(gh repo view --json owner --jq '.owner.login')
 REPO_NAME=$(gh repo view --json name --jq '.name')
-if ! PR_DATA=$($_TIMEOUT_CMD 300 gh pr view "$PR_NUMBER" --json title,body,author,files,additions,deletions,headRefOid 2>&1); then
+if ! PR_DATA=$($_TIMEOUT_CMD 300 gh pr view "$PR_NUMBER" --json title,body,author,files,additions,deletions,headRefOid,headRefName 2>&1); then
   spinner_fail "Failed to fetch PR #${PR_NUMBER}"
   exit 1
 fi
@@ -723,8 +725,26 @@ FILE_COUNT=$(echo "$PR_DATA" | jq -r '.files | length')
 ADDITIONS=$(echo "$PR_DATA" | jq -r '.additions')
 DELETIONS=$(echo "$PR_DATA" | jq -r '.deletions')
 HEAD_SHA=$(echo "$PR_DATA" | jq -r '.headRefOid')
+HEAD_REF_NAME=$(echo "$PR_DATA" | jq -r '.headRefName // empty')
 
 spinner_stop "PR metadata fetched"
+
+# ============================================================
+# STEP 0.7: JIRA TICKET FETCH (requirement coverage)
+# ============================================================
+JIRA_CONTEXT=""
+if [ "${_JIRA_SOURCED:-}" = true ]; then
+  JIRA_TICKET=$(_extract_jira_ticket "$PR_TITLE" "$HEAD_REF_NAME" "$PR_BODY")
+  if [ -n "$JIRA_TICKET" ]; then
+    spinner_start "Fetching Jira ticket ${JIRA_TICKET}..."
+    JIRA_CONTEXT=$(_fetch_jira_ticket "$JIRA_TICKET" 2>/dev/null || true)
+    if [ -n "$JIRA_CONTEXT" ]; then
+      spinner_stop "Jira context loaded (${JIRA_TICKET})"
+    else
+      spinner_stop "Jira fetch failed — skipping requirement coverage"
+    fi
+  fi
+fi
 echo "  📄 ${PR_TITLE}"
 echo "  👤 @${PR_AUTHOR}  •  ${FILE_COUNT} files  +${ADDITIONS}/-${DELETIONS}"
 
@@ -1293,6 +1313,13 @@ _review_chunks_parallel() {
         echo "---"
         echo ""
       fi
+      # Inject Jira context if available (PR-wide, not per-chunk)
+      if [ -n "${JIRA_CONTEXT:-}" ]; then
+        echo "$JIRA_CONTEXT"
+        echo ""
+        echo "---"
+        echo ""
+      fi
       echo "# PR SUMMARY (applies to entire PR — your chunk is a subset)"
       echo "$pr_summary_header"
       echo ""
@@ -1300,6 +1327,30 @@ _review_chunks_parallel() {
       echo ""
       echo "# YOUR CHUNK: files [${file_list}]"
       echo ""
+      # Inject per-chunk lint findings
+      if [ -n "${LINT_CONTEXT:-}" ]; then
+        # Filter lint to only this chunk's files
+        local _chunk_lint=""
+        while IFS=$'\t' read -r _cf _cp; do
+          [ -z "$_cf" ] && continue
+          local _file_lint
+          _file_lint=$(echo "$LINT_CONTEXT" | awk -v f="### ${_cf}" '
+            $0 == f { found=1; print; next }
+            found && /^### / { found=0; next }
+            found { print }
+          ')
+          [ -n "$_file_lint" ] && _chunk_lint+="${_file_lint}"$'\n'
+        done < "$chunk_manifest"
+        if [ -n "$_chunk_lint" ]; then
+          echo "## STATIC ANALYSIS FINDINGS (pre-computed — do NOT re-flag these)"
+          echo "Do NOT include these as findings — they are already reported separately."
+          echo ""
+          echo "$_chunk_lint"
+          echo ""
+          echo "---"
+          echo ""
+        fi
+      fi
       echo "# DIFF (this chunk only)"
       echo ""
       cat "$chunk_diff"
@@ -1657,6 +1708,21 @@ elif [ -f "$_RAG_SCRIPT" ] && $_TIMEOUT_CMD 60 bash "$_RAG_SCRIPT" \
 else
   spinner_stop "RAG context unavailable — proceeding with diff only"
   echo "" > "$RAG_CONTEXT_FILE"
+fi
+
+# ============================================================
+# STEP 1.3: STATIC ANALYZER PRE-PASS (lint findings for prompt)
+# ============================================================
+LINT_CONTEXT=""
+if [ "${_LINT_SOURCED:-}" = true ]; then
+  spinner_start "Running static analysis..."
+  LINT_CONTEXT=$(_run_static_analysis "$DIFF_FILE" "$REPO_PATH" 2>/dev/null || true)
+  if [ -n "$LINT_CONTEXT" ]; then
+    LINT_SIZE=${#LINT_CONTEXT}
+    spinner_stop "Static analysis done (${LINT_SIZE}B)"
+  else
+    spinner_stop "No lint findings (or linters not installed)"
+  fi
 fi
 
 # ============================================================
@@ -2040,7 +2106,13 @@ LINE NUMBER RULES (critical — wrong lines cause GitHub to reject the comment):
       "reviewer_verdict": "..."
     }
   ],
-  "checklist": ["Run staging test for X", "Verify Y in prod"]
+  "checklist": ["Run staging test for X", "Verify Y in prod"],
+  "requirement_coverage": {
+    "ticket": "BX-1234 or null if no Jira ticket found",
+    "addressed": ["requirement 1 that code implements", "requirement 2"],
+    "missing": ["acceptance criteria not covered by code changes"],
+    "notes": "Any caveats about partial coverage or ambiguous requirements"
+  }
 }
 ```
 
@@ -2204,9 +2276,21 @@ ${PR_BODY}
 
 ---
 
-# DIFF
-
 PR_META_FRESH
+
+  # Inject Jira context if available (before diff for requirement priming)
+  if [ -n "${JIRA_CONTEXT:-}" ]; then
+    cat >> "$PROMPT_FILE" << JIRA_HEADER
+
+${JIRA_CONTEXT}
+
+---
+
+JIRA_HEADER
+  fi
+
+  echo "# DIFF" >> "$PROMPT_FILE"
+  echo "" >> "$PROMPT_FILE"
 fi
 
 cat "$DIFF_FILE" >> "$PROMPT_FILE"
@@ -2262,6 +2346,17 @@ if [ -s "$RAG_CONTEXT_FILE" ]; then
 
 RAG_HEADER
   cat "$RAG_CONTEXT_FILE" >> "$PROMPT_FILE"
+fi
+
+# Inject static analysis findings if available
+if [ -n "${LINT_CONTEXT:-}" ]; then
+  cat >> "$PROMPT_FILE" << LINT_HEADER
+
+---
+
+${LINT_CONTEXT}
+
+LINT_HEADER
 fi
 
 # ============================================================
@@ -2811,6 +2906,110 @@ Evidence: \(.value.evidence // "none")
   fi
 
   rm -f "$VERIFY_PROMPT" "$VERIFY_OUT" 2>/dev/null || true
+fi
+
+# ============================================================
+# STEP 4.7: MECHANICAL VERIFICATION (grep/test to drop false positives)
+# ============================================================
+# After LLM outputs findings, before posting, verify claims against the repo.
+# Only DROP findings that are clearly contradicted by grep/test. If uncertain, KEEP.
+if [ -s "$CLAUDE_OUT" ]; then
+  _json_for_verify=$(_extract_json "$CLAUDE_OUT" 2>/dev/null || true)
+  if [ -n "$_json_for_verify" ] && echo "$_json_for_verify" | jq -e '.findings' >/dev/null 2>&1; then
+    _finding_count=$(echo "$_json_for_verify" | jq '.findings | length')
+    if [ "$_finding_count" -gt 0 ]; then
+      spinner_start "Mechanical verification (${_finding_count} findings)..."
+      _dropped=0
+      _verified_json="$_json_for_verify"
+
+      # Build list of findings to drop (indices, 0-based)
+      _drop_indices=""
+      for (( _fi=0; _fi<_finding_count; _fi++ )); do
+        _f_body=$(echo "$_json_for_verify" | jq -r ".findings[$_fi].body // \"\"")
+        _f_title=$(echo "$_json_for_verify" | jq -r ".findings[$_fi].title // \"\"")
+        _f_file=$(echo "$_json_for_verify" | jq -r ".findings[$_fi].file // \"\"")
+        _f_line=$(echo "$_json_for_verify" | jq -r ".findings[$_fi].line // 0")
+        _combined="${_f_title} ${_f_body}"
+        _should_drop=false
+
+        # Check 1: "function X never called" / "X is unused" / "X is not called"
+        _unused_func=$(echo "$_combined" | grep -oiE '(function|method|const)\s+`?([a-zA-Z_][a-zA-Z0-9_]*)`?\s+(is\s+)?(never\s+called|unused|not\s+called|not\s+used|dead\s+code)' | \
+          grep -oE '`?[a-zA-Z_][a-zA-Z0-9_]*`?' | head -1 | tr -d '`' || true)
+        if [ -n "$_unused_func" ]; then
+          _grep_result=$(cd "$REPO_PATH" && grep -r --include="*.ts" --include="*.js" --include="*.tsx" --include="*.vue" \
+            "$_unused_func" . 2>/dev/null | grep -v "function ${_unused_func}\|const ${_unused_func}\|export.*function.*${_unused_func}\|\/\/" | head -1 || true)
+          if [ -n "$_grep_result" ]; then
+            _should_drop=true
+          fi
+        fi
+
+        # Check 2: "file X doesn't exist" / "missing file X"
+        _missing_file=$(echo "$_combined" | grep -oiE "(file|module)\s+\`?([a-zA-Z0-9_./-]+\.(ts|js|vue|py))\`?\s+(does\s?n.t\s+exist|is\s+missing|not\s+found)" | \
+          grep -oE '`?[a-zA-Z0-9_./-]+\.(ts|js|vue|py)`?' | head -1 | tr -d '`' || true)
+        if [ -n "$_missing_file" ]; then
+          if [ -f "${REPO_PATH}/${_missing_file}" ]; then
+            _should_drop=true
+          fi
+        fi
+
+        # Check 3: "missing import for Y" — check if import actually exists
+        _missing_import=$(echo "$_combined" | grep -oiE "missing\s+import\s+(for\s+)?\`?([a-zA-Z_][a-zA-Z0-9_]*)\`?" | \
+          grep -oE '`?[a-zA-Z_][a-zA-Z0-9_]*`?$' | tr -d '`' || true)
+        if [ -n "$_missing_import" ] && [ -n "$_f_file" ] && [ -f "${REPO_PATH}/${_f_file}" ]; then
+          _imp_check=$(grep -E "import.*${_missing_import}" "${REPO_PATH}/${_f_file}" 2>/dev/null | head -1 || true)
+          if [ -n "$_imp_check" ]; then
+            _should_drop=true
+          fi
+        fi
+
+        # Check 4: Line number validity — if line doesn't exist in file, drop
+        if [ -n "$_f_file" ] && [ "$_f_line" -gt 0 ] 2>/dev/null && [ -f "${REPO_PATH}/${_f_file}" ]; then
+          _line_content=$(sed -n "${_f_line}p" "${REPO_PATH}/${_f_file}" 2>/dev/null || true)
+          _file_lines=$(wc -l < "${REPO_PATH}/${_f_file}" 2>/dev/null | tr -d ' ')
+          if [ "$_f_line" -gt "$_file_lines" ] 2>/dev/null; then
+            _should_drop=true
+          fi
+        fi
+
+        if [ "$_should_drop" = true ]; then
+          _drop_indices="${_drop_indices} ${_fi}"
+          _dropped=$((_dropped + 1))
+        fi
+      done
+
+      # Apply drops by filtering findings array
+      if [ "$_dropped" -gt 0 ]; then
+        _jq_filter="[.findings | to_entries[] | select("
+        _first=true
+        for _di in $_drop_indices; do
+          if [ "$_first" = true ]; then
+            _jq_filter+=".key != ${_di}"
+            _first=false
+          else
+            _jq_filter+=" and .key != ${_di}"
+          fi
+        done
+        _jq_filter+=") | .value]"
+
+        _filtered_json=$(echo "$_json_for_verify" | jq --argjson drops "$(echo "$_drop_indices" | tr ' ' '\n' | grep -v '^$' | jq -R 'tonumber' | jq -s '.')" \
+          '.findings = [.findings | to_entries[] | select(.key as $k | $drops | index($k) | not) | .value]')
+
+        if [ -n "$_filtered_json" ] && echo "$_filtered_json" | jq -e '.' >/dev/null 2>&1; then
+          # Rewrite CLAUDE_OUT with filtered JSON
+          _before_json=$(sed -n '1,/^```json/p' "$CLAUDE_OUT")
+          _after_json=$(sed -n '/^```$/,$p' "$CLAUDE_OUT" | tail -n +1)
+          {
+            echo "$_before_json"
+            echo "$_filtered_json"
+            echo '```'
+          } > "${CLAUDE_OUT}.tmp" && mv "${CLAUDE_OUT}.tmp" "$CLAUDE_OUT"
+        fi
+        spinner_stop "Mechanical verification: dropped ${_dropped} false positive(s)"
+      else
+        spinner_stop "Mechanical verification: all ${_finding_count} findings confirmed"
+      fi
+    fi
+  fi
 fi
 
 
