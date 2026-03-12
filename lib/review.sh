@@ -730,6 +730,29 @@ HEAD_REF_NAME=$(echo "$PR_DATA" | jq -r '.headRefName // empty')
 spinner_stop "PR metadata fetched"
 
 # ============================================================
+# STEP 0.65: CHECKOUT PR BRANCH (so Read/Bash tools see PR code, not base branch)
+# ============================================================
+_ORIGINAL_REF=""
+if [ -n "$REPO_PATH" ] && [ -d "$REPO_PATH/.git" ]; then
+  _ORIGINAL_REF=$(git -C "$REPO_PATH" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+  # Fetch the PR's head commit and checkout
+  if [ -n "$HEAD_SHA" ]; then
+    (
+      cd "$REPO_PATH"
+      git fetch origin "$HEAD_SHA" --depth=50 -q 2>/dev/null || \
+        git fetch origin "+refs/pull/${PR_NUMBER}/head:refs/remotes/origin/pr-${PR_NUMBER}" -q 2>/dev/null || true
+      git checkout "$HEAD_SHA" -q 2>/dev/null || true
+    )
+    _CURRENT_SHA=$(git -C "$REPO_PATH" rev-parse HEAD 2>/dev/null || true)
+    if [ "${_CURRENT_SHA:0:8}" = "${HEAD_SHA:0:8}" ]; then
+      echo "  🔀 Repo checked out to PR HEAD (${HEAD_SHA:0:8})"
+    else
+      echo "  ⚠ Could not checkout PR HEAD — file reads may use base branch" >&2
+    fi
+  fi
+fi
+
+# ============================================================
 # STEP 0.7: JIRA TICKET FETCH (requirement coverage)
 # ============================================================
 JIRA_CONTEXT=""
@@ -773,6 +796,11 @@ cleanup() {
         "${VERIFY_PROMPT:-}" "${VERIFY_OUT:-}" \
         "${CLEANED_DIFF:-}" "${COMPRESSED_DIFF:-}" "${TRIAGE_FILE:-}" "${PR_SUMMARY_HEADER_FILE:-}"
   [ -n "${CHUNK_DIR:-}" ] && rm -rf "$CHUNK_DIR" 2>/dev/null || true
+
+  # Restore original branch after PR HEAD checkout
+  if [ -n "${_ORIGINAL_REF:-}" ] && [ -d "${REPO_PATH:-}/.git" ]; then
+    git -C "$REPO_PATH" checkout "$_ORIGINAL_REF" -q 2>/dev/null || true
+  fi
 
   # Post failure comment if review crashed mid-way
   if [ "$exit_code" -ne 0 ] && [ -n "${REPO_OWNER:-}" ] && [ -n "${REPO_NAME:-}" ] && [ -n "${PR_NUMBER:-}" ]; then
