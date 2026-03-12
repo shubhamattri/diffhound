@@ -3689,6 +3689,64 @@ if [ "$POST_REVIEW" = true ]; then
   # Parse verdict using lib function (3-method fallback)
   REVIEW_EVENT=$(parse_verdict "$REVIEW_SUMMARY" "${REVIEW_STRUCTURED}.new_comments")
 
+  # Reorder summary: move scorecard table to the top (after first paragraph)
+  # so it survives GitHub's silent body truncation on large reviews.
+  if grep -q '| Category' "$REVIEW_SUMMARY" 2>/dev/null; then
+    _reorder_tmp=$(mktemp -t "pr-${PR_NUMBER}-reorder.XXXXXX")
+    _table_tmp=$(mktemp -t "pr-${PR_NUMBER}-table.XXXXXX")
+    _body_tmp=$(mktemp -t "pr-${PR_NUMBER}-body.XXXXXX")
+
+    # Extract table lines (| rows) and everything else
+    local _in_table=false
+    while IFS= read -r _line; do
+      if echo "$_line" | grep -q '^| Category'; then
+        _in_table=true
+      fi
+      if [ "$_in_table" = true ]; then
+        if echo "$_line" | grep -q '^|'; then
+          echo "$_line" >> "$_table_tmp"
+        else
+          _in_table=false
+          echo "$_line" >> "$_body_tmp"
+        fi
+      else
+        echo "$_line" >> "$_body_tmp"
+      fi
+    done < "$REVIEW_SUMMARY"
+
+    # Rebuild: first paragraph, then scorecard, then rest
+    local _found_break=false _seen_text=false
+    while IFS= read -r _line; do
+      echo "$_line" >> "$_reorder_tmp"
+      # Insert table after first blank line that follows actual text
+      if [ "$_found_break" = false ]; then
+        if [ -n "$_line" ]; then
+          _seen_text=true
+        elif [ "$_seen_text" = true ] && [ -z "$_line" ]; then
+          _found_break=true
+          if [ -s "$_table_tmp" ]; then
+            cat "$_table_tmp" >> "$_reorder_tmp"
+            echo "" >> "$_reorder_tmp"
+          fi
+        fi
+      fi
+    done < "$_body_tmp"
+
+    # If no blank line found, append table at end
+    if [ "$_found_break" = false ] && [ -s "$_table_tmp" ]; then
+      echo "" >> "$_reorder_tmp"
+      cat "$_table_tmp" >> "$_reorder_tmp"
+    fi
+
+    # Only use reordered if valid
+    if [ -s "$_reorder_tmp" ] && grep -q '| Category' "$_reorder_tmp" 2>/dev/null; then
+      mv "$_reorder_tmp" "$REVIEW_SUMMARY"
+    else
+      rm -f "$_reorder_tmp"
+    fi
+    rm -f "$_table_tmp" "$_body_tmp" 2>/dev/null
+  fi
+
   # Build the review JSON (new inline comments only)
   cat > "$REVIEW_JSON" << JSONSTART
 {
