@@ -124,6 +124,35 @@ parse_summary() {
   if grep -q "SUMMARY_START" "$structured_file"; then
     sed -n '/SUMMARY_START/,/SUMMARY_END/p' "$structured_file" | \
       grep -v "SUMMARY_START" | grep -v "SUMMARY_END" > "$summary_file"
+  elif grep -q "SCORECARD_START" "$structured_file"; then
+    # Chunked merge format: extract SCORECARD_START/END and convert to markdown table
+    {
+      # Build markdown scorecard table from "Category: X/Y — reason" lines
+      echo "| Category | Score | Notes |"
+      echo "|----------|-------|-------|"
+      sed -n '/SCORECARD_START/,/SCORECARD_END/p' "$structured_file" | \
+        grep -v "SCORECARD_START\|SCORECARD_END\|^Blocking:\|^ShouldFix:\|^Nits:\|^Checklist:" | \
+        while IFS= read -r _sline; do
+          [ -z "$_sline" ] && continue
+          _cat=$(echo "$_sline" | sed 's/:.*//' | sed 's/^ *//')
+          _rest=$(echo "$_sline" | sed 's/^[^:]*: //')
+          _score=$(echo "$_rest" | grep -oE '^[0-9]+/[0-9]+' || true)
+          _reason=$(echo "$_rest" | sed 's/^[0-9]*\/[0-9]* *[—–-]* *//')
+          if echo "$_cat" | grep -qi "total"; then
+            echo "| **${_cat}** | **${_score}** | ${_reason} |"
+          elif [ -n "$_score" ]; then
+            echo "| ${_cat} | ${_score} | ${_reason} |"
+          fi
+        done
+      echo ""
+      echo "## Verification & Test Checklist"
+      sed -n '/SCORECARD_START/,/SCORECARD_END/p' "$structured_file" | \
+        grep "^Checklist:" | sed 's/^Checklist: //' | tr ',' '\n' | \
+        while IFS= read -r _item; do
+          _item=$(echo "$_item" | sed 's/^ *//')
+          [ -n "$_item" ] && echo "- [ ] ${_item}"
+        done
+    } > "$summary_file"
   else
     cat "$structured_file" > "$summary_file"
   fi

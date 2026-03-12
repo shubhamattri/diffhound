@@ -3495,19 +3495,21 @@ parse_summary "$REVIEW_STRUCTURED" "$REVIEW_SUMMARY"
 # Fallback: if voice rewrite produced 0 comments but Claude's JSON has findings,
 # use Claude's output directly. This catches cases where Haiku outputs free text
 # instead of the structured COMMENT: format (seen on PRs #42, #45, #46).
-_voice_comment_count=$(grep -c "^COMMENT:" "${REVIEW_STRUCTURED}.comments" 2>/dev/null | head -1 || echo "0")
+_voice_comment_count=$(grep -c "^COMMENT:" "${REVIEW_STRUCTURED}.comments" 2>/dev/null | head -1 || true)
+_voice_comment_count=$(echo "${_voice_comment_count:-0}" | tr -d '[:space:]')
 _voice_comment_count=${_voice_comment_count:-0}
-if [ "$_voice_comment_count" -eq 0 ]; then
-  # Try extracting JSON from Claude's output (may or may not have ```json fences)
+if [ "$_voice_comment_count" -eq 0 ] 2>/dev/null; then
+  _recovered=false
+
+  # Recovery path 1: JSON format (monolithic reviews)
   _claude_json=$(_extract_json "$CLAUDE_OUT" 2>/dev/null || true)
   if [ -z "$_claude_json" ]; then
-    # No fences — try parsing the whole file as JSON
     _claude_json=$(jq '.' "$CLAUDE_OUT" 2>/dev/null || true)
   fi
   _claude_findings=$(echo "$_claude_json" | jq '.findings | length' 2>/dev/null || echo "0")
-  if [ "${_claude_findings:-0}" -gt 0 ]; then
+  _claude_findings=$(echo "${_claude_findings:-0}" | tr -d '[:space:]')
+  if [ "${_claude_findings:-0}" -gt 0 ] 2>/dev/null; then
     echo "  Voice rewrite lost findings — falling back to Claude's JSON output" >&2
-    # Ensure CLAUDE_OUT has fences for parse_comments to work
     if ! grep -q '^```json' "$CLAUDE_OUT" 2>/dev/null; then
       _fenced_tmp=$(mktemp -t "pr-${PR_NUMBER}-fenced.XXXXXX")
       { echo '```json'; echo "$_claude_json"; echo '```'; } > "$_fenced_tmp"
@@ -3517,6 +3519,53 @@ if [ "$_voice_comment_count" -eq 0 ]; then
     else
       parse_comments "$CLAUDE_OUT" "${REVIEW_STRUCTURED}.comments"
       parse_summary "$CLAUDE_OUT" "$REVIEW_SUMMARY"
+    fi
+    _recovered=true
+  fi
+
+  # Recovery path 2: FINDINGS_START format (chunked/merged reviews)
+  if [ "$_recovered" = false ] && grep -q "^FINDING:" "$CLAUDE_OUT" 2>/dev/null; then
+    _finding_count=$(grep -c "^FINDING:" "$CLAUDE_OUT" 2>/dev/null | head -1 || true)
+    _finding_count=$(echo "${_finding_count:-0}" | tr -d '[:space:]')
+    if [ "${_finding_count:-0}" -gt 0 ] 2>/dev/null; then
+      echo "  Voice rewrite lost findings — falling back to merged FINDING: format (${_finding_count} findings)" >&2
+      # Convert FINDING: lines to COMMENT: format for the posting pipeline
+      # FINDING format: FINDING: file:LINE:SEVERITY\nWHAT: ...\nEVIDENCE: ...\nIMPACT: ...\nOPTIONS: ...
+      {
+        _current_finding=""
+        _current_body=""
+        while IFS= read -r _fline; do
+          case "$_fline" in
+            FINDING:*)
+              # Flush previous finding
+              if [ -n "$_current_finding" ]; then
+                echo "COMMENT: ${_current_finding} — ${_current_body}"
+              fi
+              _current_finding="${_fline#FINDING: }"
+              _current_body=""
+              ;;
+            WHAT:*|EVIDENCE:*|IMPACT:*)
+              _val="${_fline#*: }"
+              if [ -n "$_current_body" ]; then
+                _current_body="${_current_body}$(printf '\x1f')${_val}"
+              else
+                _current_body="$_val"
+              fi
+              ;;
+            OPTIONS:*)
+              _val="${_fline#*: }"
+              _current_body="${_current_body}$(printf '\x1f')Options: ${_val}"
+              ;;
+          esac
+        done < "$CLAUDE_OUT"
+        # Flush last finding
+        if [ -n "$_current_finding" ]; then
+          echo "COMMENT: ${_current_finding} — ${_current_body}"
+        fi
+      } > "${REVIEW_STRUCTURED}.comments"
+      # Use CLAUDE_OUT as-is for summary (parse_summary handles SCORECARD_START/END)
+      parse_summary "$CLAUDE_OUT" "$REVIEW_SUMMARY"
+      _recovered=true
     fi
   fi
 fi
