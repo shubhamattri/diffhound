@@ -260,6 +260,7 @@ _filter_diff_by_config() {
         if (match(file, pattern)) { skip = 1 } else { skip = 0 }
       }
       !skip { print }
+      END { if (pending && hold != "") {} }
     ' "$diff_file" > "$filtered_diff" 2>/dev/null; then
       if [ -s "$filtered_diff" ]; then
         mv "$filtered_diff" "$diff_file"
@@ -853,6 +854,7 @@ _preprocess_diff() {
     }
     skip { next }
     { print }
+      END { if (pending && hold != "") {} }
   ' "$raw_diff" > "${output_file}.phase1"
 
   if [ "$strip_deletions" = "true" ]; then
@@ -873,6 +875,7 @@ _preprocess_diff() {
         next
       }
       { print }
+      END { if (pending && hold != "") {} }
       END { if (hunk != "" && has_add) printf "%s", hunk }
     ' "${output_file}.phase1" > "$output_file"
     rm -f "${output_file}.phase1"
@@ -907,6 +910,7 @@ _compress_medium() {
     in_hunk && /^[+-]/ { ctx=0; print; next }
     in_hunk { ctx++; if (ctx <= 1) print; next }
     { print }
+      END { if (pending && hold != "") {} }
   ' "$diff_file" > "$output_file"
 }
 
@@ -1368,6 +1372,7 @@ _review_chunks_parallel() {
             $0 == f { found=1; print; next }
             found && /^### / { found=0; next }
             found { print }
+      END { if (pending && hold != "") {} }
           ')
           [ -n "$_file_lint" ] && _chunk_lint+="${_file_lint}"$'\n'
         done < "$chunk_manifest"
@@ -2636,6 +2641,7 @@ if [ "$_RUN_PEER_REVIEW" = true ]; then
           $_AWK_CMD -v file="$_cf" '
             /^diff --git/ { printing = (index($0, "b/" file) > 0) }
             printing { print }
+      END { if (pending && hold != "") {} }
           ' "$CLEANED_DIFF"
         done <<< "$_critical_files")
       fi
@@ -2727,13 +2733,30 @@ PEER_EOF
   kill $_WATCHDOG_PID 2>/dev/null || true
   wait $_WATCHDOG_PID 2>/dev/null || true
 
-  # If Codex was killed by watchdog, mark as unavailable
-  if kill -0 $CODEX_PID 2>/dev/null; then
-    kill $CODEX_PID 2>/dev/null || true
-    echo "CODEX_UNAVAILABLE" > "$CODEX_OUT"
-  fi
-  [ -s "$CODEX_OUT" ] || echo "CODEX_UNAVAILABLE" > "$CODEX_OUT"
-  [ -s "$GEMINI_OUT" ] || echo "GEMINI_UNAVAILABLE" > "$GEMINI_OUT"
+  # Validate peer output: empty or truncated = unusable
+  _validate_peer_output() {
+    local file="$1" name="$2"
+    if [ ! -s "$file" ]; then
+      echo "${name}_UNAVAILABLE" > "$file"
+      return
+    fi
+    # Truncated: file under 100 bytes or doesn't end with sentence-ending char
+    local size
+    size=$(wc -c < "$file" | tr -d ' ')
+    if [ "$size" -lt 100 ]; then
+      echo "  warning: ${name} output too short (${size}B) -- discarding" >&2
+      echo "${name}_UNAVAILABLE" > "$file"
+      return
+    fi
+    local last_chars
+    last_chars=$(tail -c 20 "$file" | tr -d '[:space:]')
+    if [ -n "$last_chars" ] && ! printf '%s' "$last_chars" | grep -qE '[.!?)}\]"]$'; then
+      echo "  warning: ${name} output appears truncated -- discarding" >&2
+      echo "${name}_UNAVAILABLE" > "$file"
+    fi
+  }
+  _validate_peer_output "$CODEX_OUT" "CODEX"
+  _validate_peer_output "$GEMINI_OUT" "GEMINI"
 
   CODEX_CONTENT=$(cat "$CODEX_OUT")
   GEMINI_CONTENT=$(cat "$GEMINI_OUT")
@@ -2834,6 +2857,7 @@ Evidence: \(.value.evidence // "none")
               if (parts[2] == f) in_file = 1
             }
             in_file { print }
+      END { if (pending && hold != "") {} }
           ' "$DIFF_FILE" 2>/dev/null | head -200
           echo ""
         done
@@ -3464,7 +3488,7 @@ if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
     -H "x-api-key: ${ANTHROPIC_API_KEY}" \
     -H "anthropic-version: 2023-06-01" \
     -H "content-type: application/json" \
-    -d '{"model":"claude-haiku-4-5-20251001","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}' \
+    -d '{"model":"claude-sonnet-4-20250514","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}' \
     2>/dev/null || echo "")
   if echo "$_TEST_RESP" | grep -q '"type":"message"'; then
     _KEY_HAS_CREDITS=true
@@ -3476,8 +3500,8 @@ if [ "${_KEY_HAS_CREDITS:-false}" = "true" ]; then
     --arg system "$_STATIC_SYSTEM" \
     --rawfile user "$_USER_TMP" \
     '{
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 4096,
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 16384,
       system: [{type: "text", text: $system, cache_control: {type: "ephemeral"}}],
       messages: [{role: "user", content: $user}]
     }' > "$_JSON_TMP"
@@ -3502,7 +3526,7 @@ if [ "$_API_CALLED" = false ]; then
   _SAVED_KEY2="${ANTHROPIC_API_KEY:-}"
   unset ANTHROPIC_API_KEY
   { echo "$_STATIC_SYSTEM"; echo ""; cat "$_USER_TMP"; } | \
-    claude -p --model claude-haiku-4-5-20251001 > "$REVIEW_STRUCTURED" 2>&1 || \
+    claude -p --model claude-sonnet-4-20250514 > "$REVIEW_STRUCTURED" 2>&1 || \
     cp "$CLAUDE_OUT" "$REVIEW_STRUCTURED"
   export ANTHROPIC_API_KEY="$_SAVED_KEY2"
 fi
@@ -3597,6 +3621,34 @@ if [ "$_voice_comment_count" -eq 0 ] 2>/dev/null; then
       parse_summary "$CLAUDE_OUT" "$REVIEW_SUMMARY"
       _recovered=true
     fi
+  fi
+fi
+
+# -- Diagnostic: log comment recovery status --
+_final_comment_count=$(grep -c "^COMMENT:" "${REVIEW_STRUCTURED}.comments" 2>/dev/null || echo "0")
+_final_comment_count=$(echo "${_final_comment_count:-0}" | tr -d '[:space:]')
+if [ "${_final_comment_count:-0}" -gt 0 ] 2>/dev/null; then
+  echo "  ${_final_comment_count} inline comments ready (source: $([ "${_voice_comment_count:-0}" -gt 0 ] && echo 'voice rewrite' || echo 'fallback recovery'))" >&2
+else
+  echo "  warning: No inline comments extracted -- check voice rewrite + fallback paths" >&2
+  _debug_json=$(_extract_json "$CLAUDE_OUT" 2>/dev/null || true)
+  _debug_count=$(echo "$_debug_json" | jq '.findings | length' 2>/dev/null || echo "?")
+  echo "    Claude JSON has ${_debug_count} findings, voice_comment_count was ${_voice_comment_count:-0}" >&2
+fi
+
+
+# -- Scorecard fallback: recover from Claude JSON if voice rewrite dropped it --
+if ! grep -q '| Category' "$REVIEW_SUMMARY" 2>/dev/null; then
+  echo "  Voice rewrite dropped scorecard -- recovering from Claude JSON" >&2
+  _sc_json=$(_extract_json "$CLAUDE_OUT" 2>/dev/null || true)
+  if [ -z "$_sc_json" ]; then
+    _sc_json=$(jq '.' "$CLAUDE_OUT" 2>/dev/null || true)
+  fi
+  if [ -n "$_sc_json" ] && echo "$_sc_json" | jq -e '.scorecard' >/dev/null 2>&1; then
+    _sc_fenced=$(mktemp -t "pr-${PR_NUMBER}-sc.XXXXXX")
+    { echo '```json'; echo "$_sc_json"; echo '```'; } > "$_sc_fenced"
+    parse_summary "$_sc_fenced" "$REVIEW_SUMMARY"
+    rm -f "$_sc_fenced"
   fi
 fi
 
@@ -3825,6 +3877,26 @@ if [ "$POST_REVIEW" = true ]; then
       rm -f "$_reorder_tmp"
     fi
     rm -f "$_table_tmp" "$_body_tmp" 2>/dev/null
+  fi
+
+
+  # -- Strip orphan ## Scorecard headers (not followed by a pipe table) --
+  if grep -q '^## Scorecard' "$REVIEW_SUMMARY" 2>/dev/null; then
+    _dedup_tmp=$(mktemp -t "pr-${PR_NUMBER}-dedup.XXXXXX")
+    awk '
+      /^## Scorecard/ {
+        hold = $0; pending = 1; next
+      }
+      pending && /^[[:space:]]*$/ { next }
+      pending {
+        if (/^\|/) { print hold; print; pending = 0 }
+        else { pending = 0; print }
+        next
+      }
+      { print }
+      END { if (pending && hold != "") {} }
+    ' "$REVIEW_SUMMARY" > "$_dedup_tmp" && mv "$_dedup_tmp" "$REVIEW_SUMMARY"
+    rm -f "$_dedup_tmp" 2>/dev/null || true
   fi
 
   # Build the review JSON (new inline comments only)
