@@ -803,7 +803,9 @@ cleanup() {
   fi
 
   # Post failure comment if review crashed mid-way
-  if [ "$exit_code" -ne 0 ] && [ -n "${REPO_OWNER:-}" ] && [ -n "${REPO_NAME:-}" ] && [ -n "${PR_NUMBER:-}" ]; then
+  # Skip for signal kills (exit >= 128): these are GHA concurrency cancellations, not real failures
+  # SIGTERM=143, SIGINT=130, SIGHUP=129 — all from cancel-in-progress: true
+  if [ "$exit_code" -ne 0 ] && [ "$exit_code" -lt 128 ] && [ -n "${REPO_OWNER:-}" ] && [ -n "${REPO_NAME:-}" ] && [ -n "${PR_NUMBER:-}" ]; then
     gh api --method POST \
       -H "Accept: application/vnd.github+json" \
       "/repos/${REPO_OWNER}/${REPO_NAME}/issues/${PR_NUMBER}/comments" \
