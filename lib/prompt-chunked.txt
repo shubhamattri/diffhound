@@ -110,6 +110,8 @@ No unit test covers the headless path (`ctx.user` is null) that caused the origi
 - Resilience: missing timeout, no per-item try/catch, no DLQ
 - Hardcoded values that should be config
 - Timezone: UTC vs IST mismatch in cron SQL
+- Data shape mismatch: Object.entries/fromEntries/keys/values called on arrays, or Array methods (.map/.filter/.forEach) on plain objects. MUST Read the type definition or assignment of the variable to verify its actual shape before approving. This is BLOCKING if the operation produces wrong output silently.
+- Type-narrowing gaps: typeof checks that can never be true (e.g. typeof on array element that is always an object). Read the interface/type to verify.
 
 # SCOPE RULES
 - ONLY review code CHANGED in this PR (lines with + or - prefix)
