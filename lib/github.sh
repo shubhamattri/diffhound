@@ -67,6 +67,20 @@ post_review() {
           --input "${_fallback_json}.retry" > /dev/null 2>&1; then
           review_event="COMMENT"
           rm -f "${_fallback_json}.retry"
+          # Post inline comments individually (same logic as body-only success path)
+          local inline_posted=0
+          if [ "$new_comment_count" -gt 0 ]; then
+            while IFS=: read -r filepath line rest; do
+              [[ ! "$filepath" =~ ^[a-zA-Z0-9/_.-]+$ ]] && continue
+              line="${line#\~}"
+              [[ ! "$line" =~ ^[0-9]+$ ]] && continue
+              line=$(snap_to_diff_line "$filepath" "$line" "$diff_file")
+              comment=$(strip_severity_label "$rest")
+              [ -z "$(printf '%s' "$comment" | tr -d '[:space:]')" ] && continue
+              gh api --method POST                 -H "Accept: application/vnd.github+json"                 "/repos/${repo_owner}/${repo_name}/pulls/${pr_number}/comments"                 -f "body=${comment}"                 -f "commit_id=${head_sha}"                 -f "path=${filepath}"                 -F "line=${line}" > /dev/null 2>&1 && inline_posted=$((inline_posted + 1))
+            done < "$new_comments_file"
+          fi
+          new_comment_count=$inline_posted
         else
           rm -f "${_fallback_json}.retry"
           spinner_fail "Failed to post review to GitHub"
