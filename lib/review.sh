@@ -2094,6 +2094,8 @@ You MUST output valid JSON. No text before or after the JSON block. Wrap in \`\`
 
 SCORE RULE (critical): The "score" field MUST equal the sum of all scorecard category scores. Do NOT guess or estimate — add them: security.score + tests.score + observability.score + performance.score + readability.score + compatibility.score = score. Double-check your arithmetic.
 
+BLOCKER-SCORE CONSISTENCY RULE (critical): Scores MUST reflect findings severity. If a category has BLOCKING findings, its score MUST be <= 50% of max (e.g. security with a blocker: max 12/25). If a category has 2+ SHOULD-FIX findings, its score MUST be <= 75% of max. A review with ANY blocking finding should score below 85 total. Do NOT give high scores while simultaneously flagging blockers -- that is contradictory and useless to reviewers.
+
 RE-REVIEW SCORE RULE: When re-reviewing after fixes, if a category has NO new issues, its score MUST be >= the previous review's score. Do NOT deduct points with generic notes like "no regressions" or "no changes" — that is not a reason to lose points. Only deduct if you can cite a SPECIFIC file:line that justifies the deduction. If all prior blockers are fixed, the score should go UP, not down.
 
 LINE NUMBER RULES (critical — wrong lines cause GitHub to reject the comment):
@@ -2509,6 +2511,42 @@ if [ -n "$_json_check" ] && echo "$_json_check" | jq -e '.scorecard' >/dev/null 
     echo "  Fixing scorecard math: claimed ${_claimed_score}, actual ${_computed_score}" >&2
     _fixed_json=$(echo "$_json_check" | jq --argjson s "$_computed_score" '.score = $s')
     { echo '```json'; echo "$_fixed_json"; echo '```'; } > "$CLAUDE_OUT"
+  fi
+
+  # -- Blocker penalty: cap scores when findings contradict scorecard --
+  _blocker_count=$(echo "$_json_check" | jq '[.findings[] | select(.severity == "BLOCKING")] | length' 2>/dev/null || echo "0")
+  _blocker_count=$(echo "${_blocker_count:-0}" | tr -d '[:space:]')
+  _shouldfix_count=$(echo "$_json_check" | jq '[.findings[] | select(.severity == "SHOULD-FIX")] | length' 2>/dev/null || echo "0")
+  _shouldfix_count=$(echo "${_shouldfix_count:-0}" | tr -d '[:space:]')
+  _current_score=$(echo "$_json_check" | jq '.score // 0' 2>/dev/null || echo "0")
+  _current_score=$(echo "${_current_score:-0}" | tr -d '[:space:]')
+
+  _cap=100
+  if [ "${_blocker_count:-0}" -ge 3 ] 2>/dev/null; then
+    _cap=65
+  elif [ "${_blocker_count:-0}" -ge 1 ] 2>/dev/null; then
+    _cap=80
+  elif [ "${_shouldfix_count:-0}" -ge 5 ] 2>/dev/null; then
+    _cap=85
+  elif [ "${_shouldfix_count:-0}" -ge 3 ] 2>/dev/null; then
+    _cap=90
+  fi
+
+  if [ "${_current_score:-0}" -gt "$_cap" ] 2>/dev/null; then
+    echo "  Capping score: ${_current_score} -> ${_cap} (${_blocker_count} blockers, ${_shouldfix_count} should-fixes)" >&2
+    # Scale all category scores proportionally to hit the cap
+    _scale=$(awk "BEGIN {printf \"%.4f\", ${_cap}/${_current_score}}")
+    _capped_json=$(echo "$_json_check" | jq --argjson cap "$_cap" --arg scale "$_scale" '
+      .score = $cap |
+      .scorecard |= with_entries(
+        .value.score = ((.value.score * ($scale | tonumber)) | floor)
+      ) |
+      .scorecard |= with_entries(.value.reason = .value.reason + " [score capped]")
+    ')
+    if [ -n "$_capped_json" ]; then
+      { echo '```json'; echo "$_capped_json"; echo '```'; } > "$CLAUDE_OUT"
+      _json_check="$_capped_json"
+    fi
   fi
 
   # Embed scorecard as hidden HTML comment for reliable extraction in future re-reviews.
