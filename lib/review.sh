@@ -371,12 +371,42 @@ _learn_from_pr() {
   while IFS= read -r cid; do
     [ -z "$cid" ] && continue
 
-    # Get replies to this reviewer comment (from non-reviewer users)
-    local replies
-    replies=$(printf '%s' "$all_comments" | jq -r \
-      --argjson parent "$cid" --arg login "$REVIEWER_LOGIN" \
-      '[.[] | select(.in_reply_to_id == $parent and .user != $login)] | .[].body')
+    # Get replies to this reviewer comment
+    # NOTE: Can't filter by .user != $login because reviewer and dev may share the
+    # same GitHub account. Instead, get ALL replies and filter out bot-posted ones
+    # using the posted-comments cache (bot comments match the cache, human replies don't).
+    local _all_replies
+    _all_replies=$(printf '%s' "$all_comments" | jq -c \
+      --argjson parent "$cid" \
+      '[.[] | select(.in_reply_to_id == $parent)]')
+    local _reply_count
+    _reply_count=$(echo "$_all_replies" | jq 'length' 2>/dev/null || echo "0")
+    [ "${_reply_count:-0}" -eq 0 ] && continue
 
+    # Filter out bot-posted replies (match body prefix against posted cache)
+    local _posted_cache="$REVIEW_CACHE_DIR/pr-${pr}-posted.json"
+    local replies=""
+    for _ri in $(seq 0 $((_reply_count - 1))); do
+      local _r_body
+      _r_body=$(echo "$_all_replies" | jq -r ".[$_ri].body")
+      local _r_prefix="${_r_body:0:80}"
+      local _is_bot=false
+      if [ -f "$_posted_cache" ] && jq -r '.comments[]' "$_posted_cache" 2>/dev/null | grep -qF "$_r_prefix" 2>/dev/null; then
+        _is_bot=true
+      fi
+      # Also check response cache (previous AI replies)
+      local _r_id
+      _r_id=$(echo "$_all_replies" | jq -r ".[$_ri].id")
+      local _resp_cache="$REVIEW_CACHE_DIR/pr-${pr}-responses.txt"
+      if [ -f "$_resp_cache" ] && grep -qx "$_r_id" "$_resp_cache" 2>/dev/null; then
+        _is_bot=true
+      fi
+      if [ "$_is_bot" = false ]; then
+        replies="${replies}${_r_body}
+"
+      fi
+    done
+    replies=$(echo "$replies" | sed '/^$/d')
     [ -z "$replies" ] && continue
 
     # Get the original reviewer comment body
@@ -451,20 +481,34 @@ _respond_to_dev_replies() {
       --argjson parent "$cid" \
       '[.[] | select(.id == $parent or .in_reply_to_id == $parent)] | sort_by(.id)')
 
-    # Check if the last message in thread is from a dev (not the reviewer)
-    local last_user
-    last_user=$(printf '%s' "$thread" | jq -r \
-      --arg login "$REVIEWER_LOGIN" \
-      '.[-1].user')
-    [ "$last_user" = "$REVIEWER_LOGIN" ] && continue
-
-    # Dev replied last — check we haven't already responded (via response cache)
-    local last_reply_id
-    last_reply_id=$(printf '%s' "$thread" | jq -r '.[-1].id')
+    # Check if the last message in thread is from the bot (not a human dev)
+    # Can't rely on username alone (reviewer and dev may share the same GH account).
+    # Instead: check if the last message's body is in our posted-comments cache
+    # or response cache. If it is, Diffhound posted it -- skip. If not, a human wrote it.
+    local last_body last_reply_id_check
+    last_body=$(printf '%s' "$thread" | jq -r '.[-1].body')
+    last_reply_id_check=$(printf '%s' "$thread" | jq -r '.[-1].id')
+    local _is_bot_message=false
+    # Check response cache (previous AI replies)
     local response_cache="$REVIEW_CACHE_DIR/pr-${pr}-responses.txt"
-    if [ -f "$response_cache" ] && grep -qx "$last_reply_id" "$response_cache" 2>/dev/null; then
-      continue
+    if [ -f "$response_cache" ] && grep -qx "$last_reply_id_check" "$response_cache" 2>/dev/null; then
+      _is_bot_message=true
     fi
+    # Check posted-comments cache (original review comments)
+    if [ "$_is_bot_message" = false ]; then
+      local _posted_cache="$REVIEW_CACHE_DIR/pr-${pr}-posted.json"
+      if [ -f "$_posted_cache" ]; then
+        # Match first 80 chars of the body against posted comments
+        local _body_prefix="${last_body:0:80}"
+        if jq -r '.comments[]' "$_posted_cache" 2>/dev/null | grep -qF "$_body_prefix" 2>/dev/null; then
+          _is_bot_message=true
+        fi
+      fi
+    fi
+    [ "$_is_bot_message" = true ] && continue
+
+    # Reuse last_reply_id_check as last_reply_id for the response cache write later
+    local last_reply_id="$last_reply_id_check"
 
     # Gather context for the AI call
     local original_comment dev_reply file_path
