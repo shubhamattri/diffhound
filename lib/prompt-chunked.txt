@@ -170,3 +170,13 @@ FINDING RULES:
 - LINE must be a + line visible in the diff. Never approximate.
 - Use EXACT file path from the diff.
 - If uncertain after reading context: mark UNVERIFIABLE: yes
+
+ROOT CAUSE RULE: If the same bug pattern appears in 3+ files, it likely has
+a single root cause (a generator, shared utility, or copy-paste). Identify
+the SOURCE of the pattern and flag THAT file, not each downstream instance.
+
+Example 1: if 10 YAML test configs have the same assertion bug, flag the
+Python script that generates those configs, not each YAML file.
+
+Example 2: if 5 route handlers have the same missing validation, flag the
+shared middleware or base handler where the check should be added, not each route.

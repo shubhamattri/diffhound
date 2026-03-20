@@ -1388,6 +1388,17 @@ _review_chunks_parallel() {
       fi
       echo "# DIFF (this chunk only)"
       echo ""
+      if [ -n "${_FRAMEWORK_FACTS:-}" ]; then
+        echo "# FRAMEWORK GROUND TRUTH (verified from repo dependencies)"
+        printf '%b\n' "$_FRAMEWORK_FACTS"
+        echo "Do NOT contradict these facts. If uncertain, mark finding as UNVERIFIABLE."
+        echo ""
+      fi
+      if [ -n "${_ARCH_CHECKLIST:-}" ]; then
+        echo "# ARCHITECTURAL CHECKLIST (check in addition to line-level review)"
+        echo "$_ARCH_CHECKLIST"
+        echo ""
+      fi
       cat "$chunk_diff"
       if [ -s "$chunk_rag" ]; then
         echo ""
@@ -1807,6 +1818,47 @@ if [ "$REVIEW_TIER" = "LARGE" ] || [ "$REVIEW_TIER" = "HUGE" ]; then
   printf '%s\n' "$PR_SUMMARY_HEADER" > "$PR_SUMMARY_HEADER_FILE"
   spinner_stop "PR summary header ready"
 
+
+# -- Framework ground truth: extract facts from repo dependencies --
+_FRAMEWORK_FACTS=""
+if [ -d "$REPO_PATH" ]; then
+  _REQ_FILES=$(find "$REPO_PATH" -maxdepth 2 -name 'requirements*.txt' -o -name 'pyproject.toml' -o -name 'package.json' 2>/dev/null | head -5)
+  _ALL_DEPS=$(cat "$_REQ_FILES" 2>/dev/null || true)
+  if echo "$_ALL_DEPS" | grep -qi 'sqlalchemy'; then
+    _FRAMEWORK_FACTS="${_FRAMEWORK_FACTS}- SQLAlchemy: create_engine() is LAZY -- does NOT connect at import time. Only connects on first query.\n"
+  fi
+  if echo "$_ALL_DEPS" | grep -qi 'httpx'; then
+    _FRAMEWORK_FACTS="${_FRAMEWORK_FACTS}- httpx: AsyncClient must be explicitly closed or used with async with. NOT auto-closed.\n"
+  fi
+  if echo "$_ALL_DEPS" | grep -qi 'nest.asyncio\|nest_asyncio'; then
+    _FRAMEWORK_FACTS="${_FRAMEWORK_FACTS}- nest_asyncio: when applied, run_until_complete() works inside already-running loops.\n"
+  fi
+  if echo "$_ALL_DEPS" | grep -qi 'pgvector\|sqlmodel'; then
+    _FRAMEWORK_FACTS="${_FRAMEWORK_FACTS}- pgvector: Vector columns need HNSW or IVFFLAT indexes for production query performance.\n"
+  fi
+fi
+
+# -- Architectural checklist: load relevant patterns --
+_ARCH_CHECKLIST=""
+_ARCH_PATTERNS_FILE="/home/ubuntu/diffhound/config/architectural-patterns.jsonl"
+if [ -f "$_ARCH_PATTERNS_FILE" ]; then
+  _HAS_PYTHON=$(grep -c '\.py' "$DIFF_FILE" 2>/dev/null || echo "0")
+  _LANG_FILTER="all"
+  [ "${_HAS_PYTHON:-0}" -gt 0 ] && _LANG_FILTER="python|all"
+  _ARCH_CHECKLIST=$(while IFS= read -r _pline; do
+    _langs=$(echo "$_pline" | jq -r '.languages[]' 2>/dev/null)
+    _match=false
+    for _l in $_langs; do echo "$_LANG_FILTER" | grep -q "$_l" && _match=true; done
+    if [ "$_match" = true ]; then
+      _sev=$(echo "$_pline" | jq -r '.severity' 2>/dev/null)
+      _pat=$(echo "$_pline" | jq -r '.pattern' 2>/dev/null)
+      _chk=$(echo "$_pline" | jq -r '.check' 2>/dev/null)
+      echo "- [ ] [${_sev}] ${_pat}: ${_chk}"
+    fi
+  done < "$_ARCH_PATTERNS_FILE")
+fi
+export _FRAMEWORK_FACTS _ARCH_CHECKLIST
+
   spinner_start "Building review chunks..."
   CHUNK_DIR=$(mktemp -d -t "pr-${PR_NUMBER}-chunks.XXXXXX")
 
@@ -2098,6 +2150,12 @@ BLOCKER-SCORE CONSISTENCY RULE (critical): Scores MUST reflect findings severity
 
 RE-REVIEW SCORE RULE: When re-reviewing after fixes, if a category has NO new issues, its score MUST be >= the previous review's score. Do NOT deduct points with generic notes like "no regressions" or "no changes" — that is not a reason to lose points. Only deduct if you can cite a SPECIFIC file:line that justifies the deduction. If all prior blockers are fixed, the score should go UP, not down.
 
+SCORE ANCHORING RULE (re-review only): Your scores MUST be justified relative to the previous round's scores (provided below if available). Rules:
+- Category with FIXED issues (blockers resolved): score MUST increase (+2 minimum per resolved blocker)
+- Category with NEW issues not in previous round: score MAY decrease (explain why)
+- Category with NO CHANGES: score MUST stay within +-1 of previous
+- Format each score change as: "Tests: 15->18 (fixed 3 contradicting assertions)"
+
 LINE NUMBER RULES (critical — wrong lines cause GitHub to reject the comment):
 - LINE must be a line number from the \`+\` side of the diff (i.e. a line shown with \`+\` prefix or unchanged context line inside a hunk)
 - Count from the \`@@ +NEW,count @@\` hunk header to find the correct line number
@@ -2236,6 +2294,38 @@ REVIEWER_VERDICT: [your assessment — is author's reply correct? what's the act
 ## EXISTING THREADS:
 REREVIEW_HEADER
 
+# -- Self-contradiction guard: inject prior suggestions --
+_suggestions_file="$REVIEW_CACHE_DIR/pr-${PR_NUMBER}-suggestions.jsonl"
+if [ "$IS_REREVIEW" = true ] && [ -f "$_suggestions_file" ] && [ -s "$_suggestions_file" ]; then
+  _PRIOR_SUGGESTIONS=$(jq -r '"- " + .file + ":" + (.line|tostring) + " -- you suggested: \"" + .suggestion + "\""' "$_suggestions_file" 2>/dev/null | head -20)
+  if [ -n "$_PRIOR_SUGGESTIONS" ]; then
+    cat >> "$PROMPT_FILE" << SUGGESTIONS_BLOCK
+
+YOUR PRIOR SUGGESTIONS (from previous review rounds):
+${_PRIOR_SUGGESTIONS}
+
+SELF-CONSISTENCY RULE: Do NOT flag code that implements your own prior
+suggestions as a new bug. If you now believe a prior suggestion was wrong,
+explicitly say "I previously suggested X but I now think that was incorrect
+because Y" -- do not silently contradict yourself.
+
+SUGGESTIONS_BLOCK
+  fi
+fi
+
+# -- Score anchoring: inject previous scorecard --
+if [ "$IS_REREVIEW" = true ] && [ -n "${PREV_SCORECARD_JSON:-}" ]; then
+  _prev_score_summary=$(echo "$PREV_SCORECARD_JSON" | jq -r 'to_entries[] | "\(.key): \(.value.score)/\(.value.max)"' 2>/dev/null | tr '\n' ', ' | sed 's/,$//')
+  _prev_total=$(echo "$PREV_SCORECARD_JSON" | jq '[.[].score] | add' 2>/dev/null || echo "?")
+  cat >> "$PROMPT_FILE" << SCORE_ANCHOR_BLOCK
+
+PREVIOUS SCORECARD (from last review round):
+${_prev_score_summary}. Total: ${_prev_total}
+
+Apply SCORE ANCHORING RULE above. Justify every score that changes by more than +-1.
+
+SCORE_ANCHOR_BLOCK
+fi
   cat "$THREADS_SUMMARY_FILE" >> "$PROMPT_FILE"
   echo "" >> "$PROMPT_FILE"
   echo "---" >> "$PROMPT_FILE"
@@ -2632,6 +2722,48 @@ SCORECARD_JSON -->"
       ')
 
       { echo '```json'; echo "$_updated_json"; echo '```'; } > "$CLAUDE_OUT"
+    fi
+  fi
+  # -- Persist findings for score anchoring in future re-reviews --
+  _findings_json=$(echo "$_json_check" | jq -c '.findings // []' 2>/dev/null || echo "[]")
+  if [ -n "$_findings_json" ] && [ "$_findings_json" != "[]" ]; then
+    echo "$_findings_json" > "$REVIEW_CACHE_DIR/pr-${PR_NUMBER}-findings-latest.json"
+  fi
+
+  # -- Score anchoring: bump categories where blockers were resolved --
+  _prev_findings_file="$REVIEW_CACHE_DIR/pr-${PR_NUMBER}-findings-latest.json"
+  if [ -f "$_prev_findings_file" ] && [ -n "$_json_check" ]; then
+    _categorize_finding() {
+      local body="$1"
+      if echo "$body" | grep -qiE 'token|secret|auth|password|credential|security|injection|XSS|SSRF'; then echo "security"
+      elif echo "$body" | grep -qiE 'test|mock|assertion|eval|coverage|fixture'; then echo "tests"
+      elif echo "$body" | grep -qiE 'log|metric|trace|monitor|observability'; then echo "observability"
+      elif echo "$body" | grep -qiE 'N\+1|performance|latency|timeout|cache|index'; then echo "performance"
+      elif echo "$body" | grep -qiE 'migration|backward|compatibility|breaking|API'; then echo "compatibility"
+      else echo "readability"; fi
+    }
+    for _cat in security tests observability performance readability compatibility; do
+      _prev_cat_blockers=$(jq -r '.[] | select(.severity == "BLOCKING") | .body' "$_prev_findings_file" 2>/dev/null | while IFS= read -r _b; do
+        [ -z "$_b" ] && continue; _c=$(_categorize_finding "$_b"); [ "$_c" = "$_cat" ] && echo "x"
+      done | grep -c . || echo "0")
+      _curr_cat_blockers=$(echo "$_json_check" | jq -r '.findings[] | select(.severity == "BLOCKING") | .body' 2>/dev/null | while IFS= read -r _b; do
+        [ -z "$_b" ] && continue; _c=$(_categorize_finding "$_b"); [ "$_c" = "$_cat" ] && echo "x"
+      done | grep -c . || echo "0")
+      if [ "${_prev_cat_blockers:-0}" -gt 0 ] && [ "${_curr_cat_blockers:-0}" -eq 0 ] 2>/dev/null; then
+        _bump=$(( _prev_cat_blockers * 2 ))
+        _json_check=$(echo "$_json_check" | jq --arg cat "$_cat" --argjson bump "$_bump" '
+          if .scorecard[$cat] then
+            .scorecard[$cat].score = ([.scorecard[$cat].score + $bump, .scorecard[$cat].max] | min) |
+            .scorecard[$cat].reason = .scorecard[$cat].reason + " [+\($bump): resolved blockers]"
+          else . end
+        ' 2>/dev/null || echo "$_json_check")
+        echo "  Score anchor: ${_cat} bumped +${_bump} (${_prev_cat_blockers} blockers resolved)" >&2
+      fi
+    done
+    _new_total=$(echo "$_json_check" | jq '[.scorecard[].score] | add' 2>/dev/null || echo "")
+    if [ -n "$_new_total" ]; then
+      _json_check=$(echo "$_json_check" | jq --argjson t "$_new_total" '.score = $t')
+      { echo '```json'; echo "$_json_check"; echo '```'; } > "$CLAUDE_OUT"
     fi
   fi
 fi
@@ -3300,6 +3432,76 @@ if [ "$_RUN_PEER_REVIEW" = true ]; then
   ' "$_MERGED_FINDINGS_FILE" 2>/dev/null || cat "$_MERGED_FINDINGS_FILE")
 
   echo "$_deduped" > "$_MERGED_FINDINGS_FILE"
+
+# -- Pattern consolidation: collapse similar findings across different files --
+# Runs on pre-rewrite JSON findings. Groups by title similarity (Jaccard >0.7).
+if echo "$_deduped" | jq -e 'length > 5' >/dev/null 2>&1; then
+  _consolidated=$(echo "$_deduped" | jq '
+    def title: (.title // (.body | split(".")[0] // .body[:80]));
+    def words: [title | ascii_downcase | split(" ")[] | select(length > 2)];
+    def jaccard(a; b):
+      if (a | length) == 0 or (b | length) == 0 then 0
+      else
+        ([a[], b[]] | unique | length) as $union |
+        ([a[] as $w | b[] | select(. == $w)] | unique | length) as $inter |
+        if $union == 0 then 0 else ($inter / $union) end
+      end;
+    . as $all |
+    reduce range(length) as $i (
+      {groups: [], assigned: {}};
+      if .assigned[($i | tostring)] then .
+      else
+        ($all[$i] | words) as $w_i |
+        if ($w_i | length) < 5 then
+          .groups += [[$i]] | .assigned[($i | tostring)] = true
+        else
+          ([ range(length) | select(. > $i) |
+             select(.assigned[(. | tostring)] | not) |
+             select($all[.].file != $all[$i].file) |
+             select(jaccard($w_i; $all[.] | words) > 0.7)
+          ]) as $matches |
+          if ($matches | length) >= 2 then
+            .groups += [[$i] + $matches] |
+            .assigned[($i | tostring)] = true |
+            reduce $matches[] as $m (.; .assigned[($m | tostring)] = true)
+          elif ($matches | length) == 1 and jaccard($w_i; $all[$matches[0]] | words) == 1.0 then
+            .groups += [[$i] + $matches] |
+            .assigned[($i | tostring)] = true |
+            .assigned[($matches[0] | tostring)] = true
+          else
+            .groups += [[$i]] | .assigned[($i | tostring)] = true
+          end
+        end
+      end
+    ) |
+    [.groups[] |
+      if length == 1 then $all[.[0]]
+      else
+        . as $idxs |
+        ($all[$idxs[0]]) * {
+          body: (
+            ($all[$idxs[0]].body | split("\u001f")[0]) +
+            "\u001f\u001fSame pattern in " + ([$idxs[1:][] | $all[.].file + ":" + ($all[.].line | tostring)] | join(", "))
+          ),
+          severity: (
+            [$idxs[] | $all[.].severity |
+              if . == "BLOCKING" then 3 elif . == "SHOULD-FIX" then 2 else 1 end
+            ] | max |
+            if . == 3 then "BLOCKING" elif . == 2 then "SHOULD-FIX" else "NIT" end
+          )
+        }
+      end
+    ]
+  ' 2>/dev/null)
+  if [ -n "$_consolidated" ]; then
+    _pre_count=$(echo "$_deduped" | jq 'length' 2>/dev/null || echo "?")
+    _post_count=$(echo "$_consolidated" | jq 'length' 2>/dev/null || echo "?")
+    if [ "$_pre_count" != "$_post_count" ]; then
+      echo "  Pattern consolidation: ${_pre_count} -> ${_post_count} findings (collapsed similar patterns)" >&2
+      echo "$_consolidated" > "$_MERGED_FINDINGS_FILE"
+    fi
+  fi
+fi
   _merge_count=$(echo "$_deduped" | jq 'length' 2>/dev/null || echo "?")
   echo "  Pre-merged findings: ${_merge_count} unique (from Claude + peers)" >&2
 fi
@@ -3715,6 +3917,47 @@ echo ""
 # INTERACTIVE COMMENT SELECTION (TTY only, skipped with --auto-post)
 # ============================================================
 
+# -- False positive blocklist: suppress known hallucination patterns --
+_BLOCKLIST_FILE="/home/ubuntu/diffhound/config/false-positive-blocklist.jsonl"
+if [ -f "$_BLOCKLIST_FILE" ] && [ -s "${REVIEW_STRUCTURED}.comments" ]; then
+  _blocklist_removed=0
+  _blocklist_tmp=$(mktemp -t "pr-${PR_NUMBER}-blocklist.XXXXXX")
+  _audit_log="/home/ubuntu/diffhound/config/blocklist-audit.log"
+  while IFS= read -r _cline; do
+    _blocked=false
+    while IFS= read -r _bl_entry; do
+      [ -z "$_bl_entry" ] && continue
+      _keywords=$(echo "$_bl_entry" | jq -r '.pattern_keywords[]' 2>/dev/null)
+      _all_match=true
+      while IFS= read -r _kw; do
+        [ -z "$_kw" ] && continue
+        if ! echo "$_cline" | grep -qi "$_kw"; then
+          _all_match=false
+          break
+        fi
+      done <<< "$_keywords"
+      if [ "$_all_match" = true ]; then
+        _reality=$(echo "$_bl_entry" | jq -r '.reality' 2>/dev/null)
+        echo "  Suppressed false positive: ${_reality}" >&2
+        echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) PR#${PR_NUMBER} suppressed: ${_cline:0:100}... reason: ${_reality}" >> "$_audit_log"
+        _bl_pattern=$(echo "$_bl_entry" | jq -c '.pattern_keywords')
+        _bl_tmp=$(mktemp)
+        jq -c --argjson pat "$_bl_pattern" 'if .pattern_keywords == $pat then .hit_count += 1 else . end' "$_BLOCKLIST_FILE" > "$_bl_tmp" && mv "$_bl_tmp" "$_BLOCKLIST_FILE"
+        _blocked=true
+        _blocklist_removed=$((_blocklist_removed + 1))
+        break
+      fi
+    done < "$_BLOCKLIST_FILE"
+    [ "$_blocked" = false ] && echo "$_cline" >> "$_blocklist_tmp"
+  done < "${REVIEW_STRUCTURED}.comments"
+  if [ "$_blocklist_removed" -gt 0 ]; then
+    echo "  Blocklist: suppressed ${_blocklist_removed} known false positive(s)" >&2
+    mv "$_blocklist_tmp" "${REVIEW_STRUCTURED}.comments"
+  else
+    rm -f "$_blocklist_tmp"
+  fi
+fi
+
 # -- Re-review dedup: suppress duplicates ONLY if dev addressed the area --
 # Logic: if a new comment targets the same file:line as an existing thread AND
 # the dev modified that area in the incremental diff, suppress it (dev addressed it).
@@ -4098,6 +4341,29 @@ JSONEND
   VOICE_JSONL_INDEX="$HOME/.diffhound/voice-examples.jsonl"
   INDEXED=$(index_voice_comments "${REVIEW_STRUCTURED}.new_comments" "$PR_NUMBER" "$VOICE_JSONL_INDEX" "$REVIEW_CACHE_DIR")
   [ "$INDEXED" -gt 0 ] && echo "  📝 Indexed $INDEXED comments to voice RAG ($(wc -l < "$VOICE_JSONL_INDEX") total)"
+  # -- Self-contradiction guard: save actionable suggestions for future re-reviews --
+  if [ -f "${REVIEW_STRUCTURED}.new_comments" ]; then
+    _suggestions_file="$REVIEW_CACHE_DIR/pr-${PR_NUMBER}-suggestions.jsonl"
+    _round=$(jq -r --arg login "$REVIEWER_LOGIN" '[.[] | select(.user == $login)] | length' "$EXISTING_COMMENTS_FILE" 2>/dev/null || echo "1")
+    _sug_extracted=0
+    while IFS= read -r _sline; do
+      _suggestion=""
+      if echo "$_sline" | grep -qiE '(you should|change .+ to|use .+ instead|replace .+ with|add .+ to|remove .+ from)'; then
+        _suggestion=$(echo "$_sline" | grep -oiE '(you should|change|use|replace|add|remove) [^.]{10,80}' | head -1)
+      fi
+      [ -z "$_suggestion" ] && continue
+      if [[ "$_sline" =~ ^(.+):([0-9]+): ]]; then
+        _s_file="${BASH_REMATCH[1]}"
+        _s_line="${BASH_REMATCH[2]}"
+        jq -n --arg round "$_round" --arg file "$_s_file" --arg line "$_s_line" \
+          --arg suggestion "$_suggestion" \
+          '{round:($round|tonumber),file:$file,line:($line|tonumber),suggestion:$suggestion}' \
+          >> "$_suggestions_file"
+        _sug_extracted=$((_sug_extracted + 1))
+      fi
+    done < "${REVIEW_STRUCTURED}.new_comments"
+    [ "$_sug_extracted" -gt 0 ] && echo "  Logged ${_sug_extracted} suggestion(s) for self-contradiction tracking" >&2
+  fi
 
   # Auto-learn from ALL previous PR caches (0 LLM tokens, just GitHub API)
   # Picks up human edits/deletions on previously posted comments
