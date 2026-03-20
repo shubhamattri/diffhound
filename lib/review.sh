@@ -3715,6 +3715,96 @@ echo ""
 # INTERACTIVE COMMENT SELECTION (TTY only, skipped with --auto-post)
 # ============================================================
 
+# -- Re-review dedup: suppress duplicates ONLY if dev addressed the area --
+# Logic: if a new comment targets the same file:line as an existing thread AND
+# the dev modified that area in the incremental diff, suppress it (dev addressed it).
+# If the dev did NOT touch that area, keep the comment (still a valid concern).
+if [ "$IS_REREVIEW" = true ] && [ -f "$EXISTING_COMMENTS_FILE" ]; then
+  _existing_positions=$(jq -r --arg login "$REVIEWER_LOGIN" \
+    '[.[] | select(.user == $login and .in_reply_to_id == null and .path != null and .line != null) | "\(.path):\(.line)"] | .[]' \
+    "$EXISTING_COMMENTS_FILE" 2>/dev/null || true)
+
+  if [ -n "$_existing_positions" ]; then
+    # Build set of changed lines from incremental diff (file:line format)
+    _changed_lines_file=$(mktemp -t "pr-${PR_NUMBER}-changed-lines.XXXXXX")
+    if [ -n "${INCREMENTAL_DIFF_FILE:-}" ] && [ -s "${INCREMENTAL_DIFF_FILE:-}" ]; then
+      awk '
+        /^diff --git/ { file="" }
+        /^\+\+\+ b\// { file=substr($0,7) }
+        /^@@ / {
+          s=$0; sub(/.*\+/,"",s); sub(/,.*/,"",s)
+          line=int(s)-1
+        }
+        /^\+/ && file!="" { line++; print file ":" line }
+        /^ / && file!="" { line++ }
+        /^-/ { next }
+      ' "$INCREMENTAL_DIFF_FILE" > "$_changed_lines_file" 2>/dev/null || true
+    fi
+
+    _dedup_comments=$(mktemp -t "pr-${PR_NUMBER}-dedup-comments.XXXXXX")
+    _dedup_removed=0
+    while IFS= read -r _cline; do
+      _should_suppress=false
+      if [[ "$_cline" =~ ^COMMENT:\ (.+):([0-9]+): ]]; then
+        _c_file="${BASH_REMATCH[1]}"
+        _c_line="${BASH_REMATCH[2]}"
+        # Check if this comment duplicates an existing thread
+        _matches_existing=false
+        while IFS= read -r _epos; do
+          [ -z "$_epos" ] && continue
+          _e_file="${_epos%:*}"
+          _e_line="${_epos##*:}"
+          if [ "$_c_file" = "$_e_file" ] && [ -n "$_e_line" ] && [ "$_e_line" -eq "$_e_line" ] 2>/dev/null; then
+            _delta=$(( _c_line - _e_line ))
+            [ "$_delta" -lt 0 ] && _delta=$(( -_delta ))
+            if [ "$_delta" -le 5 ]; then
+              _matches_existing=true
+              break
+            fi
+          fi
+        done <<< "$_existing_positions"
+
+        if [ "$_matches_existing" = true ]; then
+          # Check if dev actually modified this area in the incremental diff
+          _dev_touched=false
+          if [ -s "$_changed_lines_file" ]; then
+            # Check if any changed line is within +-5 lines of the comment target
+            while IFS=: read -r _ch_file _ch_line; do
+              if [ "$_c_file" = "$_ch_file" ] && [ -n "$_ch_line" ] && [ "$_ch_line" -eq "$_ch_line" ] 2>/dev/null; then
+                _delta=$(( _c_line - _ch_line ))
+                [ "$_delta" -lt 0 ] && _delta=$(( -_delta ))
+                if [ "$_delta" -le 5 ]; then
+                  _dev_touched=true
+                  break
+                fi
+              fi
+            done < "$_changed_lines_file"
+          fi
+
+          if [ "$_dev_touched" = true ]; then
+            # Dev modified this area + it duplicates existing thread = suppress
+            _should_suppress=true
+          fi
+          # If dev did NOT touch it, keep the comment (still a valid unfixed concern)
+        fi
+      fi
+
+      if [ "$_should_suppress" = true ]; then
+        _dedup_removed=$((_dedup_removed + 1))
+      else
+        echo "$_cline" >> "$_dedup_comments"
+      fi
+    done < "${REVIEW_STRUCTURED}.comments"
+    rm -f "$_changed_lines_file"
+    if [ "$_dedup_removed" -gt 0 ]; then
+      echo "  Deduped: suppressed ${_dedup_removed} comment(s) addressed in new commits" >&2
+      mv "$_dedup_comments" "${REVIEW_STRUCTURED}.comments"
+    else
+      rm -f "$_dedup_comments"
+    fi
+  fi
+fi
+
 declare -a _ALL_COMMENTS=()
 while IFS= read -r _line; do
   _ALL_COMMENTS+=("$_line")
