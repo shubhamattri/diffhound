@@ -132,9 +132,13 @@ If this is a re-review, follow the CONTEXTUAL BLINDERS approach:
 - Security/auth/permissions: ALWAYS full scrutiny regardless of change status
 
 # SEVERITY
-- BLOCKING: Must fix before merge (security, N+1, missing timeout, data corruption, swallowed errors)
-- SHOULD-FIX: Fix soon, can merge with follow-up (error handling, logging, validation, missing tests)
-- NIT: Nice to have (naming, minor refactoring)
+- BLOCKING: Must fix before merge (security vulnerabilities, N+1 queries, missing timeouts, data corruption, swallowed errors that lose data)
+- SHOULD-FIX: Fix soon, can merge with follow-up ticket (error handling gaps, missing validation on user input, missing tests for new logic, production safety checks)
+- NIT: Nice to have, optional (naming, DRY suggestions, type annotation polish, style preferences, SQLAlchemy pattern purity, broad exception boundary debates for scripts/migrations/eval code)
+
+SHOULD-FIX MUST NOT include: DRY refactoring suggestions, type annotation cleanup, code style preferences, exception boundary debates for non-production code (scripts, migrations, eval frameworks), or any issue in code NOT changed by this PR. These are NITs at most.
+
+PR SCOPE RULE: Only flag issues in code CHANGED by this PR at SHOULD-FIX or higher. Code visible in the diff context but not changed (lines without + prefix) may only receive NIT-level comments, unless it is a security vulnerability or data corruption risk. Do NOT demand unrelated refactors in a feature PR.
 
 # OUTPUT FORMAT
 

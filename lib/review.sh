@@ -458,6 +458,99 @@ _learn_from_pr() {
 
   # ── Distill false positives into learned patterns ──
   _distill_false_positives "$pr" "$repo_owner" "$repo_name"
+
+  # ── Auto-resolve threads where dev confirmed resolution ──
+  _auto_resolve_replied_threads "$pr" "$repo_owner" "$repo_name" "$all_comments"
+}
+
+# ── Auto-resolve GitHub review threads based on dev replies ──
+_auto_resolve_replied_threads() {
+  local pr="$1" repo_owner="$2" repo_name="$3" all_comments="$4"
+  local resolved=0
+
+  # Resolution keywords: dev acknowledged or accepted the review comment
+  local _resolution_re="(^fixed|^done|^addressed|^agreed|^correct|^good point|^will do|^updated|^by design|^intentional|^acceptable|^fair point|^makes sense)"
+
+  # Get all reviewer top-level comment IDs
+  local reviewer_ids
+  reviewer_ids=$(printf '%s' "$all_comments" | jq -r \
+    --arg login "$REVIEWER_LOGIN" \
+    '[.[] | select(.user == $login and .in_reply_to_id == null) | .id] | .[]')
+
+  # Response cache: threads where Diffhound posted an AI reply THIS run
+  local response_cache="$REVIEW_CACHE_DIR/pr-${pr}-responses.txt"
+
+  # Collect thread IDs to resolve
+  local threads_to_resolve=()
+  while IFS= read -r cid; do
+    [ -z "$cid" ] && continue
+
+    # Get the thread
+    local thread
+    thread=$(printf '%s' "$all_comments" | jq -c \
+      --argjson parent "$cid" \
+      '[.[] | select(.id == $parent or .in_reply_to_id == $parent)] | sort_by(.id)')
+
+    local tlen
+    tlen=$(echo "$thread" | jq 'length' 2>/dev/null || echo "0")
+    [ "${tlen:-0}" -le 1 ] && continue
+
+    # Get the last reply (from dev, not bot -- already filtered by cache in _respond_to_dev_replies)
+    local last_body last_id
+    last_body=$(echo "$thread" | jq -r '.[-1].body' | head -5)
+    last_id=$(echo "$thread" | jq -r '.[-1].id')
+
+    # Skip if Diffhound posted a pushback reply to this thread in this run
+    # (means the AI disagreed with the dev -- don't auto-resolve)
+    if [ -f "$response_cache" ] && grep -qx "$last_id" "$response_cache" 2>/dev/null; then
+      continue
+    fi
+
+    # Check if dev's reply matches resolution keywords (case-insensitive, first line)
+    local first_line
+    first_line=$(echo "$last_body" | head -1 | tr '[:upper:]' '[:lower:]')
+    if echo "$first_line" | grep -qiE "$_resolution_re"; then
+      threads_to_resolve+=("$cid")
+    fi
+  done <<< "$reviewer_ids"
+
+  [ "${#threads_to_resolve[@]}" -eq 0 ] && return 0
+
+  # Fetch thread IDs via GraphQL (maps REST databaseId -> GraphQL thread id)
+  local gql_query
+  gql_query=$(printf '{"query":"query { repository(owner:\"%s\", name:\"%s\") { pullRequest(number:%s) { reviewThreads(first:100) { nodes { id isResolved comments(first:1) { nodes { databaseId } } } } } } }"}' \
+    "$repo_owner" "$repo_name" "$pr")
+
+  local threads_response
+  threads_response=$(echo "$gql_query" | gh api graphql --input - 2>/dev/null)
+  if [ -z "$threads_response" ]; then
+    echo "  warning: GraphQL thread fetch failed -- skipping auto-resolve" >&2
+    return 0
+  fi
+
+  local thread_map
+  thread_map=$(printf '%s' "$threads_response" | jq -c '
+    [.data.repository.pullRequest.reviewThreads.nodes[] |
+     select(.comments.nodes | length > 0) |
+     {db_id: .comments.nodes[0].databaseId, thread_id: .id, is_resolved: .isResolved}]' 2>/dev/null || echo "[]")
+
+  for cid in "${threads_to_resolve[@]}"; do
+    local thread_id is_resolved
+    thread_id=$(printf '%s' "$thread_map" | jq -r --argjson dbid "$cid" \
+      '.[] | select(.db_id == $dbid) | .thread_id' 2>/dev/null)
+    is_resolved=$(printf '%s' "$thread_map" | jq -r --argjson dbid "$cid" \
+      '.[] | select(.db_id == $dbid) | .is_resolved' 2>/dev/null)
+
+    [ -z "$thread_id" ] && continue
+    [ "$is_resolved" = "true" ] && continue
+
+    if echo '{"query":"mutation { resolveReviewThread(input:{threadId:\"'"$thread_id"'\"}) { thread { isResolved } } }"}' \
+      | gh api graphql --input - > /dev/null 2>&1; then
+      resolved=$((resolved + 1))
+    fi
+  done
+
+  [ "$resolved" -gt 0 ] && echo "  resolved ${resolved} thread(s) where dev confirmed fix" >&2
 }
 
 # ── Respond to dev replies with AI-generated conversational replies ──
@@ -3546,12 +3639,98 @@ if echo "$_deduped" | jq -e 'length > 5' >/dev/null 2>&1; then
     fi
   fi
 fi
+
+# -- Same-file topic dedup: merge findings in same file with overlapping topics --
+# Catches duplicates like two SSRF comments on doc_ingest.py at different lines.
+# Wider tolerance than proximity dedup (+-20 lines) but requires title similarity.
+_sf_deduped=$(jq '
+  def title: (.title // (.body | split(".")[0] // .body[:80]));
+  def words: [title | ascii_downcase | split(" ")[] | select(length > 2)];
+  def jaccard(a; b):
+    if (a | length) == 0 or (b | length) == 0 then 0
+    else
+      ([a[], b[]] | unique | length) as $union |
+      ([a[] as $w | b[] | select(. == $w)] | unique | length) as $inter |
+      if $union == 0 then 0 else ($inter / $union) end
+    end;
+  group_by(.file) | map(
+    if length <= 1 then .
+    else
+      sort_by(.line) |
+      reduce .[] as $f ([];
+        if length == 0 then [$f]
+        else
+          .[-1] as $last |
+          if jaccard(($last | words); ($f | words)) > 0.6 then
+            # Same file + similar topic = keep the one with higher severity
+            if ([$f.severity, $last.severity] | map(if . == "BLOCKING" then 3 elif . == "SHOULD-FIX" then 2 else 1 end) | .[0] > .[1]) then
+              .[:-1] + [$f]
+            else . end
+          else . + [$f] end
+        end
+      )
+    end
+  ) | flatten
+' "$_MERGED_FINDINGS_FILE" 2>/dev/null || cat "$_MERGED_FINDINGS_FILE")
+_sf_pre=$(jq 'length' "$_MERGED_FINDINGS_FILE" 2>/dev/null || echo "?")
+_sf_post=$(echo "$_sf_deduped" | jq 'length' 2>/dev/null || echo "?")
+if [ "$_sf_pre" != "$_sf_post" ]; then
+  echo "  Same-file topic dedup: ${_sf_pre} -> ${_sf_post} findings" >&2
+  echo "$_sf_deduped" > "$_MERGED_FINDINGS_FILE"
+fi
   _merge_count=$(echo "$_deduped" | jq 'length' 2>/dev/null || echo "?")
   echo "  Pre-merged findings: ${_merge_count} unique (from Claude + peers)" >&2
 fi
 
 # ============================================================
-# STEP 6: MERGE + STYLE REWRITE — single cached Haiku call
+# -- PR-scope enforcement: downgrade findings on unchanged code to NIT --
+# Parse diff to build set of changed lines (+lines), then check each finding.
+# Findings on context lines (unchanged code) are downgraded to NIT unless security/data-corruption.
+if [ -f "$_MERGED_FINDINGS_FILE" ] && [ -f "$DIFF_FILE" ]; then
+  _changed_lines_set=$(mktemp -t "pr-${PR_NUMBER}-changed-set.XXXXXX")
+  awk '
+    /^diff --git/ { file="" }
+    /^\+\+\+ b\// { file=substr($0,7) }
+    /^@@ / {
+      s=$0; sub(/.*\+/,"",s); sub(/,.*/,"",s)
+      line=int(s)-1
+    }
+    /^\+/ && file!="" { line++; print file ":" line }
+    /^ / && file!="" { line++ }
+    /^-/ { next }
+  ' "$DIFF_FILE" > "$_changed_lines_set" 2>/dev/null || true
+
+  if [ -s "$_changed_lines_set" ]; then
+    _scope_enforced=$(jq --rawfile changed "$_changed_lines_set" '
+      ($changed | split("\n") | map(select(length > 0))) as $changed_lines |
+      [.[] |
+        . as $f |
+        (($f.file + ":" + ($f.line | tostring)) as $pos |
+          if ($changed_lines | any(. == $pos)) then
+            $f  # Changed line: keep severity as-is
+          else
+            # Unchanged line: downgrade to NIT unless security/data-corruption
+            if ($f.body | test("(?i)security|injection|XSS|SSRF|auth|token|secret|password|data.corruption|data.loss|SQL.inject")) then
+              $f  # Security exception: keep severity
+            elif $f.severity != "NIT" then
+              $f + {severity: "NIT", body: ($f.body + " [scope: unchanged code, downgraded to NIT]")}
+            else
+              $f
+            end
+          end
+        )
+      ]
+    ' "$_MERGED_FINDINGS_FILE" 2>/dev/null || cat "$_MERGED_FINDINGS_FILE")
+    _downgraded=$(echo "$_scope_enforced" | jq '[.[] | select(.body | test("downgraded to NIT"))] | length' 2>/dev/null || echo "0")
+    if [ "${_downgraded:-0}" -gt 0 ] 2>/dev/null; then
+      echo "  Scope enforcement: ${_downgraded} finding(s) on unchanged code downgraded to NIT" >&2
+      echo "$_scope_enforced" > "$_MERGED_FINDINGS_FILE"
+    fi
+  fi
+  rm -f "$_changed_lines_set"
+fi
+
+# # STEP 6: MERGE + STYLE REWRITE — single cached Haiku call
 # Combines old Pass 3 (merge) + Pass 4 (style) into one API call.
 # Static system prompt is cached via prompt-caching-2024-07-31 beta.
 # ============================================================
