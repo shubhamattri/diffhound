@@ -2420,6 +2420,15 @@ The reviewer has already posted comments on this PR. Your job now is DIFFERENT f
 - For missed non-security issues: put in Checklist as "follow-up", NOT as inline findings
 - Max NEW non-blocking findings in a re-review: 3. Security/data-corruption findings have no cap
 
+## REGRESSION GATING (resolved threads):
+- Do NOT reopen or re-flag issues from resolved threads UNLESS:
+  1. The fix introduced a NEW bug in the same changed hunk (not just nearby code)
+  2. A symbol/function/variable referenced in the original finding was modified in a way that reintroduces the concern
+  3. The regression is HIGH-CONFIDENCE: you can point to a specific diff line that proves it
+- If none of these apply: the thread stays resolved. Move on.
+- "The code near this area changed" is NOT sufficient to reopen. The original concern must be demonstrably reintroduced.
+- Patch fallout on unrelated code is a NEW finding, not a reopened thread. File it separately only if it meets the severity bar.
+
 ## Output format for existing threads:
 THREAD_STATUS: path/to/file.ts:LINE
 STATUS: RESOLVED | STILL_OPEN | AUTHOR_WRONG | RESOLVED_BY_EXPLANATION | NO_RESPONSE
@@ -3803,9 +3812,22 @@ CALIBRATE depth to blast radius:
 ## REVIEW BODY STYLE
 
 Opening: state the main blocker or overall verdict immediately. No "overall this looks good" fluff unless it's true.
-Structure: verdict → blockers → should-fix → nit → brief genuine positive if warranted
-Blockers: short bullets (file:line — what breaks)
 Closing: one line genuine observation if warranted ("the approach is solid, just needs these fixed before merge")
+
+**MANDATORY SEVERITY GROUPING:** The review body MUST group findings by severity with clear headers.
+Use this structure (omit empty sections):
+
+### Blockers (must fix before merge)
+- `file.ts:LINE` — [what breaks]
+- `file.ts:LINE` — [what breaks]
+
+### Should-Fix (merge ok, follow-up needed)
+- `file.ts:LINE` — [issue]
+
+### Nits
+- `file.ts:LINE` — [suggestion]
+
+This makes it scannable in 5 seconds. Blockers jump out. Nits don't pollute the signal.
 
 ## YOUR OUTPUT
 
@@ -3816,8 +3838,20 @@ REPLY: COMMENT_ID:path/to/file.ts:LINE — [reply to existing thread, if re-revi
 ### INLINE_COMMENTS_END
 
 ### SUMMARY_START
-[review body — if re-review: open with which comments are now addressed vs still open, then any new issues]
-[if fresh review: opening verdict, blockers, should-fix, brief genuine close]
+[if fresh review: opening verdict, then MANDATORY severity-grouped sections:]
+
+### Blockers (must fix before merge)
+- `file.ts:LINE` — [what breaks]
+
+### Should-Fix (merge ok, follow-up needed)
+- `file.ts:LINE` — [issue]
+
+### Nits
+- `file.ts:LINE` — [suggestion]
+
+[omit empty sections. brief genuine close if warranted.]
+
+[if re-review: open with thread resolution status (X addressed, Y still open), then any new findings grouped by severity as above]
 
 ## Scorecard
 | Category | Score | Notes |
@@ -3914,16 +3948,19 @@ fi
     cat << 'REREVIEW_BLOCK'
 ## HOW TO HANDLE THREAD REPLIES
 
-For each thread with status STILL_OPEN or AUTHOR_WRONG:
-- Write a REPLY comment addressing the author's response
-- If STILL_OPEN: "hey, took another look — the concern is still there. [evidence]. [what still needs to happen]"
-- If AUTHOR_WRONG: correct them clearly — "actually [explanation]. [correct explanation]"
-- If RESOLVED: do NOT write a reply — silence = acknowledged
+DEFAULT IS SILENCE. Only post a reply when you have substantive new information.
+
+- If RESOLVED: NO reply. Auto-resolve handles it silently. Do NOT post "verified", "looks good", "addressed", "thanks", or any acknowledgement. Silence = resolved.
+- If RESOLVED_BY_EXPLANATION: NO reply. The author's explanation was sufficient. Move on.
+- If NO_RESPONSE but code is fixed: NO reply. Auto-resolve handles it.
+- If STILL_OPEN and the concern genuinely persists: ONE reply with evidence. "the concern is still there — [specific diff evidence]. [what still needs to happen]"
+- If AUTHOR_WRONG with technical counter-evidence: ONE reply. "actually [explanation with diff evidence]."
+
+REPLY BUDGET: Maximum 2 thread replies per re-review. If more than 2 threads are still open, pick the highest-severity ones.
 
 For THREAD_REPLY comments: REPLY: ORIGINAL_COMMENT_ID:path/to/file.ts:LINE — [reply in engineer's voice]
 
-VOICE FOR REPLIES: same casual voice — "hey, took another look —", "actually —", "appreciate the context —"
-If correcting: evidence first, tone stays collegial. Never snarky, never formal.
+ANTI-CHATTER RULE: Before writing any reply, ask: "Does this reply contain information the author doesn't already have?" If no — don't write it. The review thread is not a chat.
 REREVIEW_BLOCK
   fi
 

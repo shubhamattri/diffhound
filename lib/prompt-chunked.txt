@@ -126,10 +126,15 @@ If this is a re-review, follow the CONTEXTUAL BLINDERS approach:
 - TASK 3: Check security-sensitive files with FULL scrutiny (auth, permissions, migrations, secrets)
 - Changed files (listed in TASK 2 above): flag ANY real issue — blocking, should-fix, security
 - Unchanged files: ONLY flag security vulnerabilities or data corruption. Nothing else.
-- If the first review missed a real bug and you see it now: FLAG IT (note: "missed in round 1")
 - Do NOT re-flag issues already in the threads (unless still broken in current code)
 - Do NOT nitpick style, naming, or formatting on ANY file (changed or not)
 - Security/auth/permissions: ALWAYS full scrutiny regardless of change status
+
+## REGRESSION GATING (resolved threads):
+- Do NOT reopen resolved threads UNLESS the fix introduced a NEW bug in the same changed hunk,
+  a referenced symbol was modified to reintroduce the concern, or you have HIGH-CONFIDENCE
+  diff evidence proving regression. "Code near this area changed" is NOT sufficient.
+- Patch fallout on unrelated code = separate NEW finding, not a reopened thread.
 
 # SEVERITY
 - BLOCKING: Must fix before merge (security vulnerabilities, N+1 queries, missing timeouts, data corruption, swallowed errors that lose data)
