@@ -1684,14 +1684,14 @@ if [ "$REVIEWER_COMMENT_COUNT" -gt 0 ]; then
 
   # Extract the commit SHA from our last review submission
   LAST_REVIEWED_SHA=$(jq -r --arg login "$REVIEWER_LOGIN" \
-    '[.[] | select(.user == $login)] | sort_by(.submitted_at) | last | .commit_id // empty' \
+    '[.[] | select(.user == $login and .body != "")] | sort_by(.submitted_at) | last | .commit_id // empty' \
     "$EXISTING_REVIEWS_FILE" 2>/dev/null || echo "")
 
   # Extract previous scorecard as structured JSON for script-owned score merging
   # Format: {"security":{"score":20,"max":25},"tests":{"score":15,"max":20},...}
   PREV_SCORECARD_JSON=""
   _last_review_body=$(jq -r --arg login "$REVIEWER_LOGIN" \
-    '[.[] | select(.user == $login)] | sort_by(.submitted_at) | last | .body // empty' \
+    '[.[] | select(.user == $login and .body != "")] | sort_by(.submitted_at) | last | .body // empty' \
     "$EXISTING_REVIEWS_FILE" 2>/dev/null || echo "")
 
   if [ -n "$_last_review_body" ]; then
