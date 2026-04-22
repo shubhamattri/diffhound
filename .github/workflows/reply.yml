@@ -1,0 +1,50 @@
+# Lightweight reply workflow: responds to dev comments on Diffhound reviews
+# Triggers when someone replies to a review comment on a PR
+
+name: Diffhound Reply
+
+on:
+  workflow_call:
+    secrets:
+      DIFFHOUND_SSH_KEY:
+        description: "SSH key for the Diffhound review VM"
+        required: true
+      DIFFHOUND_HOST:
+        description: "Hostname/IP of the Diffhound review VM"
+        required: true
+
+jobs:
+  reply:
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'pull_request_review_comment' &&
+      github.event.action == 'created' &&
+      github.event.comment.in_reply_to_id != null
+    steps:
+      - name: Check if reply is to Diffhound
+        id: check
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          REVIEWER_LOGIN: shubhamattri-nova
+          REPLY_TO_USER: ${{ github.event.comment.user.login }}
+          IN_REPLY_TO: ${{ github.event.comment.in_reply_to_id }}
+        run: |
+          # Only respond if the parent comment is from the Diffhound reviewer
+          PARENT_USER=$(gh api /repos/${{ github.repository }}/pulls/comments/${IN_REPLY_TO} --jq '.user.login' 2>/dev/null || echo '')
+          if [ "$PARENT_USER" = "$REVIEWER_LOGIN" ] && [ "$REPLY_TO_USER" != "$REVIEWER_LOGIN" ]; then
+            echo "should_reply=true" >> $GITHUB_OUTPUT
+          else
+            echo "should_reply=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Trigger Diffhound reply
+        if: steps.check.outputs.should_reply == 'true'
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DIFFHOUND_SSH_KEY }}" > ~/.ssh/diffhound_key
+          chmod 600 ~/.ssh/diffhound_key
+
+          ssh -o StrictHostKeyChecking=no             -i ~/.ssh/diffhound_key             ubuntu@${{ secrets.DIFFHOUND_HOST }}             "cd /home/ubuntu/diffhound && bash lib/review.sh ${PR_NUMBER} --repo ${REPO} --learn"
