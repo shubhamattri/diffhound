@@ -1,4 +1,4 @@
 {"pattern_keywords":["create_engine","connect","import"],"reality":"SQLAlchemy create_engine is lazy, no connection at import time","added_date":"2026-03-20","hit_count":0,"source":"PR69 audit"}
-{"pattern_keywords":["str","[:10]","date","fix"],"reality":"str() on timestamps produces garbage strings, use strftime or dateutil","added_date":"2026-03-20","hit_count":0,"source":"PR69 audit"}
+{"pattern_keywords":["str","[:10]","date","fix"],"reality":"str() on timestamps produces garbage strings, use strftime or dateutil","added_date":"2026-03-20","hit_count":58,"source":"PR69 audit"}
 {"pattern_keywords":["example.com","mock","leak"],"reality":"example.com is RFC 2606 reserved domain, cannot leak to real services","added_date":"2026-03-20","hit_count":0,"source":"PR69 audit"}
 {"pattern_keywords":["set","recreated","loop","performance"],"reality":"small set literals are microseconds, not a real issue in IO-bound code","added_date":"2026-03-20","hit_count":0,"source":"PR69 audit"}
