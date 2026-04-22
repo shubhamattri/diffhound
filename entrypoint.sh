@@ -15,6 +15,12 @@ if [ -z "$PR_NUMBER" ]; then
   exit 2
 fi
 
+# Diffhound runs `git clone` internally for --repo mode. GH_TOKEN in env is not
+# picked up by raw git, so we wire it into the global config as a credential.
+if [ -n "${GH_TOKEN:-}" ]; then
+  git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
+fi
+
 # Diffhound reads the current repo from $PWD — cd into the checkout
 if [ -n "$REPO_PATH" ] && [ -d "$REPO_PATH" ]; then
   cd "$REPO_PATH"
