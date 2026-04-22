@@ -29,9 +29,17 @@ jobs:
           REPLY_TO_USER: ${{ github.event.comment.user.login }}
           IN_REPLY_TO: ${{ github.event.comment.in_reply_to_id }}
         run: |
-          # Only respond if the parent comment is from the Diffhound reviewer
+          # Only respond if parent is the diffhound reviewer.
+          # Accept either the pre-hosted identity (REVIEWER_LOGIN) or any [bot] author
+          # (e.g. github-actions[bot] from GitHub-hosted runners).
           PARENT_USER=$(gh api /repos/${{ github.repository }}/pulls/comments/${IN_REPLY_TO} --jq '.user.login' 2>/dev/null || echo '')
-          if [ "$PARENT_USER" = "$REVIEWER_LOGIN" ] && [ "$REPLY_TO_USER" != "$REVIEWER_LOGIN" ]; then
+          parent_is_reviewer=false
+          if [ "$PARENT_USER" = "$REVIEWER_LOGIN" ]; then
+            parent_is_reviewer=true
+          elif [[ "$PARENT_USER" == *"[bot]" ]]; then
+            parent_is_reviewer=true
+          fi
+          if [ "$parent_is_reviewer" = "true" ] && [ "$REPLY_TO_USER" != "$PARENT_USER" ]; then
             echo "should_reply=true" >> $GITHUB_OUTPUT
           else
             echo "should_reply=false" >> $GITHUB_OUTPUT
