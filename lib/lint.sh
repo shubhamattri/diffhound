@@ -134,4 +134,104 @@ _run_static_analysis() {
 
   # Run type-shape pattern detection (these ARE actionable — reviewer must verify)
   _run_shape_check "$changed_files" "$repo_path"
+
+  # Run secret scanning (deterministic — catches what LLM misses)
+  _run_secret_scan "$diff_file" "$repo_path"
+
+  # Run dependency audit (only when package.json/lockfiles change)
+  _run_dep_audit "$diff_file" "$repo_path"
+}
+
+# ── Security Pre-Pass: Secret Scanning ──────────────────────────────────────
+# Runs gitleaks on the diff to detect leaked secrets deterministically.
+# $1 = diff_file, $2 = repo_path
+_run_secret_scan() {
+  local diff_file="$1"
+  local repo_path="$2"
+
+  command -v gitleaks &>/dev/null || return 0
+
+  # Get changed files from diff
+  local changed_files
+  changed_files=$(grep '^diff --git' "$diff_file" 2>/dev/null | sed 's|^diff --git a/.* b/||' | sort -u)
+  [ -z "$changed_files" ] && return 0
+
+  # Run gitleaks only on changed files
+  local filtered=""
+  while IFS= read -r file; do
+    [ -z "$file" ] && continue
+    local full_path="${repo_path}/${file}"
+    [ -f "$full_path" ] || continue
+
+    local result
+    result=$(gitleaks detect --no-git --source "$full_path" \
+      --report-format json --report-path /dev/stdout \
+      --log-level error 2>/dev/null) || true
+
+    if [ -n "$result" ] && [ "$result" != "[]" ] && [ "$result" != "null" ]; then
+      local rules
+      rules=$(echo "$result" | grep -o '"RuleID":"[^"]*"' | sed 's/"RuleID":"//;s/"//' | sort -u | paste -sd', ')
+      filtered+="  ${file}: ${rules}"$'\n'
+    fi
+  done <<< "$changed_files"
+
+  if [ -n "$filtered" ]; then
+    echo ""
+    echo "## SECRET SCANNING FINDINGS (gitleaks — BLOCKING)"
+    echo "The following potential secrets were detected in changed files."
+    echo "These are BLOCKING findings — secrets must NEVER be committed."
+    echo ""
+    echo "$filtered"
+  fi
+}
+
+# ── Security Pre-Pass: Dependency Audit ─────────────────────────────────────
+# Runs npm audit when package.json or lockfiles change.
+# $1 = diff_file, $2 = repo_path
+_run_dep_audit() {
+  local diff_file="$1"
+  local repo_path="$2"
+
+  # Only run if package.json or lockfile changed
+  local dep_files
+  dep_files=$(grep '^diff --git' "$diff_file" 2>/dev/null | \
+    sed 's|^diff --git a/.* b/||' | \
+    grep -E '(package\.json|yarn\.lock|package-lock\.json)' || true)
+  [ -z "$dep_files" ] && return 0
+
+  command -v npm &>/dev/null || return 0
+
+  local output=""
+  local dirs_checked=""
+
+  while IFS= read -r file; do
+    [ -z "$file" ] && continue
+    local dir
+    dir=$(dirname "$file")
+    local full_dir="${repo_path}/${dir}"
+
+    # Skip if already checked this directory
+    case "$dirs_checked" in *"${dir}"*) continue ;; esac
+    dirs_checked="${dirs_checked} ${dir}"
+
+    [ -f "${full_dir}/package.json" ] || continue
+
+    local audit_result
+    audit_result=$(cd "$full_dir" && timeout 30 npm audit --audit-level=high --omit=dev 2>/dev/null | \
+      grep -E '(critical|high)' | head -10) || true
+
+    if [ -n "$audit_result" ]; then
+      output+="### ${dir}/package.json"$'\n'
+      output+="${audit_result}"$'\n'$'\n'
+    fi
+  done <<< "$dep_files"
+
+  if [ -n "$output" ]; then
+    echo ""
+    echo "## DEPENDENCY VULNERABILITY FINDINGS (npm audit)"
+    echo "The following dependency changes introduce or include known vulnerabilities."
+    echo "Critical = BLOCKING. High = SHOULD-FIX."
+    echo ""
+    echo "$output"
+  fi
 }
