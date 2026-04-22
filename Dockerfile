@@ -50,10 +50,15 @@ COPY . /opt/diffhound
 RUN chmod +x /opt/diffhound/bin/diffhound /opt/diffhound/lib/*.sh \
   && ln -s /opt/diffhound/bin/diffhound /usr/local/bin/diffhound
 
+# ── Action entrypoint (translates GH Action inputs → CLI) ──
+COPY entrypoint.sh /usr/local/bin/diffhound-entrypoint
+RUN chmod +x /usr/local/bin/diffhound-entrypoint
+
 # ── Non-root runtime ───────────────────────────────────────
 RUN useradd -m -u 1001 -s /bin/bash runner \
   && chown -R runner:runner /opt/diffhound
 USER runner
 
 WORKDIR /github/workspace
-ENTRYPOINT ["/usr/local/bin/diffhound"]
+# ENTRYPOINT dispatches: action invocations use INPUT_* env, direct CLI use passes args.
+ENTRYPOINT ["/usr/local/bin/diffhound-entrypoint"]
