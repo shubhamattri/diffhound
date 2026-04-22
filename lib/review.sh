@@ -5,7 +5,7 @@ export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
 
 # Source .profile for env vars (ANTHROPIC_API_KEY etc.) — needed for non-interactive SSH
 [ -f "$HOME/.profile" ] && . "$HOME/.profile" 2>/dev/null || true
-# Multi-model pipeline: Claude (agentic) → Codex+Gemini (peer review) → Haiku (voice rewrite)
+# Multi-model pipeline: Opus (review) + Sonnet (structured/verify) + Haiku (triage/merge) + → Codex+Gemini (peer review) → Haiku (voice rewrite)
 # https://github.com/shubhamattri/diffhound
 
 # Allow calling from inside a Claude Code session
@@ -26,6 +26,71 @@ source "${LIB_DIR}/github.sh"
 source "${LIB_DIR}/rag.sh" 2>/dev/null || true  # for _filter_rag_for_files, _trim_rag
 source "${LIB_DIR}/jira.sh" 2>/dev/null || true  # for _extract_jira_ticket, _fetch_jira_ticket
 source "${LIB_DIR}/lint.sh" 2>/dev/null || true  # for _run_static_analysis
+
+# ── API Helper: direct Anthropic API calls ───────────────────────────────────
+# Usage: printf '%s' "$prompt" | _call_api MODEL [MAX_TOKENS] [TIMEOUT_SECS]
+#        _call_api MODEL [MAX_TOKENS] [TIMEOUT_SECS] < prompt_file
+_call_api() {
+  local model="$1"
+  local max_tokens="${2:-4096}"
+  local timeout_secs="${3:-120}"
+
+  local _api_pf _api_jf
+  _api_pf=$(mktemp -t "api-prompt.XXXXXX")
+  _api_jf=$(mktemp -t "api-json.XXXXXX")
+  cat > "$_api_pf"
+
+  jq -n --arg model "$model" \
+        --argjson max_tokens "$max_tokens" \
+        --rawfile user "$_api_pf" \
+    '{model: $model, max_tokens: $max_tokens,
+      messages: [{role: "user", content: $user}]}' > "$_api_jf"
+  rm -f "$_api_pf"
+
+  local _api_r
+  _api_r=$($_TIMEOUT_CMD "$timeout_secs" curl -sf https://api.anthropic.com/v1/messages \
+    -H "x-api-key: ${ANTHROPIC_API_KEY}" \
+    -H "anthropic-version: 2023-06-01" \
+    -H "anthropic-beta: prompt-caching-2024-07-31" \
+    -H "content-type: application/json" \
+    -d @"$_api_jf" 2>/dev/null || echo "")
+  rm -f "$_api_jf"
+
+  printf '%s' "$_api_r" | jq -r '.content[0].text // empty' 2>/dev/null || true
+}
+
+# _call_api_system MODEL MAX_TOKENS TIMEOUT SYSTEM_FILE < user_prompt
+_call_api_system() {
+  local model="$1"
+  local max_tokens="${2:-4096}"
+  local timeout_secs="${3:-120}"
+  local system_file="$4"
+
+  local _api_pf _api_jf
+  _api_pf=$(mktemp -t "api-prompt.XXXXXX")
+  _api_jf=$(mktemp -t "api-json.XXXXXX")
+  cat > "$_api_pf"
+
+  jq -n --arg model "$model" \
+        --argjson max_tokens "$max_tokens" \
+        --rawfile system "$system_file" \
+        --rawfile user "$_api_pf" \
+    '{model: $model, max_tokens: $max_tokens,
+      system: [{type: "text", text: $system, cache_control: {type: "ephemeral"}}],
+      messages: [{role: "user", content: $user}]}' > "$_api_jf"
+  rm -f "$_api_pf"
+
+  local _api_r
+  _api_r=$($_TIMEOUT_CMD "$timeout_secs" curl -sf https://api.anthropic.com/v1/messages \
+    -H "x-api-key: ${ANTHROPIC_API_KEY}" \
+    -H "anthropic-version: 2023-06-01" \
+    -H "anthropic-beta: prompt-caching-2024-07-31" \
+    -H "content-type: application/json" \
+    -d @"$_api_jf" 2>/dev/null || echo "")
+  rm -f "$_api_jf"
+
+  printf '%s' "$_api_r" | jq -r '.content[0].text // empty' 2>/dev/null || true
+}
 
 # ── Verify dependencies ─────────────────────────────────────
 _check_deps
@@ -677,12 +742,9 @@ RESPOND_RULES_END
       ai_reply=$(printf '%s' "$_api_out" | jq -r '.content[0].text // empty' 2>/dev/null || true)
     fi
 
-    # Fallback: claude CLI
+    # Fallback: direct API (no CLI dependency)
     if [ -z "$ai_reply" ]; then
-      local _saved_key="${ANTHROPIC_API_KEY:-}"
-      unset ANTHROPIC_API_KEY
-      ai_reply=$(printf '%s' "$prompt" | claude -p --model claude-haiku-4-5-20251001 2>/dev/null || true)
-      [ -n "$_saved_key" ] && export ANTHROPIC_API_KEY="$_saved_key"
+      ai_reply=$(printf '%s' "$prompt" | _call_api "claude-haiku-4-5-20251001" 256 30 || true)
     fi
 
     [ -z "$ai_reply" ] && continue
@@ -792,10 +854,7 @@ LESSON_RULES_END
     rm -f "$_lesson_prompt_file"
 
     local lesson=""
-    local _saved_key="${ANTHROPIC_API_KEY:-}"
-    unset ANTHROPIC_API_KEY
-    lesson=$(printf '%s' "$lesson_prompt" | claude -p --model claude-haiku-4-5-20251001 2>/dev/null | head -1 || true)
-    [ -n "$_saved_key" ] && export ANTHROPIC_API_KEY="$_saved_key"
+    lesson=$(printf '%s' "$lesson_prompt" | _call_api "claude-haiku-4-5-20251001" 256 30 | head -1 || true)
 
     [ -z "$lesson" ] && continue
     # Sanitize: remove leading "- " or "* " if present
@@ -1108,11 +1167,7 @@ path/to/file.ts	CRITICAL	migration with schema change
 path/to/test.ts	LOW	test file"
 
   local triage_result=""
-  local _saved_key="${ANTHROPIC_API_KEY:-}"
-  unset ANTHROPIC_API_KEY
-  triage_result=$(printf '%s' "$triage_prompt" | \
-    $_TIMEOUT_CMD 30 claude -p --model claude-haiku-4-5-20251001 2>/dev/null || true)
-  [ -n "$_saved_key" ] && export ANTHROPIC_API_KEY="$_saved_key"
+  triage_result=$(printf '%s' "$triage_prompt" | _call_api "claude-haiku-4-5-20251001" 2048 30 || true)
 
   if [ -n "$triage_result" ]; then
     # Filter to only valid TSV lines with known priorities
@@ -1185,12 +1240,8 @@ Output this exact structure:
 
 Be concise. This header is prepended to each review chunk for context."
 
-  local _saved_key="${ANTHROPIC_API_KEY:-}"
-  unset ANTHROPIC_API_KEY
   local summary_result
-  summary_result=$(printf '%s' "$summary_prompt" | \
-    $_TIMEOUT_CMD 30 claude -p --model claude-haiku-4-5-20251001 2>/dev/null || true)
-  [ -n "$_saved_key" ] && export ANTHROPIC_API_KEY="$_saved_key"
+  summary_result=$(printf '%s' "$summary_prompt" | _call_api "claude-haiku-4-5-20251001" 2048 30 || true)
 
   if [ -n "$summary_result" ]; then
     printf '%s\n' "$summary_result"
@@ -1346,7 +1397,7 @@ _build_pr_manifest() {
 }
 
 # ── Parallel Chunk Review ────────────────────────────────────────────────────
-# Launches claude -p for each chunk in parallel. Collects results.
+# Launches API calls for each chunk in parallel. Collects results.
 _review_chunks_parallel() {
   local chunk_dir="$1"
   local chunk_count="$2"
@@ -1360,9 +1411,6 @@ _review_chunks_parallel() {
 
   local chunked_prompt_file="${LIB_DIR}/prompt-chunked.txt"
   local pids=()
-
-  local _saved_key="${ANTHROPIC_API_KEY:-}"
-  unset ANTHROPIC_API_KEY
 
   for ((i=0; i<chunk_count; i++)); do
     local chunk_diff="${chunk_dir}/chunk-${i}.diff"
@@ -1547,18 +1595,10 @@ _review_chunks_parallel() {
       fi
     } > "$chunk_prompt"
 
-    # Launch claude in background with timeout
+    # Launch API call in background (Opus 4.6 for thorough code review)
     (
-      if ! $_TIMEOUT_CMD 480 claude -p \
-          --allowedTools "Read,Bash" \
-          --add-dir "$repo_path" \
-          --dangerously-skip-permissions \
-          --output-format text \
-          < "$chunk_prompt" > "$chunk_out" 2>&1; then
-        # Fallback: non-agentic mode
-        $_TIMEOUT_CMD 300 claude -p < "$chunk_prompt" > "$chunk_out" 2>&1 || \
-          echo "CHUNK_${i}_FAILED" > "$chunk_out"
-      fi
+      _call_api "claude-opus-4-6" 16384 480 < "$chunk_prompt" > "$chunk_out" 2>&1 || \
+        echo "CHUNK_${i}_FAILED" > "$chunk_out"
     ) &
     pids+=($!)
   done
@@ -1568,7 +1608,6 @@ _review_chunks_parallel() {
     wait "$pid" 2>/dev/null || true
   done
 
-  [ -n "$_saved_key" ] && export ANTHROPIC_API_KEY="$_saved_key"
 }
 
 # ── Findings Merger: combine chunk outputs into single review ────────────────
@@ -1638,11 +1677,7 @@ Checklist: [verification steps]
 ### SCORECARD_END"
 
   local merge_result=""
-  local _saved_key="${ANTHROPIC_API_KEY:-}"
-  unset ANTHROPIC_API_KEY
-  merge_result=$(printf '%s' "$merge_prompt" | \
-    $_TIMEOUT_CMD 60 claude -p --model claude-haiku-4-5-20251001 2>/dev/null || true)
-  [ -n "$_saved_key" ] && export ANTHROPIC_API_KEY="$_saved_key"
+  merge_result=$(printf '%s' "$merge_prompt" | _call_api "claude-haiku-4-5-20251001" 4096 60 || true)
 
   if [ -n "$merge_result" ]; then
     printf '%s\n' "$merge_result" > "$output_file"
@@ -2648,11 +2683,7 @@ if [ "$IS_REREVIEW" = true ] && [ "$REREVIEW_DEPTH" = "shallow" ]; then
 fi
 spinner_start "Analyzing code (pass 1/${_TOTAL_PASSES})......"
 
-# Pass 1: Claude non-agentic — uses Max subscription (claude.ai auth), NOT the API key.
-# Unset ANTHROPIC_API_KEY temporarily so claude CLI uses OAuth (Max subscription = free).
-# The key is restored after this block for the curl-based Haiku calls.
-_SAVED_API_KEY="${ANTHROPIC_API_KEY:-}"
-unset ANTHROPIC_API_KEY
+# Pass 1: Claude Opus via direct API — primary code review pass
 
 # Pre-fetch file contents for changed files (replaces agentic tool calls)
 # Budget: max 20KB total context to prevent prompt bloat
@@ -2708,9 +2739,7 @@ _CLAUDE_TIMEOUT=$(( 180 + _PROMPT_BYTES / 300 ))
 [ "$_CLAUDE_TIMEOUT" -gt 480 ] && _CLAUDE_TIMEOUT=480
 [ "$_CLAUDE_TIMEOUT" -lt 180 ] && _CLAUDE_TIMEOUT=180
 echo "  [debug] prompt=${_PROMPT_BYTES}B, timeout=${_CLAUDE_TIMEOUT}s" >&2
-if ! $_TIMEOUT_CMD "$_CLAUDE_TIMEOUT" claude -p \
-    --output-format text \
-    < "$PROMPT_FILE" > "$CLAUDE_OUT" 2>"${CLAUDE_OUT}.stderr"; then
+if ! _call_api "claude-opus-4-6" 16384 "$_CLAUDE_TIMEOUT" < "$PROMPT_FILE" > "$CLAUDE_OUT" 2>"${CLAUDE_OUT}.stderr"; then
   echo "  [debug] claude failed — out=$(wc -c < "$CLAUDE_OUT" 2>/dev/null)B stderr=$(cat "${CLAUDE_OUT}.stderr" 2>/dev/null | head -3)" >&2
   # Check if partial output is usable (timeout may kill mid-write but JSON is complete)
   _partial_json=$(_extract_json "$CLAUDE_OUT" 2>/dev/null || true)
@@ -2719,12 +2748,11 @@ if ! $_TIMEOUT_CMD "$_CLAUDE_TIMEOUT" claude -p \
     spinner_fail "Analysis timed out but output is usable — continuing"
   else
     spinner_fail "Primary pass failed — retrying"
-    if ! $_TIMEOUT_CMD 360 claude -p --output-format text < "$PROMPT_FILE" > "$CLAUDE_OUT" 2>&1; then
+    if ! _call_api "claude-opus-4-6" 16384 360 < "$PROMPT_FILE" > "$CLAUDE_OUT" 2>&1; then
       _partial_json=$(_extract_json "$CLAUDE_OUT" 2>/dev/null || true)
       if [ -z "$_partial_json" ] || ! echo "$_partial_json" | jq -e '.findings' >/dev/null 2>&1; then
         spinner_fail "Analysis failed"
         cat "$CLAUDE_OUT" >&2
-        export ANTHROPIC_API_KEY="$_SAVED_API_KEY"
         exit 1
       fi
       spinner_fail "Fallback timed out but output is usable — continuing"
@@ -2732,7 +2760,6 @@ if ! $_TIMEOUT_CMD "$_CLAUDE_TIMEOUT" claude -p \
   fi
 fi
 
-export ANTHROPIC_API_KEY="$_SAVED_API_KEY"
 spinner_stop "Pass 1 complete"
 
 fi  # end SMALL/MEDIUM tier monolithic path
@@ -3191,10 +3218,10 @@ Evidence: \(.value.evidence // "none")
 
       # Call Haiku for verification (cheap + fast)
       _verify_resp=""
-      if [ -n "${ANTHROPIC_API_KEY:-}" ] && [ "${_KEY_HAS_CREDITS:-false}" = "true" ]; then
+      if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
         _vj_tmp=$(mktemp -t "pr-${PR_NUMBER}-vj.XXXXXX")
         jq -n --rawfile prompt "$VERIFY_PROMPT" '{
-          model: "claude-haiku-4-5-20251001",
+          model: "claude-sonnet-4-6",
           max_tokens: 2048,
           messages: [{role: "user", content: $prompt}]
         }' > "$_vj_tmp"
@@ -3204,12 +3231,9 @@ Evidence: \(.value.evidence // "none")
         _verify_resp=$(echo "$_verify_resp" | jq -r '.content[0].text // empty' 2>/dev/null || true)
       fi
 
-      # Fallback: claude CLI
+      # Fallback: direct API call
       if [ -z "$_verify_resp" ]; then
-        _saved_vk="${ANTHROPIC_API_KEY:-}"
-        unset ANTHROPIC_API_KEY
-        _verify_resp=$($_TIMEOUT_CMD 60 claude -p --model claude-haiku-4-5-20251001 --output-format text < "$VERIFY_PROMPT" 2>/dev/null || true)
-        [ -n "$_saved_vk" ] && export ANTHROPIC_API_KEY="$_saved_vk"
+        _verify_resp=$(_call_api "claude-sonnet-4-6" 2048 60 < "$VERIFY_PROMPT" 2>/dev/null || true)
       fi
 
       # Parse verification results and filter findings
@@ -3988,19 +4012,19 @@ if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
     -H "x-api-key: ${ANTHROPIC_API_KEY}" \
     -H "anthropic-version: 2023-06-01" \
     -H "content-type: application/json" \
-    -d '{"model":"claude-sonnet-4-20250514","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}' \
+    -d '{"model":"claude-sonnet-4-6","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}' \
     2>/dev/null || echo "")
   if echo "$_TEST_RESP" | grep -q '"type":"message"'; then
     _KEY_HAS_CREDITS=true
   fi
 fi
-if [ "${_KEY_HAS_CREDITS:-false}" = "true" ]; then
+if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
   _JSON_TMP=$(mktemp -t "pr-${PR_NUMBER}-json.XXXXXX")
   jq -n \
     --arg system "$_STATIC_SYSTEM" \
     --rawfile user "$_USER_TMP" \
     '{
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-4-6",
       max_tokens: 16384,
       system: [{type: "text", text: $system, cache_control: {type: "ephemeral"}}],
       messages: [{role: "user", content: $user}]
@@ -4022,13 +4046,12 @@ if [ "${_KEY_HAS_CREDITS:-false}" = "true" ]; then
 fi
 
 if [ "$_API_CALLED" = false ]; then
-  # Fallback: use claude CLI with Max subscription (unset API key so it doesn't fall back to pay-per-use)
-  _SAVED_KEY2="${ANTHROPIC_API_KEY:-}"
-  unset ANTHROPIC_API_KEY
-  { echo "$_STATIC_SYSTEM"; echo ""; cat "$_USER_TMP"; } | \
-    claude -p --model claude-sonnet-4-20250514 > "$REVIEW_STRUCTURED" 2>&1 || \
+  # Fallback: direct API call with system prompt
+  _SYS_TMP=$(mktemp -t "pr-${PR_NUMBER}-sys.XXXXXX")
+  printf '%s' "$_STATIC_SYSTEM" > "$_SYS_TMP"
+  _call_api_system "claude-sonnet-4-6" 16384 120 "$_SYS_TMP" < "$_USER_TMP" > "$REVIEW_STRUCTURED" 2>&1 || \
     cp "$CLAUDE_OUT" "$REVIEW_STRUCTURED"
-  export ANTHROPIC_API_KEY="$_SAVED_KEY2"
+  rm -f "$_SYS_TMP"
 fi
 
 rm -f "$_USER_TMP"
