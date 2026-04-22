@@ -1,0 +1,15 @@
+.git
+.github
+docs
+*.md
+**/*.bak*
+**/*.bak-*
+config/blocklist-audit.log
+config/*.log
+.DS_Store
+Thumbs.db
+pr-*-diff.*
+pr-*-prompt.*
+pr-*-claude.*
+pr-*-codex.*
+pr-*-gemini.*
