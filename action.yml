@@ -1,0 +1,32 @@
+name: 'Diffhound PR Review'
+description: 'AI-powered PR code review — Opus + Sonnet + Haiku + Codex + Gemini multi-model pipeline'
+author: 'Shubham Attri'
+branding:
+  icon: 'search'
+  color: 'blue'
+
+inputs:
+  pr-number:
+    description: 'PR number to review'
+    required: true
+  mode:
+    description: 'Review mode: full (default), fast (re-review incremental), learn (ingest dev reply)'
+    required: false
+    default: 'full'
+  auto-post:
+    description: 'Post comments to GitHub without interactive confirmation'
+    required: false
+    default: 'true'
+  repo-path:
+    description: 'Path to the repo checkout inside the runner (default: GITHUB_WORKSPACE)'
+    required: false
+    default: ''
+
+runs:
+  using: 'docker'
+  image: 'Dockerfile'
+  env:
+    INPUT_PR_NUMBER: ${{ inputs.pr-number }}
+    INPUT_MODE: ${{ inputs.mode }}
+    INPUT_AUTO_POST: ${{ inputs.auto-post }}
+    INPUT_REPO_PATH: ${{ inputs.repo-path }}
