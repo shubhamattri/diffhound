@@ -1710,6 +1710,22 @@ gh api "/repos/${REPO_OWNER}/${REPO_NAME}/pulls/${PR_NUMBER}/reviews" \
   --jq '[.[] | {id, state, body, user: .user.login, submitted_at, commit_id}]' \
   > "$EXISTING_REVIEWS_FILE" 2>/dev/null || echo "[]" > "$EXISTING_REVIEWS_FILE"
 
+# Reconstruct prior FINDING: blocks from our existing inline PR comments.
+# round-diff.py uses these as the "previous round" baseline to compute
+# new/resolved/unchanged accounting (DIFFHOUND_PRIOR_FINDINGS env var).
+# We do this unconditionally — on first reviews there are no prior comments
+# so the file is empty and round-diff shows "+N new, -0 resolved".
+PRIOR_FINDINGS_FILE=$(mktemp -t "pr-${PR_NUMBER}-prior-findings.XXXXXX")
+jq -r --arg login "$REVIEWER_LOGIN" '
+  [.[] | select(.in_reply_to_id == null and .user == $login and .path != null and .line != null)]
+  | .[]
+  | . as $c
+  | ($c.body | capture("\\*\\*(?<sev>BLOCKING|SHOULD-FIX|NIT)\\*\\*") // {sev:"SHOULD-FIX"}) as $sv
+  | ($c.body | gsub("\\*\\*(?:BLOCKING|SHOULD-FIX|NIT)\\*\\*\\s*[^a-zA-Z`]*"; "")
+             | split(". ")[0] | ltrimstr(" ") | rtrimstr(" ")) as $what
+  | "FINDING: \($c.path):\($c.line):\($sv.sev)\nWHAT: \($what)\n"
+' "$EXISTING_COMMENTS_FILE" 2>/dev/null > "$PRIOR_FINDINGS_FILE" || true
+
 # Check if reviewer has already posted comments → re-review mode
 REVIEWER_COMMENT_COUNT=$(jq --arg login "$REVIEWER_LOGIN" \
   '[.[] | select(.user == $login)] | length' "$EXISTING_COMMENTS_FILE" 2>/dev/null || echo "0")
@@ -2983,6 +2999,28 @@ if [ "${DIFFHOUND_SKIP_VALIDATORS:-0}" != "1" ] \
     mv "$_VALIDATED_OUT" "$CLAUDE_OUT"
   else
     rm -f "$_VALIDATED_OUT"
+  fi
+fi
+
+# ============================================================
+# STEP 3.6: ROUND-DIFF — append CHANGES_SINCE_LAST_REVIEW accounting block.
+# Reads PRIOR_FINDINGS_FILE (reconstructed from existing inline comments) and
+# computes new/resolved/unchanged relative to the current validated findings.
+# On first reviews the prior file is empty → shows "+N new, -0 resolved".
+# Opt-out: DIFFHOUND_SKIP_VALIDATORS=1 (shares the validators skip flag)
+# ============================================================
+_ROUND_DIFF_PY="${LIB_DIR}/validators/round-diff.py"
+if [ "${DIFFHOUND_SKIP_VALIDATORS:-0}" != "1" ] \
+   && [ -x "$_ROUND_DIFF_PY" ] \
+   && [ -s "$CLAUDE_OUT" ]; then
+  _RD_OUT=$(mktemp -t "pr-${PR_NUMBER}-rd.XXXXXX")
+  if DIFFHOUND_PRIOR_FINDINGS="${PRIOR_FINDINGS_FILE}" \
+     python3 "$_ROUND_DIFF_PY" < "$CLAUDE_OUT" > "$_RD_OUT" 2>/dev/null \
+     && [ -s "$_RD_OUT" ]; then
+    mv "$_RD_OUT" "$CLAUDE_OUT"
+    echo "  🔄  round-diff: accounting block appended" >&2
+  else
+    rm -f "$_RD_OUT"
   fi
 fi
 
