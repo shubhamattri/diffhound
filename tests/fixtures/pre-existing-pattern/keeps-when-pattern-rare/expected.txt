@@ -1,0 +1,7 @@
+FINDING: onboarding.py:20:NIT
+WHAT: new `RedisClient` per request — consider reusing a module-level client
+EVIDENCE: onboarding.py:20
+IMPACT: connection-pool churn
+OPTIONS:
+1. extract shared client
+UNVERIFIABLE: no

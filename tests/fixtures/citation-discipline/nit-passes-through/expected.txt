@@ -1,0 +1,7 @@
+FINDING: utils.py:12:NIT
+WHAT: variable name could be clearer
+EVIDENCE: utils.py:12
+IMPACT: readability
+OPTIONS:
+1. rename
+UNVERIFIABLE: no

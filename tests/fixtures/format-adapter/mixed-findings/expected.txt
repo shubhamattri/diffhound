@@ -4,9 +4,9 @@
     {
       "file": "api/agent/orchestrator.py",
       "line": 4,
-      "severity": "BLOCKING",
+      "severity": "SHOULD-FIX",
       "title": "`_run_graph` blocks on a synchronous DB call",
-      "body": "event loop stalls under load"
+      "body": "event loop stalls under load [citation-discipline: downgraded from BLOCKING; missing DIFF_LINE REACHABLE_PATH REJECTED_ALTERNATIVE]"
     }
   ],
   "scorecard": [

@@ -4,9 +4,9 @@
     {
       "file": "tools/helper.py",
       "line": 3,
-      "severity": "SHOULD-FIX",
+      "severity": "NIT",
       "title": "hardcoded fallback bypasses org lookup",
-      "body": "org_name always matches token scope [todo-deferral: deferred per TODO at tools/helper.py:1 (BX-4242)]"
+      "body": "org_name always matches token scope [todo-deferral: deferred per TODO at tools/helper.py:1 (BX-4242)] [citation-discipline: downgraded from SHOULD-FIX; missing DIFF_LINE REACHABLE_PATH REJECTED_ALTERNATIVE]"
     }
   ],
   "scorecard": [

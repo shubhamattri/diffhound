@@ -2,8 +2,8 @@
 api/handler.py
 
 ### FINDINGS_START
-FINDING: api/handler.py:6:SHOULD-FIX
-WHAT: `process_request` does not validate input schema
+FINDING: api/handler.py:6:NIT
+WHAT: `process_request` does not validate input schema [citation-discipline: downgraded from SHOULD-FIX; missing DIFF_LINE REACHABLE_PATH REJECTED_ALTERNATIVE]
 EVIDENCE: data.get("value") can silently return None
 IMPACT: downstream None propagation
 OPTIONS:

@@ -1,0 +1,7 @@
+FINDING: database.py:45:BLOCKING
+WHAT: Session(engine) bypasses the SessionLocal autoflush config
+EVIDENCE: database.py:45
+IMPACT: inconsistent session behavior
+OPTIONS:
+1. use SessionLocal instead
+UNVERIFIABLE: no

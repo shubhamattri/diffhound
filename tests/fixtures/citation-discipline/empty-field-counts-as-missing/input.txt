@@ -1,0 +1,10 @@
+FINDING: widget.py:100:BLOCKING
+WHAT: race condition on concurrent delete
+EVIDENCE: widget.py:100
+IMPACT: None dereference
+OPTIONS:
+1. add None guard
+DIFF_LINE: +  conv = session.get(Conversation, conv_id)
+REACHABLE_PATH:
+REJECTED_ALTERNATIVE:
+UNVERIFIABLE: no
