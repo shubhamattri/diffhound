@@ -1,0 +1,39 @@
+```json
+{
+  "findings": [
+    {
+      "file": "api/agent/orchestrator.py",
+      "line": 358,
+      "severity": "NIT",
+      "title": "`_populate_working_memory` mutates state in place",
+      "body": "downstream nodes see partial state"
+    },
+    {
+      "file": "api/routers/widget.py",
+      "line": 2,
+      "severity": "NIT",
+      "title": "`_compute_email_hash` duplicated from orchestrator.py",
+      "body": "DRY violation"
+    },
+    {
+      "file": "api/routers/widget.py",
+      "line": 5,
+      "severity": "SHOULD-FIX",
+      "title": "widget_token comparison is vulnerable to timing attack",
+      "body": "attacker can recover token byte-by-byte"
+    },
+    {
+      "file": "api/agent/orchestrator.py",
+      "line": 4,
+      "severity": "BLOCKING",
+      "title": "`_run_graph` blocks on a synchronous DB call",
+      "body": "event loop stalls under load"
+    }
+  ],
+  "scorecard": [
+    {"category": "Security", "score": 20},
+    {"category": "Correctness", "score": 18}
+  ],
+  "score": 38
+}
+```
