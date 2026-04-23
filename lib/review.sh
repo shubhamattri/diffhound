@@ -2942,6 +2942,29 @@ SCORECARD_JSON -->"
 fi
 
 # ============================================================
+# STEP 3.5: FALSE-POSITIVE GATES — drop LLM-generated FPs before peer review
+# sees them (saves tokens) and before voice rewrite polishes them for posting.
+# Opt-out: DIFFHOUND_SKIP_VALIDATORS=1
+# ============================================================
+if [ "${DIFFHOUND_SKIP_VALIDATORS:-0}" != "1" ] \
+   && [ -x "${LIB_DIR}/validators/format-adapter.sh" ] \
+   && [ -s "$CLAUDE_OUT" ]; then
+  _VALIDATED_OUT=$(mktemp -t "pr-${PR_NUMBER}-validated.XXXXXX")
+  if DIFFHOUND_REPO="${DIFFHOUND_REPO:-${REPO_PATH:-$(pwd)}}" \
+     "${LIB_DIR}/validators/format-adapter.sh" < "$CLAUDE_OUT" > "$_VALIDATED_OUT" 2>/dev/null \
+     && [ -s "$_VALIDATED_OUT" ]; then
+    _before=$(jq '.findings | length' < <(_extract_json "$CLAUDE_OUT" 2>/dev/null || echo '{}') 2>/dev/null || echo "?")
+    _after=$(jq '.findings | length' < <(_extract_json "$_VALIDATED_OUT" 2>/dev/null || echo '{}') 2>/dev/null || echo "?")
+    if [ "$_before" != "?" ] && [ "$_after" != "?" ] && [ "$_before" != "$_after" ]; then
+      echo "  🛡  Validators dropped $((_before - _after)) finding(s) (${_before} → ${_after})" >&2
+    fi
+    mv "$_VALIDATED_OUT" "$CLAUDE_OUT"
+  else
+    rm -f "$_VALIDATED_OUT"
+  fi
+fi
+
+# ============================================================
 # STEP 4: PEER REVIEW — CODEX + GEMINI
 # Routing: --fast → skip | fresh review → full aggressive | re-review shallow → skip | re-review full → incremental-scoped
 # ============================================================

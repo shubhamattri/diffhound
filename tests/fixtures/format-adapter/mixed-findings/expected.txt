@@ -1,0 +1,24 @@
+```json
+{
+  "findings": [
+    {
+      "file": "api/agent/orchestrator.py",
+      "line": 4,
+      "severity": "BLOCKING",
+      "title": "`_run_graph` blocks on a synchronous DB call",
+      "body": "event loop stalls under load"
+    }
+  ],
+  "scorecard": [
+    {
+      "category": "Security",
+      "score": 20
+    },
+    {
+      "category": "Correctness",
+      "score": 18
+    }
+  ],
+  "score": 38
+}
+```

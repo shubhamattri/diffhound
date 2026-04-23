@@ -1,0 +1,7 @@
+FINDING: api/routers/widget.py:3:SHOULD-FIX
+WHAT: widget_token comparison is vulnerable to timing attack
+EVIDENCE: widget.py:3
+IMPACT: attacker can recover token byte-by-byte
+OPTIONS:
+1. use hmac.compare_digest
+UNVERIFIABLE: no

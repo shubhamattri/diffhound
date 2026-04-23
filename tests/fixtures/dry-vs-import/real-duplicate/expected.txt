@@ -1,0 +1,7 @@
+FINDING: b.py:1:NIT
+WHAT: `hash_email` duplicated from a.py:1
+EVIDENCE: b.py:1 and a.py:1
+IMPACT: DRY violation
+OPTIONS:
+1. extract shared
+UNVERIFIABLE: no

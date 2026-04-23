@@ -1,0 +1,7 @@
+FINDING: handler.py:1:SHOULD-FIX
+WHAT: `audit_log` should be called before do_thing
+EVIDENCE: handler.py:1
+IMPACT: missing audit trail
+OPTIONS:
+1. add audit_log call
+UNVERIFIABLE: no
