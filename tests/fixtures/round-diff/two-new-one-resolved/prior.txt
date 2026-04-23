@@ -1,0 +1,7 @@
+FINDING: old.py:1:BLOCKING
+WHAT: `oldbug` bad logic
+EVIDENCE: old.py:1
+IMPACT: x
+OPTIONS:
+1. fix
+UNVERIFIABLE: no

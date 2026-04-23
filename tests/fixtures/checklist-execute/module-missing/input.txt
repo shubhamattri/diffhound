@@ -1,0 +1,7 @@
+FINDING: api/tests/test_bad.py:1:BLOCKING
+WHAT: `pytest tests/test_bad.py` fails in isolation with ModuleNotFoundError on `totally_fake_module`
+EVIDENCE: test_bad.py:1
+IMPACT: test isolation broken
+OPTIONS:
+1. fix import
+UNVERIFIABLE: no

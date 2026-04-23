@@ -1,0 +1,9 @@
+FINDING: stable.py:47:SHOULD-FIX
+WHAT: `unstable_thing` swallows errors silently
+EVIDENCE: stable.py:47
+IMPACT: x
+OPTIONS:
+1. rethrow
+UNVERIFIABLE: no
+### CHANGES_SINCE_LAST_REVIEW
++0 new, -0 resolved, =1 unchanged

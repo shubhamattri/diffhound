@@ -1,0 +1,7 @@
+FINDING: loose.py:3:BLOCKING
+WHAT: returning None breaks caller expectations
+EVIDENCE: loose.py:3
+IMPACT: caller crashes
+OPTIONS:
+1. return proper value
+UNVERIFIABLE: no

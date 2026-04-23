@@ -1,0 +1,7 @@
+FINDING: api/tests/test_widget.py:1:BLOCKING
+WHAT: `pytest tests/test_widget.py` fails in isolation with ModuleNotFoundError on `database`
+EVIDENCE: test_widget.py:1
+IMPACT: test isolation broken
+OPTIONS:
+1. move _patch_db to conftest
+UNVERIFIABLE: no

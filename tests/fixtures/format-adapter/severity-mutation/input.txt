@@ -1,0 +1,15 @@
+```json
+{
+  "findings": [
+    {
+      "file": "tools/helper.py",
+      "line": 3,
+      "severity": "BLOCKING",
+      "title": "hardcoded fallback bypasses org lookup",
+      "body": "org_name always matches token scope"
+    }
+  ],
+  "scorecard": [{"category": "Correctness", "score": 10}],
+  "score": 10
+}
+```
