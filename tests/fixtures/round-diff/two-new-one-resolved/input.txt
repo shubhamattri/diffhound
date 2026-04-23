@@ -1,0 +1,14 @@
+FINDING: new1.py:1:BLOCKING
+WHAT: `newbug1` bad logic
+EVIDENCE: new1.py:1
+IMPACT: x
+OPTIONS:
+1. fix
+UNVERIFIABLE: no
+FINDING: new2.py:1:SHOULD-FIX
+WHAT: `newbug2` concern
+EVIDENCE: new2.py:1
+IMPACT: x
+OPTIONS:
+1. fix
+UNVERIFIABLE: no

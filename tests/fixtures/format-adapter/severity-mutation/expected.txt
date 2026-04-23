@@ -1,0 +1,20 @@
+```json
+{
+  "findings": [
+    {
+      "file": "tools/helper.py",
+      "line": 3,
+      "severity": "SHOULD-FIX",
+      "title": "hardcoded fallback bypasses org lookup",
+      "body": "org_name always matches token scope [todo-deferral: deferred per TODO at tools/helper.py:1 (BX-4242)]"
+    }
+  ],
+  "scorecard": [
+    {
+      "category": "Correctness",
+      "score": 10
+    }
+  ],
+  "score": 10
+}
+```

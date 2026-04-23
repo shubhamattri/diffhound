@@ -1,0 +1,16 @@
+FINDING: a.py:1:BLOCKING
+WHAT: `foo` bad logic
+EVIDENCE: a.py:1
+IMPACT: x
+OPTIONS:
+1. y
+UNVERIFIABLE: no
+FINDING: b.py:2:SHOULD-FIX
+WHAT: `bar` baz concern
+EVIDENCE: b.py:2
+IMPACT: q
+OPTIONS:
+1. r
+UNVERIFIABLE: no
+### CHANGES_SINCE_LAST_REVIEW
++0 new, -0 resolved, =2 unchanged

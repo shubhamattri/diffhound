@@ -1,0 +1,7 @@
+FINDING: tools.py:6:BLOCKING
+WHAT: viewed_org_name and org_name sourced from same token-scoped dict; data separation missing
+EVIDENCE: tools.py:6
+IMPACT: BX-2978 non-functional
+OPTIONS:
+1. fetch home org from different source
+UNVERIFIABLE: no

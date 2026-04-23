@@ -1,0 +1,7 @@
+FINDING: plain.py:2:BLOCKING
+WHAT: viewed_org_name equals org_name; data separation missing
+EVIDENCE: plain.py:2
+IMPACT: non-functional
+OPTIONS:
+1. fix source
+UNVERIFIABLE: no

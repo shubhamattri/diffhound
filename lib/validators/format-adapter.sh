@@ -44,14 +44,21 @@ if [ -n "$_json" ] && printf '%s' "$_json" | jq -e '.findings' >/dev/null 2>&1; 
 
   _validated=$(printf '%s\n' "$_findings_text" | "$VALIDATORS_RUN" 2>/dev/null || true)
 
-  # Parse validated output into { "file:line:severity" → annotated_what }
-  # Findings without a FINDING: header are droppedl
+  # Parse validated output into { "file:line" → {severity, what} }.
+  # Keying on (file, line) — not severity — because todo-deferral mutates
+  # BLOCKING → SHOULD-FIX. The validator-output severity is applied back.
   _survivors_json=$(printf '%s' "$_validated" | awk '
-    BEGIN { key = "" }
+    BEGIN { key = ""; sev = ""; what = "" }
     /^FINDING: / {
-      if (key != "") { print key "\t" what }
-      header = substr($0, 10)
-      key = header
+      if (key != "") printf "%s\t%s\t%s\n", key, sev, what
+      hdr = substr($0, 10)
+      n = split(hdr, parts, ":")
+      if (n >= 3) {
+        key = parts[1] ":" parts[2]
+        sev = parts[n]
+      } else {
+        key = hdr; sev = ""
+      }
       what = ""
       next
     }
@@ -59,31 +66,31 @@ if [ -n "$_json" ] && printf '%s' "$_json" | jq -e '.findings' >/dev/null 2>&1; 
       if (what == "") what = substr($0, 7)
       next
     }
-    END { if (key != "") print key "\t" what }
+    END { if (key != "") printf "%s\t%s\t%s\n", key, sev, what }
   ' | jq -R -s '
     split("\n")
     | map(select(length > 0))
     | map(split("\t"))
-    | map({(.[0]): .[1]})
+    | map({(.[0]): {severity: .[1], what: .[2]}})
     | add // {}
   ')
 
-  # Rebuild findings array: drop findings whose key is not in survivors;
-  # for survivors, if the validated WHAT differs from original title, append
-  # any `[...]` annotations to the body.
+  # Rebuild findings: drop missing keys; apply severity + append annotations.
   _new_json=$(printf '%s' "$_json" | jq --argjson survivors "$_survivors_json" '
     .findings |= (
       map(
         . as $f |
-        ("\($f.file):\($f.line):\($f.severity)") as $k |
-        $survivors[$k] as $new_what |
-        if $new_what == null then empty
+        ("\($f.file):\($f.line)") as $k |
+        $survivors[$k] as $match |
+        if $match == null then empty
         else
-          # Extract [xxx: ...] annotations from validated WHAT
-          ($new_what | [scan("\\[[a-z-]+: [^\\]]+\\]")] | join(" ")) as $annotations |
+          # Apply (possibly mutated) severity from validator output
+          (if $match.severity != "" then .severity = $match.severity else . end) as $f2 |
+          # Append any [xxx: ...] annotations to the body
+          ($match.what | [scan("\\[[a-z-]+: [^\\]]+\\]")] | join(" ")) as $annotations |
           if ($annotations | length) > 0 then
-            .body = (.body // "") + (if (.body // "") == "" then "" else " " end) + $annotations
-          else . end
+            $f2 | .body = (.body // "") + (if (.body // "") == "" then "" else " " end) + $annotations
+          else $f2 end
         end
       )
     )

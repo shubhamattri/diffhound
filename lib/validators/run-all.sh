@@ -16,6 +16,17 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 V="$ROOT/lib/validators"
 
-"$V/security-helper.sh" \
+# Pipeline order:
+#   1. checklist-execute  — Python AST; drops ModuleNotFoundError FPs first
+#      before content filters see them.
+#   2. security-helper    — narrow wording gate, high-confidence drops.
+#   3. dry-vs-import      — narrow wording gate.
+#   4. ref-exists         — broader wording-conditional drop / annotate pass.
+#   5. todo-deferral      — severity mutation runs AFTER drops so downstream
+#      validators see unmutated severity. round-diff isn't in this pipeline
+#      — it's invoked separately with access to the prior-findings state.
+"$V/checklist-execute.py" \
+  | "$V/security-helper.sh" \
   | "$V/dry-vs-import.sh" \
-  | "$V/ref-exists.sh"
+  | "$V/ref-exists.sh" \
+  | "$V/todo-deferral.sh"
