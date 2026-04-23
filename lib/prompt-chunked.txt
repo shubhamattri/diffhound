@@ -112,6 +112,10 @@ No unit test covers the headless path (`ctx.user` is null) that caused the origi
 - Timezone: UTC vs IST mismatch in cron SQL
 - Data shape mismatch: Object.entries/fromEntries/keys/values called on arrays, or Array methods (.map/.filter/.forEach) on plain objects. MUST Read the type definition or assignment of the variable to verify its actual shape before approving. This is BLOCKING if the operation produces wrong output silently.
 - Type-narrowing gaps: typeof checks that can never be true (e.g. typeof on array element that is always an object). Read the interface/type to verify.
+- State-dict / typed-channel bugs: when a read site gets `None` / undefined from a state object (`state.get(X)`, `state[X]`, `state.X`), do NOT immediately blame the read site or guess the producer. Trace BOTH directions before flagging:
+  (a) Producers — every `**splat` into the graph input, every node that returns `{X: ...}`, every call site constructing the initial state.
+  (b) Schema — the TypedDict / Pydantic / dataclass / channel declaration that defines which keys persist across transitions. LangGraph, Redux-style stores, and typed state machines silently DROP undeclared keys across node boundaries, even if a producer wrote them.
+  If X is not declared in the schema, that IS the root cause regardless of how many producer sites write it. Flag the schema file, not the read or write site. Misdiagnosing injection-missing when the real bug is a missing channel declaration wastes the implementer's time on the wrong file.
 
 # SCOPE RULES
 - ONLY review code CHANGED in this PR (lines with + or - prefix)
