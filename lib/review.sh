@@ -1838,7 +1838,7 @@ DIFF_SIZE=$(wc -c < "$DIFF_FILE")
 if [ "$DIFF_SIZE" -gt 150000 ]; then
   spinner_stop "Diff fetched (large: ${DIFF_SIZE} bytes — focused review)"
 else
-  spinner_stop "Diff fetched ($(echo "$DIFF_SIZE / 1024" | bc)KB)"
+  spinner_stop "Diff fetched ($(( DIFF_SIZE / 1024 ))KB)"
 fi
 
 # For re-reviews: fetch incremental diff (only changes since last review)
@@ -1932,13 +1932,13 @@ find "$REVIEW_CACHE_DIR" -name "rag-*.txt" -mtime +7 -delete 2>/dev/null || true
 if [ -f "$_RAG_CACHE_FILE" ]; then
   cp "$_RAG_CACHE_FILE" "$RAG_CONTEXT_FILE"
   RAG_SIZE=$(wc -c < "$RAG_CONTEXT_FILE" | tr -d ' ')
-  spinner_stop "RAG context loaded from cache ($(echo "$RAG_SIZE / 1024" | bc)KB)"
+  spinner_stop "RAG context loaded from cache ($(( RAG_SIZE / 1024 ))KB)"
 elif [ -f "$_RAG_SCRIPT" ] && $_TIMEOUT_CMD 60 bash "$_RAG_SCRIPT" \
     "$DIFF_FILE" "$REPO_PATH" "$PR_NUMBER" "$REVIEWER_LOGIN" \
     > "$RAG_CONTEXT_FILE" 2>/dev/null; then
   RAG_SIZE=$(wc -c < "$RAG_CONTEXT_FILE" | tr -d ' ')
   cp "$RAG_CONTEXT_FILE" "$_RAG_CACHE_FILE" 2>/dev/null || true
-  spinner_stop "RAG context ready ($(echo "$RAG_SIZE / 1024" | bc)KB) — cached"
+  spinner_stop "RAG context ready ($(( RAG_SIZE / 1024 ))KB) — cached"
 else
   spinner_stop "RAG context unavailable — proceeding with diff only"
   echo "" > "$RAG_CONTEXT_FILE"
