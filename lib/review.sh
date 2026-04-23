@@ -2958,12 +2958,20 @@ if [ "${DIFFHOUND_SKIP_VALIDATORS:-0}" != "1" ] \
     _count_findings() {
       local f="$1"
       [ -s "$f" ] || { echo 0; return; }
-      local n
-      n=$(_extract_json "$f" 2>/dev/null | jq '.findings | length' 2>/dev/null || echo "")
-      if [ -n "$n" ] && [ "$n" != "null" ]; then
-        echo "$n"; return
+      # JSON path: only attempt if _extract_json produces non-empty output.
+      # Piping empty output into jq makes it parse "" (empty JSON string),
+      # which yields `.findings | length` → 0 — a false zero that hides the
+      # LARGE-tier FINDING: lines from the grep fallback below.
+      local _extracted n
+      _extracted=$(_extract_json "$f" 2>/dev/null)
+      if [ -n "$_extracted" ]; then
+        n=$(printf '%s' "$_extracted" | jq '.findings | length' 2>/dev/null || echo "")
+        if [ -n "$n" ] && [ "$n" != "null" ]; then
+          echo "$n"; return
+        fi
       fi
-      grep -c '^FINDING:' "$f" 2>/dev/null || echo 0
+      # FINDING: format — bare (MEDIUM/SMALL) or indented (LARGE-tier Haiku merge)
+      grep -cE '^\s*FINDING:' "$f" 2>/dev/null || echo 0
     }
     _before=$(_count_findings "$CLAUDE_OUT")
     _after=$(_count_findings "$_VALIDATED_OUT")

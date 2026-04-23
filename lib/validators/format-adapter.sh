@@ -105,9 +105,15 @@ if [ -n "$_json" ] && printf '%s' "$_json" | jq -e '.findings' >/dev/null 2>&1; 
   exit 0
 fi
 
-# FINDING: path: pipe through validators as-is
-if printf '%s' "$INPUT" | grep -q '^FINDING:'; then
-  printf '%s' "$INPUT" | "$VALIDATORS_RUN"
+# FINDING: path — also handles LARGE-tier Haiku merge output where FINDING:
+# lines may be indented (Haiku doesn't always emit them at column 0) and are
+# wrapped in ### FINDINGS_START / ### FINDINGS_END markers.
+# Normalize whitespace-prefixed keywords to column 0 before piping so validators
+# can match the ^FINDING: / ^WHAT: / ^EVIDENCE: anchors they expect.
+if printf '%s' "$INPUT" | grep -qE '^\s*FINDING:|^### FINDINGS_START'; then
+  printf '%s' "$INPUT" \
+    | sed -E 's/^[[:space:]]+(FINDING:|WHAT:|EVIDENCE:|IMPACT:|OPTIONS:|UNVERIFIABLE:)/\1/' \
+    | "$VALIDATORS_RUN"
   exit 0
 fi
 
