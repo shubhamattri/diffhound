@@ -1,0 +1,25 @@
+### CHUNK_FILES
+api/handler.py
+
+### FINDINGS_START
+  FINDING: api/handler.py:6:BLOCKING
+  WHAT: `nonexistent_func` is duplicated from utils.py
+  EVIDENCE: line 6 defines nonexistent_func which already exists in utils.py
+  IMPACT: duplicate definitions cause confusion
+  OPTIONS:
+  1. Remove the duplicate
+  UNVERIFIABLE: no
+  FINDING: api/handler.py:6:SHOULD-FIX
+  WHAT: `process_request` does not validate input schema
+  EVIDENCE: data.get("value") can silently return None
+  IMPACT: downstream None propagation
+  OPTIONS:
+  1. Add schema validation
+  UNVERIFIABLE: no
+### FINDINGS_END
+
+### SCORECARD_START
+Security: 20/25 — no major issues
+Tests: 10/20 — missing coverage
+Total: 30/100 — REQUEST_CHANGES
+### SCORECARD_END
