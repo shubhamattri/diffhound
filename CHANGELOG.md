@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.5.1] - 2026-04-23 — Consumer-check for "breaking API change" findings
+
+### Added
+- **`lib/validators/consumer-check.sh`** — downgrades BLOCKING/SHOULD-FIX
+  findings that claim an API shape/contract change is "breaking" when no
+  in-repo consumer of the named endpoint/symbol can be found. Downgrades
+  to `OPEN_QUESTION` (per v0.5.0 severity model) and annotates with
+  "no in-repo consumer found; confirm external consumers before blocking".
+  Conservative match: trigger phrase + extractable target + zero grep hits
+  outside the flagged file. Non-matches pass through unchanged.
+- **Prompt rule** in `lib/prompt-chunked.txt` FINDING RULES: before flagging
+  a response-shape change as BLOCKING for broken consumers, grep the repo.
+  Zero callers → file as OPEN_QUESTION, not BLOCKING.
+
+### Context
+- Claro PR #127 (Apr 23 2026, v0.4.2) re-raised "list_conversations
+  envelope shape is breaking" across 6 review passes. The flagged endpoint
+  had zero in-repo consumers. Each pass had to be pushed back manually with
+  the same grep evidence. v0.5.0 already introduced OPEN_QUESTION as the
+  right home for this class of concern; v0.5.1 wires the validator so the
+  downgrade happens mechanically instead of via author pushback.
+
+### Tests
+- 30/30 fixture tests pass (up from 27/27).
+- 3 new fixtures for `consumer-check`: `downgrades-breaking-no-consumer`,
+  `keeps-breaking-with-consumer`, `passes-through-without-trigger`.
+
 ## [0.5.0] - 2026-04-23 — Citation discipline
 
 ### Added

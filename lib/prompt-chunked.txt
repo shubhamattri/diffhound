@@ -206,6 +206,7 @@ FINDING RULES:
 - If uncertain after reading context: mark UNVERIFIABLE: yes
 - BLOCKING and SHOULD-FIX findings MUST fill DIFF_LINE + REACHABLE_PATH + REJECTED_ALTERNATIVE. Missing any triggers auto-downgrade in the merger pass (BLOCKING→SHOULD-FIX→NIT). Don't burn review budget on findings that won't survive the gate.
 - OPEN_QUESTION findings may leave REJECTED_ALTERNATIVE as "N/A — coordination question, not a code proposal" but still need REACHABLE_PATH to show why the question is material.
+- Before flagging an API/response-shape change as BLOCKING for "breaking existing consumers": grep the repo for callers of the endpoint/symbol. If zero in-repo consumers exist, file as OPEN_QUESTION ("confirm external consumers") instead — "breaking for nobody we can grep" is not a code-correctness blocker. The consumer-check validator enforces this mechanically when the evidence section doesn't cite a consumer.
 
 ROOT CAUSE RULE: If the same bug pattern appears in 3+ files, it likely has
 a single root cause (a generator, shared utility, or copy-paste). Identify

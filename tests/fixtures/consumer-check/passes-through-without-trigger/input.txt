@@ -1,0 +1,9 @@
+FINDING: api/foo.py:10:BLOCKING
+WHAT: missing null check on `response` before dereferencing
+EVIDENCE: api/foo.py:10
+IMPACT: AttributeError on malformed payload
+OPTIONS:
+1. add null guard
+DIFF_LINE: api/foo.py:10
+REACHABLE_PATH: request handler receives empty body
+REJECTED_ALTERNATIVE: pydantic validation catches it earlier but not for this path
