@@ -2953,10 +2953,24 @@ if [ "${DIFFHOUND_SKIP_VALIDATORS:-0}" != "1" ] \
   if DIFFHOUND_REPO="${DIFFHOUND_REPO:-${REPO_PATH:-$(pwd)}}" \
      "${LIB_DIR}/validators/format-adapter.sh" < "$CLAUDE_OUT" > "$_VALIDATED_OUT" 2>/dev/null \
      && [ -s "$_VALIDATED_OUT" ]; then
-    _before=$(jq '.findings | length' < <(_extract_json "$CLAUDE_OUT" 2>/dev/null || echo '{}') 2>/dev/null || echo "?")
-    _after=$(jq '.findings | length' < <(_extract_json "$_VALIDATED_OUT" 2>/dev/null || echo '{}') 2>/dev/null || echo "?")
-    if [ "$_before" != "?" ] && [ "$_after" != "?" ] && [ "$_before" != "$_after" ]; then
+    # Count findings in either format (JSON .findings[] OR raw FINDING: lines).
+    # LARGE tier emits FINDING:-format after chunked merge; MEDIUM/SMALL emit JSON.
+    _count_findings() {
+      local f="$1"
+      [ -s "$f" ] || { echo 0; return; }
+      local n
+      n=$(_extract_json "$f" 2>/dev/null | jq '.findings | length' 2>/dev/null || echo "")
+      if [ -n "$n" ] && [ "$n" != "null" ]; then
+        echo "$n"; return
+      fi
+      grep -c '^FINDING:' "$f" 2>/dev/null || echo 0
+    }
+    _before=$(_count_findings "$CLAUDE_OUT")
+    _after=$(_count_findings "$_VALIDATED_OUT")
+    if [ "$_before" != "$_after" ]; then
       echo "  🛡  Validators dropped $((_before - _after)) finding(s) (${_before} → ${_after})" >&2
+    else
+      echo "  🛡  Validators processed ${_before} finding(s), no drops" >&2
     fi
     mv "$_VALIDATED_OUT" "$CLAUDE_OUT"
   else
