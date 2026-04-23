@@ -2996,6 +2996,9 @@ if [ "${DIFFHOUND_SKIP_VALIDATORS:-0}" != "1" ] \
     else
       echo "  🛡  Validators processed ${_before} finding(s), no drops" >&2
     fi
+    # Track whether all findings were dropped — voice rewrite must not hallucinate
+    # COMMENT: lines from prose when 0 validated findings remain.
+    _VALIDATOR_FINDING_COUNT="$_after"
     mv "$_VALIDATED_OUT" "$CLAUDE_OUT"
   else
     rm -f "$_VALIDATED_OUT"
@@ -4016,7 +4019,16 @@ fi
   fi
   echo ""
   echo "## ENGINEERING FINDINGS (Claude)"
-  cat "$CLAUDE_OUT"
+  # If validators dropped all findings to 0, pass only the summary prose.
+  # Do NOT cat the full CLAUDE_OUT — the LLM would hallucinate COMMENT: lines
+  # from the prose text with invalid line numbers, producing comments that GitHub
+  # rejects. With 0 validated findings there is nothing to post inline.
+  if [ "${_VALIDATOR_FINDING_COUNT:-1}" = "0" ] && [ -z "${_RUN_PEER_REVIEW:-}" ]; then
+    echo "(all findings were dropped by validators — 0 inline comments to post)"
+    echo "DO NOT produce any COMMENT: lines. Produce only the ### SUMMARY_START block."
+  else
+    cat "$CLAUDE_OUT"
+  fi
 
   if [ "$_RUN_PEER_REVIEW" = true ] && [ -n "${_MERGED_FINDINGS_FILE:-}" ] && [ -s "${_MERGED_FINDINGS_FILE:-/dev/null}" ]; then
     # Use pre-merged findings instead of raw peer outputs (smaller input for Haiku)
