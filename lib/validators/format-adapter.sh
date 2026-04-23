@@ -42,7 +42,12 @@ if [ -n "$_json" ] && printf '%s' "$_json" | jq -e '.findings' >/dev/null 2>&1; 
     "FINDING: \(.file):\(.line):\(.severity)\nWHAT: \(.title // "")\(if (.body // "") != "" then ". \(.body)" else "" end)"
   ')
 
-  _validated=$(printf '%s\n' "$_findings_text" | "$VALIDATORS_RUN" 2>/dev/null || true)
+  _validator_log=$(mktemp)
+  _validated=$(printf '%s\n' "$_findings_text" | "$VALIDATORS_RUN" 2>"$_validator_log" || true)
+  # Forward validator drop/annotate messages to stderr (visible in CI logs).
+  grep -E '^\[(ref-exists|dry-vs-import|todo-deferral|security-helper|checklist)' \
+    "$_validator_log" >&2 2>/dev/null || true
+  rm -f "$_validator_log"
 
   # Parse validated output into { "file:line" → {severity, what} }.
   # Keying on (file, line) — not severity — because todo-deferral mutates

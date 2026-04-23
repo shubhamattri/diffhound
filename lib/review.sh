@@ -1838,7 +1838,7 @@ DIFF_SIZE=$(wc -c < "$DIFF_FILE")
 if [ "$DIFF_SIZE" -gt 150000 ]; then
   spinner_stop "Diff fetched (large: ${DIFF_SIZE} bytes — focused review)"
 else
-  spinner_stop "Diff fetched ($(echo "$DIFF_SIZE / 1024" | bc)KB)"
+  spinner_stop "Diff fetched ($(( DIFF_SIZE / 1024 ))KB)"
 fi
 
 # For re-reviews: fetch incremental diff (only changes since last review)
@@ -1932,13 +1932,13 @@ find "$REVIEW_CACHE_DIR" -name "rag-*.txt" -mtime +7 -delete 2>/dev/null || true
 if [ -f "$_RAG_CACHE_FILE" ]; then
   cp "$_RAG_CACHE_FILE" "$RAG_CONTEXT_FILE"
   RAG_SIZE=$(wc -c < "$RAG_CONTEXT_FILE" | tr -d ' ')
-  spinner_stop "RAG context loaded from cache ($(echo "$RAG_SIZE / 1024" | bc)KB)"
+  spinner_stop "RAG context loaded from cache ($(( RAG_SIZE / 1024 ))KB)"
 elif [ -f "$_RAG_SCRIPT" ] && $_TIMEOUT_CMD 60 bash "$_RAG_SCRIPT" \
     "$DIFF_FILE" "$REPO_PATH" "$PR_NUMBER" "$REVIEWER_LOGIN" \
     > "$RAG_CONTEXT_FILE" 2>/dev/null; then
   RAG_SIZE=$(wc -c < "$RAG_CONTEXT_FILE" | tr -d ' ')
   cp "$RAG_CONTEXT_FILE" "$_RAG_CACHE_FILE" 2>/dev/null || true
-  spinner_stop "RAG context ready ($(echo "$RAG_SIZE / 1024" | bc)KB) — cached"
+  spinner_stop "RAG context ready ($(( RAG_SIZE / 1024 ))KB) — cached"
 else
   spinner_stop "RAG context unavailable — proceeding with diff only"
   echo "" > "$RAG_CONTEXT_FILE"
@@ -2996,6 +2996,9 @@ if [ "${DIFFHOUND_SKIP_VALIDATORS:-0}" != "1" ] \
     else
       echo "  🛡  Validators processed ${_before} finding(s), no drops" >&2
     fi
+    # Track whether all findings were dropped — voice rewrite must not hallucinate
+    # COMMENT: lines from prose when 0 validated findings remain.
+    _VALIDATOR_FINDING_COUNT="$_after"
     mv "$_VALIDATED_OUT" "$CLAUDE_OUT"
   else
     rm -f "$_VALIDATED_OUT"
@@ -4016,7 +4019,16 @@ fi
   fi
   echo ""
   echo "## ENGINEERING FINDINGS (Claude)"
-  cat "$CLAUDE_OUT"
+  # If validators dropped all findings to 0, pass only the summary prose.
+  # Do NOT cat the full CLAUDE_OUT — the LLM would hallucinate COMMENT: lines
+  # from the prose text with invalid line numbers, producing comments that GitHub
+  # rejects. With 0 validated findings there is nothing to post inline.
+  if [ "${_VALIDATOR_FINDING_COUNT:-1}" = "0" ] && [ -z "${_RUN_PEER_REVIEW:-}" ]; then
+    echo "(all findings were dropped by validators — 0 inline comments to post)"
+    echo "DO NOT produce any COMMENT: lines. Produce only the ### SUMMARY_START block."
+  else
+    cat "$CLAUDE_OUT"
+  fi
 
   if [ "$_RUN_PEER_REVIEW" = true ] && [ -n "${_MERGED_FINDINGS_FILE:-}" ] && [ -s "${_MERGED_FINDINGS_FILE:-/dev/null}" ]; then
     # Use pre-merged findings instead of raw peer outputs (smaller input for Haiku)

@@ -17,6 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       gnupg \
       gawk \
       jq \
+      python3 \
       xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
