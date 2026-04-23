@@ -1,0 +1,11 @@
+FINDING: api/routers/conversations.py:81:OPEN_QUESTION
+WHAT: response shape changed from flat array to wrapped object — breaking API change for existing consumers of `/api/conversations` [consumer-check: no in-repo consumer found for `/api/conversations`; confirm external consumers before blocking]
+EVIDENCE: api/routers/conversations.py:81
+IMPACT: any frontend depending on the array return will crash
+OPTIONS:
+1. keep the flat array
+2. coordinate a deploy
+DIFF_LINE: api/routers/conversations.py:81
+REACHABLE_PATH: admin dashboard loads via GET /api/conversations
+REJECTED_ALTERNATIVE: keeping flat array re-introduces the .all() OOM
+

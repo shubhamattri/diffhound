@@ -1,0 +1,9 @@
+FINDING: api/routers/users.py:42:BLOCKING
+WHAT: response shape change on `/api/users` is a breaking API change for existing callers
+EVIDENCE: api/routers/users.py:42
+IMPACT: dashboard UserList component will break
+OPTIONS:
+1. version the endpoint
+DIFF_LINE: api/routers/users.py:42
+REACHABLE_PATH: dashboard fetches /api/users on load
+REJECTED_ALTERNATIVE: in-place change without versioning loses the prior contract
