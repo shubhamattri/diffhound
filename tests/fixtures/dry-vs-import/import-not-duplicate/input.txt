@@ -1,0 +1,7 @@
+FINDING: api/routers/widget.py:66:NIT
+WHAT: `_compute_email_hash` duplicated from orchestrator.py:38-55
+EVIDENCE: widget.py:66 and orchestrator.py:38-55
+IMPACT: DRY violation
+OPTIONS:
+1. just import from orchestrator
+UNVERIFIABLE: no
