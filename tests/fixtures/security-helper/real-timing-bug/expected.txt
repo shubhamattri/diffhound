@@ -1,0 +1,7 @@
+FINDING: bad.py:2:SHOULD-FIX
+WHAT: token comparison uses == (timing attack)
+EVIDENCE: bad.py:2
+IMPACT: side-channel leak
+OPTIONS:
+1. use hmac.compare_digest
+UNVERIFIABLE: no
