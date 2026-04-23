@@ -11,7 +11,12 @@ set -uo pipefail
 
 # Wordings that assert the symbol IS already in the flagged file. If symbol
 # is missing AND wording matches → DROP. Otherwise ANNOTATE.
-EXISTENCE_WORDS='defined|duplicate|duplicated|mutates|overrides|redefines|already exists|already defined'
+#
+# Expanded 2026-04-23 to catch comparison-claim hallucinations from PR #127:
+# "bypasses X's config", "inconsistent with Y", "deviates from the Z pattern"
+# — these all assert the referenced symbol exists. When it doesn't, the
+# finding is manufacturing inconsistency from thin air.
+EXISTENCE_WORDS='defined|duplicate|duplicated|mutates|overrides|redefines|already exists|already defined|bypasses|inconsistent with|deviates from|differs from|breaks the .* pattern|should follow the pattern|unlike the existing'
 
 block=""
 what_line=""

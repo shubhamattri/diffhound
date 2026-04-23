@@ -1,0 +1,7 @@
+FINDING: widget.py:42:NIT
+WHAT: new `AsyncClient` per request — consider reusing a module-level client
+EVIDENCE: widget.py:42
+IMPACT: connection-pool churn
+OPTIONS:
+1. extract shared client
+UNVERIFIABLE: no

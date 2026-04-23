@@ -1,0 +1,7 @@
+FINDING: database.py:45:SHOULD-FIX
+WHAT: Session(engine) bypasses the SessionLocal autoflush config [citation-discipline: downgraded from BLOCKING; missing DIFF_LINE REACHABLE_PATH REJECTED_ALTERNATIVE]
+EVIDENCE: database.py:45
+IMPACT: inconsistent session behavior
+OPTIONS:
+1. use SessionLocal instead
+UNVERIFIABLE: no

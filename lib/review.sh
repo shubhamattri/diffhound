@@ -1650,7 +1650,11 @@ YOUR TASK:
 5. Produce a single SCORECARD_START...SCORECARD_END with overall scores
 6. Include a CROSS_FILE_RESOLUTION section showing how each cross-file note was resolved (or marked unverifiable)
 
-Use the same output format as the individual chunks but with a unified scorecard:
+Use the same output format as the individual chunks but with a unified scorecard.
+
+CITATION DISCIPLINE — non-negotiable for merge output:
+- BLOCKING and SHOULD-FIX findings MUST carry DIFF_LINE, REACHABLE_PATH, and REJECTED_ALTERNATIVE fields. Preserve them verbatim when merging chunks. If a chunk omitted any, auto-downgrade (BLOCKING->SHOULD-FIX->NIT) and annotate WHAT with [citation-discipline: downgraded — missing FIELD].
+- OPEN_QUESTION severity is for coordination/process concerns (e.g. 'is there an out-of-repo consumer?'). These do NOT count in the Blocking/ShouldFix/Nits scorecard lists. Track them under OpenQuestions separately.
 
 ### FINDINGS_START
 FINDING: file/path.ts:LINE:SEVERITY
@@ -1658,6 +1662,9 @@ WHAT: ...
 EVIDENCE: ...
 IMPACT: ...
 OPTIONS: ...
+DIFF_LINE: ...          (required for BLOCKING/SHOULD-FIX)
+REACHABLE_PATH: ...     (required for BLOCKING/SHOULD-FIX; required for OPEN_QUESTION too — shows why the question is material)
+REJECTED_ALTERNATIVE: ... (required for BLOCKING/SHOULD-FIX; 'N/A — coordination question' for OPEN_QUESTION)
 UNVERIFIABLE: ...
 ### FINDINGS_END
 
@@ -1670,9 +1677,10 @@ Readability: X/15 — [reason]
 Compatibility: X/15 — [reason]
 Total: X/100 — REQUEST_CHANGES|APPROVE|COMMENT
 
-Blocking: [file:line list or NONE]
+Blocking: [file:line list or NONE — code-correctness only, not coordination questions]
 ShouldFix: [file:line list or NONE]
 Nits: [file:line list or NONE]
+OpenQuestions: [file:line list or NONE — coordination/process concerns; do NOT count against the Total score]
 Checklist: [verification steps]
 ### SCORECARD_END"
 
@@ -1720,8 +1728,8 @@ jq -r --arg login "$REVIEWER_LOGIN" '
   [.[] | select(.in_reply_to_id == null and .user == $login and .path != null and .line != null)]
   | .[]
   | . as $c
-  | ($c.body | capture("\\*\\*(?<sev>BLOCKING|SHOULD-FIX|NIT)\\*\\*") // {sev:"SHOULD-FIX"}) as $sv
-  | ($c.body | gsub("\\*\\*(?:BLOCKING|SHOULD-FIX|NIT)\\*\\*\\s*[^a-zA-Z`]*"; "")
+  | ($c.body | capture("\\*\\*(?<sev>BLOCKING|SHOULD-FIX|NIT|OPEN_QUESTION)\\*\\*") // {sev:"SHOULD-FIX"}) as $sv
+  | ($c.body | gsub("\\*\\*(?:BLOCKING|SHOULD-FIX|NIT|OPEN_QUESTION)\\*\\*\\s*[^a-zA-Z`]*"; "")
              | split(". ")[0] | ltrimstr(" ") | rtrimstr(" ")) as $what
   | "FINDING: \($c.path):\($c.line):\($sv.sev)\nWHAT: \($what)\n"
 ' "$EXISTING_COMMENTS_FILE" 2>/dev/null > "$PRIOR_FINDINGS_FILE" || true
@@ -2327,6 +2335,11 @@ Verdict is severity-based, NOT score-based:
 - Any BLOCKING findings → REQUEST_CHANGES
 - SHOULD-FIX findings only (no BLOCKING) → COMMENT
 - NITs only or clean → APPROVE
+- OPEN_QUESTION findings alone → COMMENT (questions need answers, not code changes; don\'t escalate to REQUEST_CHANGES just because a coordination question exists)
+
+CITATION DISCIPLINE (critical — applies to every BLOCKING/SHOULD-FIX you emit):
+- Every BLOCKING/SHOULD-FIX finding must include diff_line, reachable_path, rejected_alternative (see JSON schema below). Missing any → downgrade yourself now rather than let the pipeline downgrade you later.
+- OPEN_QUESTION severity is for coordination/process concerns that must be answered before merge but aren\'t code fixes (e.g. "is there an out-of-repo consumer of this endpoint?", "has ops been notified?"). Use it instead of inflating a question into a BLOCKER. OPEN_QUESTION does NOT count against the scorecard.
 
 # REQUIRED OUTPUT FORMAT
 
@@ -2375,6 +2388,9 @@ LINE NUMBER RULES (critical — wrong lines cause GitHub to reject the comment):
       "impact": "Attacker can execute arbitrary SQL via claimId parameter",
       "suggestion": "Use parameterized query: db.raw('SELECT * FROM claims WHERE id = ?', [claimId])",
       "options": ["Use parameterized query", "Use Knex query builder .where()"],
+      "diff_line": "+  const result = await db.raw(`SELECT * FROM claims WHERE id = ${claimId}`);",
+      "reachable_path": "claimsHandler.ts:45 is the sole path for /api/claims/:id; claimId comes from req.params and is not validated anywhere upstream",
+      "rejected_alternative": "Escape claimId via a custom sanitizer — rejected because Knex parameterized queries already exist in this file (line 22) and are the codebase-standard approach; custom sanitizer adds a new untrusted attack surface",
       "unverifiable": false
     }
   ],
@@ -3937,7 +3953,10 @@ Use this structure (omit empty sections):
 ### Nits
 - `file.ts:LINE` — [suggestion]
 
-This makes it scannable in 5 seconds. Blockers jump out. Nits don't pollute the signal.
+### Open Questions (needs an answer before merge, not a code change)
+- `file.ts:LINE` — [coordination/process question the author should answer]
+
+This makes it scannable in 5 seconds. Blockers jump out. Nits don't pollute the signal. Open Questions are parked separately so they don't inflate blocker count.
 
 ## YOUR OUTPUT
 
@@ -3959,6 +3978,9 @@ REPLY: COMMENT_ID:path/to/file.ts:LINE — [reply to existing thread, if re-revi
 ### Nits
 - `file.ts:LINE` — [suggestion]
 
+### Open Questions (needs an answer, not a code change)
+- `file.ts:LINE` — [coordination/process question]
+
 [omit empty sections. brief genuine close if warranted.]
 
 [if re-review: open with thread resolution status (X addressed, Y still open), then any new findings grouped by severity as above]
@@ -3972,7 +3994,7 @@ REPLY: COMMENT_ID:path/to/file.ts:LINE — [reply to existing thread, if re-revi
 | Performance (15%) | X/15 | ... |
 | Readability (15%) | X/15 | ... |
 | Compatibility (15%) | X/15 | ... |
-| **Total** | **X/100** | **VERDICT** (any BLOCKING → REQUEST_CHANGES, SHOULD-FIX only → COMMENT, NITs/clean → APPROVE) |
+| **Total** | **X/100** | **VERDICT** (any BLOCKING → REQUEST_CHANGES, SHOULD-FIX only → COMMENT, NITs/OPEN_QUESTION/clean → APPROVE) |
 
 ## Verification & Test Checklist
 - [ ] [exact command or step]
@@ -3986,7 +4008,7 @@ STATIC_SYS_EOF
 # ── Dynamic user message (findings + examples — not cached) ───────────────────
 _USER_TMP=$(mktemp -t "pr-${PR_NUMBER}-user.XXXXXX")
 
-_SEVERITY_RULE="CRITICAL RULE — READ FIRST: Never start a comment body with a severity label or emoji flag. The word BLOCKING, BLOCKER, SHOULD-FIX, or NIT must NEVER appear at the start of a comment body. It belongs only in the COMMENT: metadata tag. No emoji prefixes either. For ALL severities: dive straight into the observation. No formulaic opener, no visual flag."
+_SEVERITY_RULE="CRITICAL RULE — READ FIRST: Never start a comment body with a severity label or emoji flag. The word BLOCKING, BLOCKER, SHOULD-FIX, NIT, or OPEN_QUESTION must NEVER appear at the start of a comment body. It belongs only in the COMMENT: metadata tag. No emoji prefixes either. For ALL severities: dive straight into the observation. No formulaic opener, no visual flag."
 
 if [ "$_RUN_PEER_REVIEW" = true ]; then
   _MERGE_INSTRUCTION="Here are pre-merged engineering findings (already deduplicated across models). Your ONLY job is to rewrite each finding as a COMMENT: line in the engineer's voice. Do NOT merge, synthesize, or analyze — just rewrite the voice.

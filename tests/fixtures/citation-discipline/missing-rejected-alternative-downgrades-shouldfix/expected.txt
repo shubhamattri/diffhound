@@ -1,0 +1,9 @@
+FINDING: widget.py:350:NIT
+WHAT: no try/except around DB write [citation-discipline: downgraded from SHOULD-FIX; missing REJECTED_ALTERNATIVE]
+EVIDENCE: widget.py:350
+IMPACT: unhandled exception leaks to response
+OPTIONS:
+1. wrap in try/except
+DIFF_LINE: +  session.commit()
+REACHABLE_PATH: only writer in rotate_token flow
+UNVERIFIABLE: no

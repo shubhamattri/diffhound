@@ -1,0 +1,10 @@
+FINDING: widget.py:100:SHOULD-FIX
+WHAT: race condition on concurrent delete [citation-discipline: downgraded from BLOCKING; missing REACHABLE_PATH REJECTED_ALTERNATIVE]
+EVIDENCE: widget.py:100
+IMPACT: None dereference
+OPTIONS:
+1. add None guard
+DIFF_LINE: +  conv = session.get(Conversation, conv_id)
+REACHABLE_PATH:
+REJECTED_ALTERNATIVE:
+UNVERIFIABLE: no

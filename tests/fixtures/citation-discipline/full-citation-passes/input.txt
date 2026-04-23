@@ -1,0 +1,10 @@
+FINDING: widget.py:349:BLOCKING
+WHAT: session.commit before response serialization risks stale-token window on network failure
+EVIDENCE: widget.py:349
+IMPACT: client retains stale token after network error
+OPTIONS:
+1. move commit after response
+DIFF_LINE: +  session.commit()
+REACHABLE_PATH: rotate_token:347 is the only writer; grep shows no other commit point in this flow
+REJECTED_ALTERNATIVE: commit-after-response loses rotated tokens if response succeeds but commit fails — strictly worse failure mode
+UNVERIFIABLE: no
