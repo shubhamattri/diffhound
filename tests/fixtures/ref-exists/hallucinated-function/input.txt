@@ -1,0 +1,7 @@
+FINDING: api/agent/orchestrator.py:358:NIT
+WHAT: `_populate_working_memory` mutates state in place
+EVIDENCE: orchestrator.py:358
+IMPACT: downstream nodes see partial state
+OPTIONS:
+1. copy dict before mutating
+UNVERIFIABLE: no

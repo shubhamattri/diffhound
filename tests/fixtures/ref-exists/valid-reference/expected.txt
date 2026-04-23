@@ -1,0 +1,7 @@
+FINDING: api/agent/orchestrator.py:1:NIT
+WHAT: `_run_graph` could be hoisted
+EVIDENCE: orchestrator.py:1
+IMPACT: readability
+OPTIONS:
+1. move to module scope
+UNVERIFIABLE: no

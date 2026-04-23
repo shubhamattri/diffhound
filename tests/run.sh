@@ -46,10 +46,11 @@ for vdir in "$FIXTURES"/*/; do
     fi
 
     # Optional: prior-findings file for round-diff
-    prior_env=()
-    [ -f "$case_dir/prior.txt" ] && prior_env=(DIFFHOUND_PRIOR_FINDINGS="$case_dir/prior.txt")
-
-    actual=$(env DIFFHOUND_REPO="$repo" "${prior_env[@]}" "$script" < "$input" 2>/dev/null)
+    if [ -f "$case_dir/prior.txt" ]; then
+      actual=$(env DIFFHOUND_REPO="$repo" DIFFHOUND_PRIOR_FINDINGS="$case_dir/prior.txt" "$script" < "$input" 2>/dev/null)
+    else
+      actual=$(env DIFFHOUND_REPO="$repo" "$script" < "$input" 2>/dev/null)
+    fi
     expected_content=$(cat "$expected")
     if [ "$actual" = "$expected_content" ]; then
       echo "PASS  $vname/$cname"
