@@ -1,5 +1,28 @@
 # Changelog
 
+## [Unreleased] — Sweep fallback
+
+### Added
+- **`bin/diffhound-sweep`** — poller that runs outside GitHub Actions and
+  reviews unreviewed open PRs by calling the GitHub REST API directly.
+  Single-instance via atomic `mkdir` lock. Per-`(repo, pr, sha)` state
+  prevents duplicate reviews; 3-strike cap prevents infinite crash loops
+  on a commit that deterministically breaks the binary; state key includes
+  SHA so a new push automatically retries.
+- **`docs/SWEEP.md`** — install doc with systemd timer and cron variants,
+  env knobs (`DIFFHOUND_SWEEP_MAX_ATTEMPTS`, `DIFFHOUND_SWEEP_GRACE_MIN`,
+  `DIFFHOUND_SWEEP_PR_LIMIT`), state layout, observability, troubleshooting.
+
+### Context
+- Monorepo (Apr 23-24 2026) stopped receiving `github-actions` check-suites
+  for pushes despite webhooks still reaching Netlify / Cloudflare / Sonar.
+  Runners were online and idle. Toggle-off/on of Actions did not clear
+  the throttle. No remediation surface accessible without GitHub Support.
+  The sweep provides an orthogonal review path that does not depend on
+  Actions event delivery.
+- Also covers runner crashes mid-review and binary `exit 1` failures
+  (3-strike cap → silent thereafter until next push).
+
 ## [0.5.1] - 2026-04-23 — Consumer-check for "breaking API change" findings
 
 ### Added
