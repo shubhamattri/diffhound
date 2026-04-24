@@ -83,6 +83,13 @@ diffhound 1234 --fast --auto-post
 diffhound 1234 --learn
 ```
 
+### Fallback sweep
+
+`bin/diffhound-sweep` polls open PRs via the GitHub REST API and invokes
+diffhound on anything that hasn't been reviewed yet. Independent of
+GitHub Actions — use it as a safety net when event-driven workflows drop
+events or get throttled. See [`docs/SWEEP.md`](docs/SWEEP.md).
+
 ## Configuration
 
 ```bash

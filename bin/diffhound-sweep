@@ -1,0 +1,174 @@
+#!/bin/bash
+# diffhound-sweep — fallback reviewer that polls GitHub for unreviewed PRs
+#
+# Motivation: when GitHub Actions drops webhook events or the repo-side
+# `pull_request` workflow is throttled/broken, event-driven diffhound stops
+# firing and reviewers have no signal. This sweep polls the GitHub REST API
+# directly (independent of Actions) and runs diffhound on any open human PR
+# whose HEAD SHA hasn't been reviewed yet.
+#
+# Intended to run from cron/systemd on a host that already has diffhound
+# installed and `gh` authenticated — typically the same VM the runner SSHes
+# into.
+#
+# Configuration:
+#   $HOME/.diffhound-sweep/repos.txt  — one "owner/name" per line
+#
+# State / artefacts:
+#   $HOME/.diffhound-sweep/state/     — per (repo,pr,sha) markers
+#   $HOME/.diffhound-sweep/sweep.log  — append-only log
+#   $HOME/.diffhound-sweep/sweep.lock — lock dir (single-instance guard)
+#
+# Env overrides:
+#   DIFFHOUND_SWEEP_HOME          (default: $HOME/.diffhound-sweep)
+#   DIFFHOUND_SWEEP_MAX_ATTEMPTS  (default: 3)   stop retrying a SHA after N fails
+#   DIFFHOUND_SWEEP_PR_LIMIT      (default: 30)  gh pr list --limit
+#   DIFFHOUND_SWEEP_GRACE_MIN     (default: 10)  skip commits younger than N min
+#                                                  so the event-driven path wins
+#                                                  the race when it's healthy
+#   DIFFHOUND_BIN                 (default: <repo>/bin/diffhound)
+
+set -uo pipefail
+
+SWEEP_HOME="${DIFFHOUND_SWEEP_HOME:-$HOME/.diffhound-sweep}"
+CONFIG_FILE="$SWEEP_HOME/repos.txt"
+STATE_DIR="$SWEEP_HOME/state"
+LOG_FILE="$SWEEP_HOME/sweep.log"
+LOCK_FILE="$SWEEP_HOME/sweep.lock"
+MAX_ATTEMPTS="${DIFFHOUND_SWEEP_MAX_ATTEMPTS:-3}"
+PR_LIMIT="${DIFFHOUND_SWEEP_PR_LIMIT:-30}"
+GRACE_MIN="${DIFFHOUND_SWEEP_GRACE_MIN:-10}"
+
+DIFFHOUND_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DIFFHOUND_BIN="${DIFFHOUND_BIN:-$DIFFHOUND_ROOT/bin/diffhound}"
+
+mkdir -p "$STATE_DIR"
+
+_log() {
+  printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" | tee -a "$LOG_FILE" >&2
+}
+
+if [ ! -x "$DIFFHOUND_BIN" ]; then
+  _log "diffhound binary not executable at $DIFFHOUND_BIN — aborting"
+  exit 1
+fi
+
+if [ ! -f "$CONFIG_FILE" ]; then
+  _log "no repo list at $CONFIG_FILE — create it with one 'owner/name' per line"
+  exit 1
+fi
+
+if ! command -v gh >/dev/null 2>&1; then
+  _log "gh CLI not found on PATH — aborting"
+  exit 1
+fi
+
+# ── Single-instance guard (portable: mkdir is atomic on POSIX) ──
+if ! mkdir "$LOCK_FILE" 2>/dev/null; then
+  # Stale lock detection: if holder PID is gone, break and retake
+  STALE_PID=$(cat "$LOCK_FILE/pid" 2>/dev/null || echo "")
+  if [ -n "$STALE_PID" ] && ! kill -0 "$STALE_PID" 2>/dev/null; then
+    _log "stale lock from pid=$STALE_PID — breaking"
+    rm -rf "$LOCK_FILE"
+    mkdir "$LOCK_FILE" 2>/dev/null || { _log "lost race on stale lock — exiting"; exit 0; }
+  else
+    _log "another sweep is running (pid=${STALE_PID:-unknown}) — exiting"
+    exit 0
+  fi
+fi
+echo $$ > "$LOCK_FILE/pid"
+trap 'rm -rf "$LOCK_FILE"' EXIT INT TERM
+
+_log "sweep start"
+
+# ── Age guard: skip commits younger than GRACE_MIN minutes ──
+# Portable epoch converter: GNU date uses -d, BSD/macOS uses -j -f
+_iso_to_epoch() {
+  if date -d "$1" +%s >/dev/null 2>&1; then
+    date -d "$1" +%s
+  else
+    date -j -f "%Y-%m-%dT%H:%M:%SZ" "$1" +%s 2>/dev/null || echo 0
+  fi
+}
+
+NOW_EPOCH=$(date -u +%s)
+GRACE_SEC=$((GRACE_MIN * 60))
+
+while IFS= read -r LINE || [ -n "$LINE" ]; do
+  # Skip blank/comment lines
+  REPO="${LINE%%#*}"
+  REPO="${REPO//[[:space:]]/}"
+  [ -z "$REPO" ] && continue
+
+  if ! [[ "$REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+    _log "skipping malformed repo spec: $LINE"
+    continue
+  fi
+
+  _log "repo=$REPO scanning"
+
+  PRS=$(gh pr list --repo "$REPO" --state open --limit "$PR_LIMIT" \
+    --json number,isDraft,title,author,headRefOid,updatedAt 2>/dev/null)
+
+  if [ -z "$PRS" ]; then
+    _log "repo=$REPO gh pr list returned empty — check auth / repo access"
+    continue
+  fi
+
+  # Filter: non-draft, non-bot author, no [skip review] tag
+  FILTERED=$(echo "$PRS" | jq -r '
+    .[]
+    | select(.isDraft == false)
+    | select(.author.is_bot != true)
+    | select((.title | test("\\[skip review\\]"; "i")) | not)
+    | "\(.number)\t\(.headRefOid)\t\(.updatedAt)"
+  ')
+
+  while IFS=$'\t' read -r PR SHA UPDATED; do
+    [ -z "$PR" ] && continue
+
+    KEY_BASE="$STATE_DIR/$(echo "$REPO" | tr / _)_pr${PR}_${SHA}"
+
+    if [ -f "${KEY_BASE}.done" ]; then
+      continue
+    fi
+
+    # Grace period: let the event-driven path win when healthy
+    if [ "$GRACE_SEC" -gt 0 ]; then
+      UPDATED_EPOCH=$(_iso_to_epoch "$UPDATED")
+      if [ "$UPDATED_EPOCH" -gt 0 ]; then
+        AGE=$((NOW_EPOCH - UPDATED_EPOCH))
+        if [ "$AGE" -lt "$GRACE_SEC" ]; then
+          _log "repo=$REPO pr=$PR sha=${SHA:0:7} — within grace (${AGE}s < ${GRACE_SEC}s), skipping"
+          continue
+        fi
+      fi
+    fi
+
+    ATTEMPTS=$(cat "${KEY_BASE}.attempts" 2>/dev/null || echo 0)
+    if [ "$ATTEMPTS" -ge "$MAX_ATTEMPTS" ]; then
+      # Already logged at the boundary attempt — silent here to avoid log spam
+      continue
+    fi
+
+    NEXT=$((ATTEMPTS + 1))
+    echo "$NEXT" > "${KEY_BASE}.attempts"
+    _log "repo=$REPO pr=$PR sha=${SHA:0:7} — invoking diffhound (attempt ${NEXT}/${MAX_ATTEMPTS})"
+
+    if "$DIFFHOUND_BIN" "$PR" --repo "$REPO" --auto-post >>"$LOG_FILE" 2>&1; then
+      touch "${KEY_BASE}.done"
+      _log "repo=$REPO pr=$PR sha=${SHA:0:7} — ok"
+    else
+      RC=$?
+      _log "repo=$REPO pr=$PR sha=${SHA:0:7} — diffhound exit=$RC"
+      if [ "$NEXT" -ge "$MAX_ATTEMPTS" ]; then
+        _log "repo=$REPO pr=$PR sha=${SHA:0:7} — giving up after ${NEXT} attempts; will retry when a new commit lands"
+      fi
+    fi
+  done <<< "$FILTERED"
+done < "$CONFIG_FILE"
+
+# ── Housekeeping: prune state older than 30d (closed/merged PRs) ──
+find "$STATE_DIR" -type f -mtime +30 -delete 2>/dev/null || true
+
+_log "sweep end"
