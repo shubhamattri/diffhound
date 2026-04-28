@@ -2370,6 +2370,29 @@ Apply each as a lens. For each principle, perform the concrete check listed.
     Before writing a NIT, reason through it fully. If your own reasoning shows the concern is unfounded (e.g. "actually empty string is falsy so this is already handled"), do NOT post the comment. An inline comment that contradicts itself is worse than no comment — it wastes the author's time and signals uncertain review quality.
     LINT NITS ARE BANNED: trailing newlines, missing newlines, extra blank lines, whitespace, indentation, import order, file-ending newlines — these are linter territory, not review territory. If your comment is about formatting that any auto-formatter would fix, DROP IT. Zero tolerance.
 
+26. **Intent-comment recognition — read 3-5 lines above before flagging "wrong"**:
+    If the line(s) immediately above the code you're about to flag contain phrases like "intentional", "by design", "deliberately", "on purpose", "zero-padded", "always over X" used declaratively, "same soft behaviour as Y" — the author has already considered the case you're about to flag and decided this is correct. Do NOT post as a BLOCKING/SHOULD-FIX. File as OPEN_QUESTION at most, or skip entirely.
+    Example mistake to avoid (PR #7145): flagging `Math.round(reduce(...) / months.length)` as a "wrong denominator" when the line directly above said `// Average TAT always over 3 months; no-endorsement months count as 0 (zero-padded)`.
+    The lib/validators/intent-comment-helper.sh validator catches the most explicit phrasings mechanically; this rule is the upstream guard so you don't generate the finding in the first place.
+
+27. **Already-applied check — verify the suggested fix isn't already in place**:
+    Before suggesting "declare X as Y" or "wrap with Z" or "change A to B" — grep the file (or the surrounding function) for the suggested form. If it already exists, the finding is moot — drop it.
+    Example mistake to avoid (PR #7145): flagging `response.data` as "should be typed as Promise<Buffer>" when the function signature already declared `Promise<Buffer>` two lines above the flagged line.
+    Pattern to verify before flagging: search the diff and the file for the proposed code. Zero false positives is cheap with one grep.
+
+28. **Constant-value verification — quote the actual value, not the inferred one**:
+    When citing a numeric value from a constant (e.g. "the function caps at 6", "the limit is 100"), ALWAYS grep for the constant declaration and quote the actual value verbatim. Off-by-one is a common hallucination class — `MAX_DEPTH = 5` does not cap "at 6", it caps at 5. Inferring from naming or test-comment language is unreliable.
+    Example mistake to avoid (PR #7145): claiming `getJsonDepth` "caps at 6 explicitly (line 245-256)" when `SANITIZE_MAX_NESTING_DEPTH = 5` is the declared cap.
+    If you cannot find the constant declaration via grep, do not cite a numeric bound — describe the bound abstractly ("the configured cap").
+
+29. **Test-file anti-pattern sweep — when reviewing a *.spec.ts / *.test.ts file**:
+    Specifically look for and flag:
+    - Loose comparison assertions (`toBeLessThan`, `toBeGreaterThan`, `toBeLessThanOrEqual`, `toBeGreaterThanOrEqual`) where the value being tested is a documented MAX/MIN constant — `toBe(MAX_X)` is strictly stronger and catches off-by-one drift the loose form hides.
+    - Mocks declared but never asserted (`jest.fn()` for a side-effect function that the source calls in a `finally`/cleanup block, with no `expect(mock).toHaveBeenCalled()` anywhere in the test). The mock-without-expect class lets a future refactor that drops the call pass green while breaking production invariants (e.g. concurrency-slot release, audit logging).
+    - Mocks for functions/symbols that the source never calls (dead mocks). Grep the source for the mocked identifier; if zero hits, the mock is dead.
+    - Mocks for type-only imports (the `SupportedFileType: {}` pattern in jest.mock factories). Type-only imports are erased at runtime, so the mock entry is dead weight.
+    These four patterns generate real findings with zero hallucination risk — they are the highest-signal class of test-file findings.
+
 # SEVERITY DEFINITIONS
 
 - BLOCKING: Must fix before merge. Security, N+1 in list resolvers, missing timeout on external calls, data corruption, swallowed errors in financial paths, missing idempotency, SQL syntax errors in migrations.
