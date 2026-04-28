@@ -2396,14 +2396,6 @@ Apply each as a lens. For each principle, perform the concrete check listed.
     - Mocks for type-only imports (the `SupportedFileType: {}` pattern in jest.mock factories). Type-only imports are erased at runtime, so the mock entry is dead weight.
     These seven patterns generate real findings with zero hallucination risk — they are the highest-signal class of test-file findings.
 
-31. **Identifier-location verification — grep before citing where a symbol lives**:
-    Before stating that a function / class / constant / test / type lives in a specific file (e.g. *"`X` is defined and exported from `foo.ts:175`"*, *"the test at `bar.spec.ts:282` does not call `setupUpload`"*), GREP for the symbol's declaration in the repo and verify the path. Inference from naming conventions, sibling files, or file purpose is unreliable. Common false-positive patterns:
-    - claiming a function is in `barService.ts` because the file name "feels right" — when grep shows it's actually in `barMetricsService.ts`;
-    - quoting a test description from one `*.spec.ts` while attaching the line number from another;
-    - citing a constant in `commonConfig.ts` when grep places it in `localConstants.ts`.
-    If you cannot grep-verify the location, do not cite it. State the concern abstractly ("an importer that points at the wrong module") and let the author resolve the path. A confident-but-wrong file/line citation is worse than no citation — the author wastes time chasing a dead pointer.
-    Example mistake to avoid (PR #7145 round 8): claiming `coerceBrDeckPolicyDateValue` is exported from `jobService.ts:175/201` when it actually lives at `jobMetricsService.ts:228` — the test's import was correct, the finding was the bug.
-
 30. **Knex / migration idempotency — recognise JS-level guards as equivalent to SQL `IF NOT EXISTS`**:
     Before flagging a migration's `alterTable` / `createTable` / `addColumn` as missing an `IF NOT EXISTS` guard, look for a JS-level idempotency check above it in the same `up()` body. The Knex schema builder exposes:
     - `await knex.schema.hasTable(name)` — equivalent to `CREATE TABLE IF NOT EXISTS`
