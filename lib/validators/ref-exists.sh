@@ -31,7 +31,7 @@ ABSENCE_WORDS='deleted|removed|missing|no longer|absent|stripped|dropped from|go
 # always "in scope" and shouldn't trigger absence-based drops. Expanded
 # v0.5.7 per Gemini peer review for jest globals (PR #7145 had hallucinated
 # function-name claims in spec files where jest globals abound).
-SKIPLIST='^(expect|it|describe|test|jest|beforeEach|afterEach|beforeAll|afterAll|fn|spyOn|mock|requireActual|isolateModules|fail|console|process|Buffer|Array|Object|String|Number|Boolean|Date|RegExp|Error|Promise|Symbol|Map|Set|JSON|Math|setTimeout|setInterval|clearTimeout|clearInterval|require|module|exports|import|export|async|await|return|throw|true|false|null|undefined)$'
+SKIPLIST='^(expect|it|describe|test|jest|beforeEach|afterEach|beforeAll|afterAll|fn|spyOn|mock|requireActual|isolateModules|fail|console|process|Buffer|Array|Object|String|Number|Boolean|Date|RegExp|Error|Promise|Symbol|Map|Set|JSON|Math|setTimeout|setInterval|clearTimeout|clearInterval|require|module|exports|import|export|async|await|return|throw|true|false|null|undefined|toEqual|toBe|toBeTruthy|toBeFalsy|toBeDefined|toBeUndefined|toBeNull|toMatchObject|toMatchSnapshot|toContain|toContainEqual|toHaveBeenCalled|toHaveBeenCalledWith|toHaveBeenCalledTimes|toHaveLength|toHaveProperty|toThrow|toThrowError|toResolve|toReject|toMatch|mockResolvedValue|mockResolvedValueOnce|mockRejectedValue|mockRejectedValueOnce|mockImplementation|mockImplementationOnce|mockReturnValue|mockReturnValueOnce|mockClear|mockReset|mockRestore|each|resolves|rejects|not)$'
 
 block=""
 what_line=""
