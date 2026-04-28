@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+## [0.5.7] - 2026-04-28 — Identifier-location verification rule
+
+### Changed — `lib/review.sh` rule 31 (new)
+
+When citing where a function / class / constant / test / type lives in the
+repo (e.g. *"X is defined in foo.ts:175"*), grep for the symbol's declaration
+and verify the path before stating it. Inference from naming, sibling files,
+or perceived file purpose is unreliable.
+
+This came out of PR #7145 round 8: 2 of 5 findings were target
+hallucinations — `coerceBrDeckPolicyDateValue` claimed to be in `jobService.ts`
+when it's in `jobMetricsService.ts`; a test "at `jobProcessingService.unit.
+spec.ts:282`" actually pointed at an unrelated `mergeBrDeckInputDates`
+test block. Both wasted the author's time chasing dead pointers. Rule 31
+forces a grep-then-cite contract.
+
+### Tests
+- 40/40 fixtures still pass.
+- `bash -n lib/review.sh` clean.
+
 ## [0.5.6] - 2026-04-28 — Trivial-assertion + description-mismatch test sweep
 
 Two extensions to the test-file anti-pattern sweep (rule 29) driven by PR
