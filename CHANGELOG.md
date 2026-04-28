@@ -2,6 +2,44 @@
 
 ## [Unreleased]
 
+## [0.5.5] - 2026-04-28 — Knex idempotency recognition + sibling-test omission
+
+Two small prompt-rule additions driven by PR #7145 round-6 findings.
+
+### Changed — prompt rules in `lib/review.sh`
+
+- **Rule 30 (new)** — Knex / migration idempotency recognition. Before flagging
+  a migration's `alterTable` / `createTable` as missing `IF NOT EXISTS`, the
+  model must check for a JS-level guard (`knex.schema.hasTable`,
+  `knex.schema.hasColumn`, `knex.schema.hasIndex`) in the surrounding `up()`
+  body. Those checks are the JS spelling of `IF NOT EXISTS` — same idempotency
+  contract — and should not be flagged as missing.
+  - Catches the round-6 false positive where `alterTable("br_deck_jobs", ...)`
+    was flagged despite the surrounding `if (!hasRunId)` guard providing exact
+    same partial-failure-rerun safety.
+
+- **Rule 29 (extended)** — Test-file anti-pattern sweep adds a sibling-test
+  omission check: when a happy-path test asserts a side-effect, check whether
+  the matching failure/error-path test in the same describe block has the
+  equivalent assertion. If absent, flag.
+  - Catches the round-6 finding where the happy-path test asserted
+    `expect(releaseSlot).toHaveBeenCalled()` but the CC-failure test in the
+    same describe didn't — even though the slot-release invariant holds on
+    both paths.
+
+### Tests
+- 40/40 fixtures still pass (no fixture change — these are prompt-rule
+  additions, no validator code).
+- `bash -n lib/review.sh` clean.
+
+### Why this release
+DNA rule (memory: feedback_above_beyond_dna.md) — every PR-review iteration
+ships a tool fix in the same session. Round 6 of PR #7145 produced 8 findings;
+4 were valid (shipped as fixes on the PR), 1 was a false positive driven by
+diffhound not recognising knex JS-level idempotency guards (closed with rule
+30), 1 was a sibling-test gap I should have caught when adding the happy-path
+assertion in round 5 (closed with rule 29 extension), 2 are NIT/defer.
+
 ## [0.5.4] - 2026-04-28 — Intent-aware validators + anti-pattern prompt sweep
 
 Driven by feedback on Gurupriyan's BR deck PR #7145. After 27 + 8 diffhound

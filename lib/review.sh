@@ -2389,9 +2389,19 @@ Apply each as a lens. For each principle, perform the concrete check listed.
     Specifically look for and flag:
     - Loose comparison assertions (`toBeLessThan`, `toBeGreaterThan`, `toBeLessThanOrEqual`, `toBeGreaterThanOrEqual`) where the value being tested is a documented MAX/MIN constant — `toBe(MAX_X)` is strictly stronger and catches off-by-one drift the loose form hides.
     - Mocks declared but never asserted (`jest.fn()` for a side-effect function that the source calls in a `finally`/cleanup block, with no `expect(mock).toHaveBeenCalled()` anywhere in the test). The mock-without-expect class lets a future refactor that drops the call pass green while breaking production invariants (e.g. concurrency-slot release, audit logging).
+    - Sibling-test omission: when a happy-path test asserts a side-effect (e.g. `expect(releaseSlot).toHaveBeenCalled()`), check whether the matching failure-path / error-path test in the same describe block has the equivalent assertion. If absent, flag — the invariant the assertion guards must hold on both paths or the test contract is incomplete.
     - Mocks for functions/symbols that the source never calls (dead mocks). Grep the source for the mocked identifier; if zero hits, the mock is dead.
     - Mocks for type-only imports (the `SupportedFileType: {}` pattern in jest.mock factories). Type-only imports are erased at runtime, so the mock entry is dead weight.
-    These four patterns generate real findings with zero hallucination risk — they are the highest-signal class of test-file findings.
+    These five patterns generate real findings with zero hallucination risk — they are the highest-signal class of test-file findings.
+
+30. **Knex / migration idempotency — recognise JS-level guards as equivalent to SQL `IF NOT EXISTS`**:
+    Before flagging a migration's `alterTable` / `createTable` / `addColumn` as missing an `IF NOT EXISTS` guard, look for a JS-level idempotency check above it in the same `up()` body. The Knex schema builder exposes:
+    - `await knex.schema.hasTable(name)` — equivalent to `CREATE TABLE IF NOT EXISTS`
+    - `await knex.schema.hasColumn(table, col)` — equivalent to `ADD COLUMN IF NOT EXISTS`
+    - `await knex.schema.hasIndex(...)` — equivalent to `CREATE INDEX IF NOT EXISTS` (in newer knex)
+    A pattern like `if (!(await knex.schema.hasColumn("t", "c"))) { await knex.schema.alterTable(...) }` is fully idempotent — re-running the migration after a partial failure is safe. Do NOT flag this as missing `IF NOT EXISTS` just because the SQL keyword is absent.
+    Example mistake to avoid (PR #7145): flagging `alterTable("br_deck_jobs", ...)` for missing `IF NOT EXISTS` when the surrounding `if (!hasRunId)` already provided the same guarantee. The `hasColumn` check is the JS spelling of the same idempotency contract.
+    Only flag missing idempotency when neither the SQL `IF NOT EXISTS` keyword nor the JS-level `hasTable`/`hasColumn`/`hasIndex` guard is present.
 
 # SEVERITY DEFINITIONS
 
