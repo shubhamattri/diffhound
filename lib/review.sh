@@ -664,6 +664,23 @@ _respond_to_dev_replies() {
       --argjson parent "$cid" \
       '[.[] | select(.id == $parent or .in_reply_to_id == $parent)] | sort_by(.id)')
 
+    # ── v0.5.3 thread-engagement guard ──
+    # _respond_to_dev_replies is invoked once per --learn run when ANY thread
+    # received a fresh dev reply (line 521 gate: `replied > 0`). The function
+    # then iterates EVERY reviewer_id, so threads with no dev engagement also
+    # get processed. Without this guard, those threads would be "responded to"
+    # — and because the bot's original review comment carries no anchored
+    # signature and is not in the registry (registry tracks REPLIES, not root
+    # review comments), neither downstream check would catch it. Result:
+    # spurious replies on threads where the dev never spoke. Saw on monorepo
+    # PR #7145 — one legit dev reply produced 5 bot replies (1 real, 4 spurious).
+    # Fix: require the thread to contain at least one comment beyond the root.
+    local _thread_length
+    _thread_length=$(printf '%s' "$thread" | jq 'length' 2>/dev/null || echo 0)
+    if [ "${_thread_length:-0}" -le 1 ]; then
+      continue
+    fi
+
     # ── v0.5.2 loop-break: registry-authoritative bot detection ──
     # The registry is the truth. The anchored signature is a hint that also
     # catches cold-start cases before bootstrap completes.
