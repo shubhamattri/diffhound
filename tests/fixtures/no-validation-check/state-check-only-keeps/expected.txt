@@ -1,0 +1,7 @@
+FINDING: src/prepareData.ts:6:SHOULD-FIX
+WHAT: `prepareData` has no format validation on user input — payload type is unchecked.
+EVIDENCE: prepareData.ts:6
+IMPACT: malformed payload reaches downstream
+OPTIONS:
+1. add zod schema
+UNVERIFIABLE: no

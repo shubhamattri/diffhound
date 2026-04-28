@@ -1,0 +1,7 @@
+FINDING: src/passthrough.ts:1:SHOULD-FIX
+WHAT: `passthrough` has no validation; user input flows directly to DB query.
+EVIDENCE: passthrough.ts:1
+IMPACT: SQL injection risk
+OPTIONS:
+1. validate
+UNVERIFIABLE: no

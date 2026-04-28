@@ -1,0 +1,7 @@
+FINDING: services/api/src/models/thinTable.ts:8:BLOCKING
+WHAT: model declares `userId` field but migration `20260501000000_thin_table.ts` has no `user_id` column.
+EVIDENCE: thinTable.ts:8
+IMPACT: INSERT throws
+OPTIONS:
+1. add column
+UNVERIFIABLE: no

@@ -1,0 +1,7 @@
+FINDING: tests/foo.spec.ts:3:NIT
+WHAT: `beforeEach` runs three setup steps that bypass the test isolation pattern.
+EVIDENCE: foo.spec.ts:3
+IMPACT: cross-test contamination
+OPTIONS:
+1. move to it
+UNVERIFIABLE: no

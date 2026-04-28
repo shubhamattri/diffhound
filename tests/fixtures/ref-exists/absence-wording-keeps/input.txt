@@ -1,0 +1,7 @@
+FINDING: src/foo.ts:1:SHOULD-FIX
+WHAT: function `oldHelper` was deleted but still referenced in callers. needs cleanup.
+EVIDENCE: foo.ts:1
+IMPACT: import error
+OPTIONS:
+1. update callers
+UNVERIFIABLE: no
