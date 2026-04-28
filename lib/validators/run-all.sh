@@ -39,6 +39,16 @@
 #       rounds 19:48-20:55: model claimed userCanAccessBrDeck was the
 #       gate when the actual code uses isAdmin || isBatman, blocking
 #       account admins entirely. v0.5.9.
+#   5e. line-cite-verify-check — drops findings whose backticked
+#       identifiers don't appear within ±5 lines of the FINDING's cited
+#       file:line. Catches the inverse of v0.6.0's evidence injection:
+#       v0.6.0 stops the LLM from claiming "X doesn't exist" against a
+#       symbol that does; this validator stops "X exists at line N"
+#       claims against a line N that doesn't have X. PR #7145 22:10
+#       round had `forUpdate at line 276` (real forUpdate is at 875)
+#       and `computeEarnedPremium at line 146` (function doesn't exist
+#       at all). Both wrong-line and hallucinated-symbol cases drop.
+#       v0.6.1.
 #   6. pre-existing-pattern — drops "new X per request" findings when the
 #      pattern already exists >=3 times in the file (pre-dates the PR).
 #   7. consumer-check     — downgrades "breaking API change" BLOCKERS when
@@ -75,6 +85,7 @@ V="$ROOT/lib/validators"
   | "$V/no-validation-check.sh" \
   | "$V/cross-file-comparison-check.sh" \
   | "$V/auth-gate-precedes-check.sh" \
+  | "$V/line-cite-verify-check.sh" \
   | "$V/pre-existing-pattern.sh" \
   | "$V/consumer-check.sh" \
   | "$V/todo-deferral.sh" \

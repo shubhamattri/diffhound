@@ -1,0 +1,7 @@
+FINDING: services/api/src/brDeck/exportHandlers.ts:875:SHOULD-FIX
+WHAT: the `forUpdate` lock at line 875 holds the row open across the PPTX generation step. consider acquiring it later.
+EVIDENCE: exportHandlers.ts:875
+IMPACT: lock duration
+OPTIONS:
+1. defer the lock
+UNVERIFIABLE: no

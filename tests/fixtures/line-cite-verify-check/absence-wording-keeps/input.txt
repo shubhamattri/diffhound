@@ -1,0 +1,7 @@
+FINDING: services/api/src/brDeck/exportHandlers.ts:276:BLOCKING
+WHAT: `forUpdate` was deleted from line 276 in this PR; the lock is now missing entirely from the transaction.
+EVIDENCE: exportHandlers.ts:276
+IMPACT: race condition reintroduced
+OPTIONS:
+1. restore the lock
+UNVERIFIABLE: no

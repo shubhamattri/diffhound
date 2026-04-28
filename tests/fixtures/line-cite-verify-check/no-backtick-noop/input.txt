@@ -1,0 +1,7 @@
+FINDING: services/api/src/brDeck/something.ts:99:NIT
+WHAT: this comment block is a bit long and could be split into smaller paragraphs for readability.
+EVIDENCE: something.ts:99
+IMPACT: cosmetic
+OPTIONS:
+1. split the comment
+UNVERIFIABLE: no

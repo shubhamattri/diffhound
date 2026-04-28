@@ -1,0 +1,7 @@
+FINDING: services/api/src/brDeck/exportHandlers.ts:276:SHOULD-FIX
+WHAT: the `.forUpdate()` on the re-fetch at line 276 is redundant. the lock is already held from line 271 within the same transaction.
+EVIDENCE: exportHandlers.ts:276
+IMPACT: minor lock contention
+OPTIONS:
+1. drop the redundant forUpdate
+UNVERIFIABLE: no

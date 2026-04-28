@@ -1,0 +1,7 @@
+FINDING: services/api/src/brDeck/metricsService.ts:146:SHOULD-FIX
+WHAT: `computeEarnedPremium` formula at lines 103-111 has zero test coverage; all tests exercise guard paths only.
+EVIDENCE: metricsService.ts:146
+IMPACT: financial calculation untested
+OPTIONS:
+1. add formula tests
+UNVERIFIABLE: no
