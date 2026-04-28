@@ -1,0 +1,7 @@
+FINDING: services/api/src/brDeck/mutations.ts:316:BLOCKING
+WHAT: `deleteBrDeckJob` had its admin gate removed in this PR; now any user can delete other orgs' jobs (IDOR). missing org-scope check.
+EVIDENCE: mutations.ts:316
+IMPACT: real after the deletion
+OPTIONS:
+1. restore the gate
+UNVERIFIABLE: no

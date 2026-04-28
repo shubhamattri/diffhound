@@ -1,0 +1,7 @@
+FINDING: services/api/src/brDeck/mutations.ts:316:BLOCKING
+WHAT: `deleteBrDeckJob` only checks `userCanAccessBrDeck(ctx.user)` before proceeding. any account admin can delete other orgs' jobs (IDOR). missing org-scope check.
+EVIDENCE: mutations.ts:316
+IMPACT: cross-org data deletion
+OPTIONS:
+1. add ensureAccountAdminCanAccessBrDeckOrg
+UNVERIFIABLE: no

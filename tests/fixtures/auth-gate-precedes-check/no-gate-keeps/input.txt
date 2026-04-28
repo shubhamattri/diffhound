@@ -1,0 +1,7 @@
+FINDING: services/api/src/brDeck/mutations.ts:99:BLOCKING
+WHAT: `unguardedMutation` IDOR — any user can delete cross-org resources.
+EVIDENCE: mutations.ts:99
+IMPACT: real cross-org leak
+OPTIONS:
+1. add auth gate
+UNVERIFIABLE: no

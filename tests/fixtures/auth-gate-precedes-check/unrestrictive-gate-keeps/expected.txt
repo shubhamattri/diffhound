@@ -1,0 +1,7 @@
+FINDING: services/api/src/brDeck/mutations.ts:42:BLOCKING
+WHAT: `someMutation` has IDOR — any account admin can access other orgs' resources via this mutation.
+EVIDENCE: mutations.ts:42
+IMPACT: cross-org data access
+OPTIONS:
+1. add ensureAccountAdminCanAccessBrDeckOrg
+UNVERIFIABLE: no

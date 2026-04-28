@@ -31,6 +31,14 @@
 #       Driven by PR #7145 v0.5.7-deployed FP at exportHandlers.ts:71
 #       ("graphql path has fix, REST doesn't" — REST had the call at 4
 #       distinct line numbers in the same file). v0.5.8.
+#   5d. auth-gate-precedes-check — drops IDOR / "missing org-scope" /
+#       "any account admin can X" findings when the named function is
+#       gated by a restrictive ensureAuthorized predicate (isAdmin ||
+#       isBatman / userHasGlobalBrDeckAccess) before the body. Driven
+#       by 5 repeats of the same delete-mutation FP across PR #7145
+#       rounds 19:48-20:55: model claimed userCanAccessBrDeck was the
+#       gate when the actual code uses isAdmin || isBatman, blocking
+#       account admins entirely. v0.5.9.
 #   6. pre-existing-pattern — drops "new X per request" findings when the
 #      pattern already exists >=3 times in the file (pre-dates the PR).
 #   7. consumer-check     — downgrades "breaking API change" BLOCKERS when
@@ -66,6 +74,7 @@ V="$ROOT/lib/validators"
   | "$V/migration-column-check.sh" \
   | "$V/no-validation-check.sh" \
   | "$V/cross-file-comparison-check.sh" \
+  | "$V/auth-gate-precedes-check.sh" \
   | "$V/pre-existing-pattern.sh" \
   | "$V/consumer-check.sh" \
   | "$V/todo-deferral.sh" \

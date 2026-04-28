@@ -1,0 +1,7 @@
+FINDING: services/api/src/brDeck/mutations.ts:42:NIT
+WHAT: `someFunction` has a redundant log line; cosmetic.
+EVIDENCE: mutations.ts:42
+IMPACT: cosmetic
+OPTIONS:
+1. remove
+UNVERIFIABLE: no
