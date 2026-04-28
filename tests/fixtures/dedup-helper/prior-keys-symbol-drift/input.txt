@@ -1,0 +1,7 @@
+FINDING: services/api/src/brDeck/redisRateLimit.ts:248:BLOCKING
+WHAT: raw `DECR` on a key that doesn't exist creates it at `-1`. when `increment()` is called next, it sees the counter below the window floor
+EVIDENCE: redisRateLimit.ts:248
+IMPACT: rate limit bypass
+OPTIONS:
+1. lua script
+UNVERIFIABLE: no

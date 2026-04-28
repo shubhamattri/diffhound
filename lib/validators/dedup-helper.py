@@ -16,10 +16,19 @@ Identity key: ``(file_basename, primary_symbol, normalized_what[:80])``
   and tolerant of trailing rephrase (only first 80 chars).
 
 Input (stdin): current-round FINDING: blocks.
-Env (required for any drop): ``DIFFHOUND_PRIOR_FINDINGS`` — path to prior
-FINDING: blocks. If unset/empty/missing, this validator is a no-op pass-through
-(first review, no prior to dedup against).
+Env (preferred since v0.5.6): ``DIFFHOUND_PRIOR_KEYS`` — path to a TSV file
+with one identity tuple per line (basename, symbol, normalized_what[:80]),
+decoded verbatim from diffhound-id v1 markers in prior-round comments. Exact
+match — no reverse-engineering, no fidelity loss across LLM rephrasings.
+Env (legacy fallback): ``DIFFHOUND_PRIOR_FINDINGS`` — path to prior FINDING:
+blocks. Used only when prior_keys is empty/unset (e.g. all prior comments
+are pre-v0.5.6 and have no markers).
 Env (optional): ``DIFFHOUND_DEDUP_DISABLE=1`` opts out entirely.
+
+Both env vars may be set simultaneously; in that case the union of keys is
+used for matching. Prior-keys takes precedence in semantics (it's exact);
+prior-findings keys are merged in for back-compat with unmarked legacy
+comments on the same PR.
 
 Output (stdout): kept findings, in input order, with their original block_raw
 preserved (including any annotations from upstream validators in the pipeline).
@@ -117,6 +126,32 @@ def _parse_blocks(text: str) -> list[Finding]:
     return findings
 
 
+def _load_prior_keys_tsv(path: str) -> set[tuple[str, str, str]]:
+    """Load identity tuples from a TSV file (basename TAB symbol TAB what80).
+
+    v0.5.6+: this file is generated from diffhound-id v1 markers and is the
+    primary source of prior-round identity keys. Each line is exact — no
+    reconstruction, no fidelity loss. Lines that don't have exactly 3
+    tab-separated fields are skipped (defensive against malformed input).
+    """
+    keys: set[tuple[str, str, str]] = set()
+    if not path or not Path(path).is_file():
+        return keys
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return keys
+    for line in text.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 3:
+            continue
+        basename, symbol, what = parts
+        if not basename:
+            continue  # require at least basename
+        keys.add((basename, symbol, what))
+    return keys
+
+
 def main() -> None:
     current_text = sys.stdin.read()
 
@@ -124,18 +159,22 @@ def main() -> None:
         sys.stdout.write(current_text)
         return
 
+    prior_keys: set[tuple[str, str, str]] = set()
+
+    # v0.5.6+ exact-key path. Preferred.
+    prior_keys |= _load_prior_keys_tsv(
+        os.environ.get("DIFFHOUND_PRIOR_KEYS", "")
+    )
+
+    # Legacy lossy-reconstruction path. Merged in for unmarked comments.
     prior_path = os.environ.get("DIFFHOUND_PRIOR_FINDINGS")
-    if not prior_path or not Path(prior_path).is_file():
-        sys.stdout.write(current_text)
-        return
+    if prior_path and Path(prior_path).is_file():
+        try:
+            prior_text = Path(prior_path).read_text(encoding="utf-8")
+            prior_keys |= {f.identity_key for f in _parse_blocks(prior_text)}
+        except OSError:
+            pass
 
-    try:
-        prior_text = Path(prior_path).read_text(encoding="utf-8")
-    except OSError:
-        sys.stdout.write(current_text)
-        return
-
-    prior_keys = {f.identity_key for f in _parse_blocks(prior_text)}
     if not prior_keys:
         sys.stdout.write(current_text)
         return

@@ -1789,18 +1789,96 @@ gh api "/repos/${REPO_OWNER}/${REPO_NAME}/pulls/${PR_NUMBER}/reviews" \
 # Reconstruct prior FINDING: blocks from our existing inline PR comments.
 # round-diff.py uses these as the "previous round" baseline to compute
 # new/resolved/unchanged accounting (DIFFHOUND_PRIOR_FINDINGS env var).
-# We do this unconditionally — on first reviews there are no prior comments
-# so the file is empty and round-diff shows "+N new, -0 resolved".
+#
+# v0.5.6: Two-tier reconstruction.
+# (1) Marked comments (posted by v0.5.6+): the diffhound-id v1 marker carries
+#     the original identity tuple (file_basename, primary_symbol,
+#     normalized_what[:80]) base64-encoded. Decode verbatim — apples-to-apples
+#     comparison with current-round dedup-helper.
+# (2) Unmarked legacy comments: fall back to the prior lossy regex (preserved
+#     unchanged below), so a PR reviewed under earlier diffhound versions
+#     still benefits from imperfect-but-better-than-nothing dedup.
+#
+# We emit FINDING: blocks in two flavors:
+#   - For marked comments, WHAT is the embedded normalized_what (already
+#     truncated and lowercased — dedup-helper.py will compute the same key).
+#   - For unmarked, WHAT is the legacy first-sentence reconstruction.
 PRIOR_FINDINGS_FILE=$(mktemp -t "pr-${PR_NUMBER}-prior-findings.XXXXXX")
 jq -r --arg login "$REVIEWER_LOGIN" '
   [.[] | select(.in_reply_to_id == null and .user == $login and .path != null and .line != null)]
   | .[]
   | . as $c
-  | ($c.body | capture("\\*\\*(?<sev>BLOCKING|SHOULD-FIX|NIT|OPEN_QUESTION)\\*\\*") // {sev:"SHOULD-FIX"}) as $sv
-  | ($c.body | gsub("\\*\\*(?:BLOCKING|SHOULD-FIX|NIT|OPEN_QUESTION)\\*\\*\\s*[^a-zA-Z`]*"; "")
-             | split(". ")[0] | ltrimstr(" ") | rtrimstr(" ")) as $what
-  | "FINDING: \($c.path):\($c.line):\($sv.sev)\nWHAT: \($what)\n"
-' "$EXISTING_COMMENTS_FILE" 2>/dev/null > "$PRIOR_FINDINGS_FILE" || true
+  | ($c.body | capture("<!-- diffhound-id v1: (?<b64>[A-Za-z0-9+/=]+) -->") // null) as $marker
+  | if $marker != null
+    then
+      # Marked: emit a placeholder FINDING that downstream Python will replace
+      # with the decoded tuple. We tag the body with the b64 payload so the
+      # post-processing step can substitute it without re-fetching.
+      "FINDING: \($c.path):\($c.line):MARKED\nMARKER_B64: \($marker.b64)\n"
+    else
+      # Legacy lossy reconstruction (pre-v0.5.6 comments).
+      ($c.body | capture("\\*\\*(?<sev>BLOCKING|SHOULD-FIX|NIT|OPEN_QUESTION)\\*\\*") // {sev:"SHOULD-FIX"}) as $sv
+      | ($c.body | gsub("\\*\\*(?:BLOCKING|SHOULD-FIX|NIT|OPEN_QUESTION)\\*\\*\\s*[^a-zA-Z`]*"; "")
+                 | split(". ")[0] | ltrimstr(" ") | rtrimstr(" ")) as $what
+      | "FINDING: \($c.path):\($c.line):\($sv.sev)\nWHAT: \($what)\n"
+    end
+' "$EXISTING_COMMENTS_FILE" 2>/dev/null > "${PRIOR_FINDINGS_FILE}.raw" || true
+
+# Two-file output:
+#   PRIOR_FINDINGS_FILE — legacy FINDING-block format. Marked comments emit
+#     plausible WHAT for round-diff.py's accounting (it uses identity-key
+#     style matching too, so the output below works for it). Unmarked legacy
+#     comments emit lossy first-sentence WHAT (unchanged from pre-v0.5.6).
+#   PRIOR_KEYS_FILE — exact identity tuples (basename TAB symbol TAB what80),
+#     one per line, decoded verbatim from markers. Skips unmarked comments.
+#     dedup-helper.py reads this via DIFFHOUND_PRIOR_KEYS for exact matching.
+PRIOR_KEYS_FILE=$(mktemp -t "pr-${PR_NUMBER}-prior-keys.XXXXXX")
+python3 - "${PRIOR_FINDINGS_FILE}.raw" "$PRIOR_FINDINGS_FILE" "$PRIOR_KEYS_FILE" <<'PYEOF' 2>/dev/null || { cp "${PRIOR_FINDINGS_FILE}.raw" "$PRIOR_FINDINGS_FILE"; : > "$PRIOR_KEYS_FILE"; }
+import base64, json, sys
+src, dst_findings, dst_keys = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(src) as f:
+    text = f.read()
+out_findings = []
+out_keys = []
+lines = text.splitlines()
+i = 0
+while i < len(lines):
+    line = lines[i]
+    if line.startswith("FINDING: ") and line.endswith(":MARKED") and i + 1 < len(lines) and lines[i+1].startswith("MARKER_B64: "):
+        head = line[:-len(":MARKED")]  # "FINDING: path:line"
+        b64 = lines[i+1][len("MARKER_B64: "):].strip()
+        try:
+            j = json.loads(base64.b64decode(b64).decode("utf-8"))
+            f_, s_, w_ = j.get("f", ""), j.get("s", ""), j.get("w", "")
+            if not f_:
+                i += 2; continue  # malformed — drop
+            # Exact identity tuple for dedup-helper consumption.
+            # Tab-separated; symbol/what may contain spaces but never tabs in
+            # practice (compute_identity_tuple collapses whitespace).
+            out_keys.append(f"{f_}\t{s_}\t{w_}")
+            # Synthetic FINDING block for round-diff.py / legacy compat.
+            # Round-diff uses the same (basename, primary_symbol, what80)
+            # identity logic; backtick-wrapping the symbol keeps it discoverable.
+            out_findings.append(f"{head}:SHOULD-FIX")
+            if s_:
+                out_findings.append(f"WHAT: `{s_}` {w_}")
+            else:
+                out_findings.append(f"WHAT: {w_}")
+        except Exception:
+            pass  # malformed → silently drop
+        i += 2
+        continue
+    out_findings.append(line)
+    i += 1
+with open(dst_findings, "w") as f:
+    f.write("\n".join(out_findings))
+    if out_findings: f.write("\n")
+with open(dst_keys, "w") as f:
+    f.write("\n".join(out_keys))
+    if out_keys: f.write("\n")
+PYEOF
+rm -f "${PRIOR_FINDINGS_FILE}.raw"
+export DIFFHOUND_PRIOR_KEYS="$PRIOR_KEYS_FILE"
 
 # Check if reviewer has already posted comments → re-review mode
 REVIEWER_COMMENT_COUNT=$(jq --arg login "$REVIEWER_LOGIN" \

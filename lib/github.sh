@@ -2,6 +2,69 @@
 # diffhound — GitHub API interaction
 # Handles review posting, comment threading, and fallback logic
 
+# Source marker utilities (compute_identity_tuple / compose_marker / append_marker).
+# Use the same lib dir as the caller to support both VM and dev-machine paths.
+_GITHUB_SH_DIR="${BASH_SOURCE[0]%/*}"
+# shellcheck source=marker-utils.sh
+. "${_GITHUB_SH_DIR}/marker-utils.sh"
+
+# Inject diffhound-id markers into review_json's comments[].body in-place.
+# The bulk-POST path embeds comments inside the review JSON; we append a marker
+# to each comment body so future rounds can extract the prior identity tuple
+# verbatim instead of reverse-engineering it from rendered markdown.
+_inject_markers_into_review_json() {
+  local review_json="$1"
+  [ -f "$review_json" ] || return 0
+
+  local _tmp
+  _tmp=$(mktemp -t "review-json-marked.XXXXXX")
+
+  # Walk comments[] in jq, emit (path, body) pairs as TSV; marker each in shell;
+  # write back via jq with --slurpfile of the marked bodies. Done this way to
+  # keep the shell-only base64/jq composition in compose_marker rather than
+  # duplicating it inside a jq program.
+  local _bodies_in _bodies_out
+  _bodies_in=$(mktemp -t "bodies-in.XXXXXX")
+  _bodies_out=$(mktemp -t "bodies-out.XXXXXX")
+
+  jq -r '.comments | to_entries[] | "\(.key)\t\(.value.path)\t\(.value.body)"' \
+    "$review_json" > "$_bodies_in" 2>/dev/null || true
+
+  # If there are no comments (empty array, body-only review), nothing to do.
+  if [ ! -s "$_bodies_in" ]; then
+    rm -f "$_tmp" "$_bodies_in" "$_bodies_out"
+    return 0
+  fi
+
+  # Build a JSON array of marked bodies, indexed in order, for slurp-merge.
+  printf '[' > "$_bodies_out"
+  local _first=true
+  while IFS=$'\t' read -r _idx _path _body; do
+    [ -z "$_path" ] && continue
+    local _marked
+    _marked=$(append_marker "$_path" "$_body")
+    [ "$_first" = false ] && printf ',' >> "$_bodies_out"
+    _first=false
+    printf '%s' "$_marked" | jq -Rs . >> "$_bodies_out"
+  done < "$_bodies_in"
+  printf ']' >> "$_bodies_out"
+
+  # Merge marked bodies back into review_json by index.
+  if jq --slurpfile marked "$_bodies_out" '
+    .comments |= (
+      to_entries | map(
+        .value.body = ($marked[0][.key] // .value.body) | .value
+      )
+    )
+  ' "$review_json" > "$_tmp" 2>/dev/null; then
+    mv -f "$_tmp" "$review_json"
+  else
+    rm -f "$_tmp"
+  fi
+
+  rm -f "$_bodies_in" "$_bodies_out"
+}
+
 # Post a complete review with inline comments to GitHub
 # Falls back to body-only + individual comments if bulk fails
 post_review() {
@@ -9,6 +72,10 @@ post_review() {
   local head_sha="$4" review_event="$5"
   local review_summary="$6" review_json="$7"
   local new_comments_file="$8" diff_file="$9"
+
+  # Append diffhound-id marker to each inline comment body before posting.
+  # Idempotent — append_marker checks for an existing marker and skips.
+  _inject_markers_into_review_json "$review_json"
 
   local posted_ok=true
   local new_comment_count
@@ -45,6 +112,7 @@ post_review() {
           line=$(snap_to_diff_line "$filepath" "$line" "$diff_file")
           comment=$(strip_severity_label "$rest")
           [ -z "$(printf '%s' "$comment" | tr -d '[:space:]')" ] && continue
+          comment=$(append_marker "$filepath" "$comment")
           gh api --method POST \
             -H "Accept: application/vnd.github+json" \
             "/repos/${repo_owner}/${repo_name}/pulls/${pr_number}/comments" \
@@ -77,6 +145,7 @@ post_review() {
               line=$(snap_to_diff_line "$filepath" "$line" "$diff_file")
               comment=$(strip_severity_label "$rest")
               [ -z "$(printf '%s' "$comment" | tr -d '[:space:]')" ] && continue
+              comment=$(append_marker "$filepath" "$comment")
               gh api --method POST                 -H "Accept: application/vnd.github+json"                 "/repos/${repo_owner}/${repo_name}/pulls/${pr_number}/comments"                 -f "body=${comment}"                 -f "commit_id=${head_sha}"                 -f "path=${filepath}"                 -F "line=${line}" > /dev/null 2>&1 && inline_posted=$((inline_posted + 1))
             done < "$new_comments_file"
           fi

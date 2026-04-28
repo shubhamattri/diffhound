@@ -2,6 +2,101 @@
 
 ## [Unreleased]
 
+## [0.5.6] - 2026-04-28 — Self-describing comment markers for cross-round dedup
+
+Driven by monorepo PR #7145 — 74 inline comments + 8 CHANGES_REQUESTED reviews
+in 7.5 hours, with developers reporting that diffhound resurfaced
+already-addressed findings on every force-push. Investigation traced the noise
+to two compounding bugs and a force-push fan-out that exposed both at scale.
+
+### Root cause
+
+The cross-round dedup pipeline relied on **lossy reverse-engineering** of
+prior `FINDING:` blocks from rendered comment markdown at `lib/review.sh:1772`
+(jq `split(". ")[0]` produced a ~30-char first-sentence fragment vs the LLM's
+full ~200-char `WHAT`), and a **brittle identity tuple**
+`(file_basename, primary_symbol, normalized_what[:80])` that drifted whenever
+the LLM rephrased — e.g. `DECR` vs `client.decr(redisKey)` produced different
+`primary_symbol` values for the same logical issue (`redisRateLimit.ts:248`
+on PR #7145, two distinct comments at 14:05 and 16:25).
+
+The dedup-helper's identity computation was correct in isolation; the
+upstream reconstruction couldn't feed it a comparable prior-round identity.
+
+### Fixed — self-describing comment markers (`lib/marker-utils.sh` — new)
+
+Each inline comment now carries an appended HTML trailer:
+
+```
+<!-- diffhound-id v1: <base64({"f":basename,"s":symbol,"w":what80})> -->
+```
+
+The marker preserves the exact identity tuple at post time. On the next
+review round, `lib/review.sh` extracts it verbatim and passes it via the new
+`DIFFHOUND_PRIOR_KEYS` env var to `dedup-helper.py` — apples-to-apples
+comparison, no reverse-engineering, no fidelity loss across LLM rephrasings.
+
+Markers are **appended, never prepended** — prepending would be misclassified
+by the anchored-signature `startswith` check at `review.sh:637` and break
+the loop-prevention logic. Idempotent: `append_marker` skips bodies that
+already carry a marker, so re-runs are safe.
+
+### Fixed — exact-key dedup path (`lib/validators/dedup-helper.py`)
+
+`dedup-helper.py` now reads `DIFFHOUND_PRIOR_KEYS` (TSV: basename TAB symbol
+TAB normalized_what80) as the preferred prior-round source. The legacy
+`DIFFHOUND_PRIOR_FINDINGS` path is preserved and merged in for backward
+compatibility with unmarked comments posted by pre-v0.5.6 versions on the
+same PR.
+
+Severity remains **out of the identity key** — the dedup-helper's
+severity-tolerance contract (so a BLOCKING→SHOULD-FIX downgrade doesn't
+re-post) is preserved.
+
+### Two-tier reconstruction at `review.sh:1772`
+
+- Marked comments → exact tuple via base64 decode (Python helper, since
+  base64+JSON in pure bash is error-prone; `dedup-helper.py` already
+  requires python3 so no new dependency).
+- Unmarked legacy comments → existing lossy regex (unchanged), so PRs
+  reviewed under earlier diffhound versions still benefit from
+  imperfect-but-better-than-nothing dedup as comments turn over.
+
+### Tests
+
+42/42 fixtures pass (37 prior + 5 new):
+
+- `dedup-helper/prior-keys-symbol-drift` — the PR #7145 case: prior key has
+  symbol `DECR`, current finding rephrases as `client.decr(...)` but
+  `primary_symbol` regex still picks `DECR` → exact match → drop.
+- `dedup-helper/prior-keys-empty-noop` — empty `DIFFHOUND_PRIOR_KEYS` is a
+  pass-through (no false drops).
+- Marker round-trip + idempotency verified via `lib/marker-utils.sh`
+  smoke test (compose → append → extract recovers identity tuple
+  unchanged; double-append is a no-op).
+
+### Out of scope (deferred)
+
+- LLM-judge dedup for residual rephrasings where `primary_symbol` itself
+  shifts (Haiku one-shot comparing new findings against prior canonical
+  blocks). Marker is the precondition; deferred to v0.6.0.
+- Smart-skip on `synchronize` events when no dev replies / <50 LOC changed
+  / no prior BLOCKING. Deferred to v0.5.7.
+- Pin VM checkout to tag instead of `origin/master` HEAD. Deferred —
+  process change, not code.
+
+### Peer review
+
+Plan reviewed in parallel by Codex + Gemini. Both flagged the original
+draft's SHA256-of-content marker (can't survive LLM rephrasing) and Jaccard
+fuzzy-matching (false-drop risk on security findings — Codex counterexample:
+same file with `orders`+`userId` symbols, N+1 vs tenant-filter leak; Gemini:
+boilerplate nil-check on different vars). Both rejected the 600s hard
+cooldown (breaks fix-and-rereview flow). Final scope reflects their
+recommendation: literal-tuple marker only, no fuzzing, no cooldown.
+
+[BX-3010]
+
 ## [0.5.5] - 2026-04-28 — Knex idempotency recognition + sibling-test omission
 
 Two small prompt-rule additions driven by PR #7145 round-6 findings.
