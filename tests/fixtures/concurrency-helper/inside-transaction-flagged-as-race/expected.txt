@@ -1,0 +1,7 @@
+FINDING: jobProcessing.ts:8:OPEN_QUESTION
+WHAT: race condition between findById and patchAndFetchById allows concurrent modification [concurrency-helper: downgraded from BLOCKING; inside .transaction() block; cite multi-process flow to keep severity]
+EVIDENCE: jobProcessing.ts:6,8
+IMPACT: stale state could be patched
+OPTIONS:
+1. wrap in transaction
+UNVERIFIABLE: no

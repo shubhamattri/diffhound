@@ -1,0 +1,7 @@
+FINDING: jobProcessing.ts:8:BLOCKING
+WHAT: race condition between findById and patchAndFetchById allows concurrent modification
+EVIDENCE: jobProcessing.ts:6,8
+IMPACT: stale state could be patched
+OPTIONS:
+1. wrap in transaction
+UNVERIFIABLE: no

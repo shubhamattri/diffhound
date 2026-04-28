@@ -1,0 +1,7 @@
+FINDING: queueWorker.ts:6:BLOCKING
+WHAT: race condition - two workers can pick the same job between SELECT and UPDATE
+EVIDENCE: queueWorker.ts:4,6
+IMPACT: same job processed twice across workers
+OPTIONS:
+1. use FOR UPDATE SKIP LOCKED
+UNVERIFIABLE: no

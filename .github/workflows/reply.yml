@@ -13,6 +13,14 @@ on:
         description: "Hostname/IP of the Diffhound review VM"
         required: true
 
+concurrency:
+  # PR-level lock — coarser than thread-level but safer against the
+  # "two replies fired ms apart, both observe last=human, both POST"
+  # race that GHA's pre-step concurrency cannot otherwise prevent
+  # (a fetched thread_id is not available before steps run).
+  group: diffhound-reply-${{ github.repository }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
 jobs:
   reply:
     runs-on: ubuntu-latest
