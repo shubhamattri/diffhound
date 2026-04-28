@@ -1,0 +1,7 @@
+FINDING: services/api/src/services/orders.ts:42:BLOCKING
+WHAT: code still reads from the removed `old_status` field after migration `20260601000000_drop_old.ts` drops the column. needs cleanup.
+EVIDENCE: orders.ts:42
+IMPACT: runtime null reads
+OPTIONS:
+1. remove read
+UNVERIFIABLE: no

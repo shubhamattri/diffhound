@@ -1,0 +1,7 @@
+FINDING: src/jobService.ts:3:OPEN_QUESTION
+WHAT: `fromMaybeGlobalId` does Buffer.from(id, "base64").toString("utf8") and splits on ":", returning parts[1] verbatim with no format validation. unsafe.
+EVIDENCE: jobService.ts:3
+IMPACT: malformed input passes through
+OPTIONS:
+1. add validation
+UNVERIFIABLE: no

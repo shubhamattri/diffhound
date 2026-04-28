@@ -1,0 +1,11 @@
+FINDING: src/foo.ts:10:SHOULD-FIX
+WHAT: `bar` is missing from migration `20260101000000_init.ts`. i ran a grep across migrations and got zero hits. [citation-discipline: downgraded from BLOCKING; unverifiable tool-run: i ran a grep across migrations and got zero]
+EVIDENCE: foo.ts:10
+IMPACT: schema mismatch
+OPTIONS:
+1. add column
+DIFF_LINE: foo.ts:10
+REACHABLE_PATH: foo.ts
+REJECTED_ALTERNATIVE: leave as-is
+UNVERIFIABLE: no
+

@@ -1,0 +1,7 @@
+FINDING: services/api/src/brDeck/models/brDeckJobFile.ts:8:BLOCKING
+WHAT: `filePath` is declared as a required field on the model, but looking at migration `20260402000000_br_deck_jobs.ts`, the table is created without a `file_path` column. i ran a grep across migrations and got zero hits.
+EVIDENCE: brDeckJobFile.ts:8
+IMPACT: INSERT will throw postgres column-not-found error
+OPTIONS:
+1. add the column
+UNVERIFIABLE: no

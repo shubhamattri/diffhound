@@ -1,0 +1,7 @@
+FINDING: src/exportHandlers.spec.ts:560:NIT
+WHAT: tests at lines 560 mock `db` as always-rejecting and hit real `setTimeout` delays — `persistWithRetry` runs 3 retries with 500ms + 1000ms backoff
+EVIDENCE: exportHandlers.spec.ts:560
+IMPACT: 14s extra suite wall-time
+OPTIONS:
+1. fake timers
+UNVERIFIABLE: no

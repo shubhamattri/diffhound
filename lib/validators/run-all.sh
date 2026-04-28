@@ -17,6 +17,14 @@
 #      Same shape as security/concurrency helpers; downgrade-only.
 #   4. dry-vs-import      — narrow wording gate.
 #   5. ref-exists         — broader wording-conditional drop / annotate pass.
+#      Expanded v0.5.7: scans ALL backticked symbols, sibling-dir search,
+#      jest skiplist, absence-wording exemption.
+#   5a. migration-column-check — drops claims that a column is missing from
+#       a named migration when the column literal exists in that file
+#       (PR #7145 F1, F2). v0.5.7.
+#   5b. no-validation-check — drops "no validation" claims when the named
+#       function body has validation tells (PR #7145 F7). Tiered tells
+#       guard against state-check false drops. v0.5.7.
 #   6. pre-existing-pattern — drops "new X per request" findings when the
 #      pattern already exists >=3 times in the file (pre-dates the PR).
 #   7. consumer-check     — downgrades "breaking API change" BLOCKERS when
@@ -49,6 +57,8 @@ V="$ROOT/lib/validators"
   | "$V/intent-comment-helper.sh" \
   | "$V/dry-vs-import.sh" \
   | "$V/ref-exists.sh" \
+  | "$V/migration-column-check.sh" \
+  | "$V/no-validation-check.sh" \
   | "$V/pre-existing-pattern.sh" \
   | "$V/consumer-check.sh" \
   | "$V/todo-deferral.sh" \

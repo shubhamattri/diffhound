@@ -1,0 +1,7 @@
+FINDING: services/api/src/foo.ts:10:BLOCKING
+WHAT: `bar` is unused
+EVIDENCE: foo.ts:10
+IMPACT: dead code
+OPTIONS:
+1. remove
+UNVERIFIABLE: no

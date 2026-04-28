@@ -2,6 +2,154 @@
 
 ## [Unreleased]
 
+## [0.5.7] - 2026-04-29 — False-positive validators (PR #7145 audit response)
+
+Driven by audit of v0.5.6's first force-full review on monorepo PR #7145:
+6 of 8 new findings were substantially incorrect, including BOTH BLOCKING
+findings as pure hallucinations with fabricated tool-run prose ("I ran a
+grep across migrations and got zero hits" — column was on line 26 of the
+named migration). 6 wrong inline comments were manually retracted from
+PR #7145 before this work began. v0.5.7 ships 4 validator changes that
+catch this class going forward.
+
+### Added — `lib/validators/migration-column-check.sh` (new)
+
+Drops findings claiming a column is missing from a named migration when
+the column literal exists in that file. Trigger: WHAT names a migration
+filename matching `\d{14}_[a-z_]+\.ts` AND a "no `<col>` column" / "missing
+`<col>` column" assertion. Verification: greps the cited migration for the
+column literal under column-definition contexts (`.text("col")`,
+`.string("col")`, `.uuid("col")`, etc. — type-prefix bound). If the column
+exists, drops the finding with annotation `[migration-column-check: column
+'<col>' exists in '<migration>'; claim contradicted]`.
+
+False-drop guard (Gemini peer review): findings with absence-wording
+("deleted", "removed", "drops the", "was renamed", etc.) skip this check —
+they're commenting on a removal, not asserting absence. The column literal
+appearing in the rollback `down()` block of the same migration is expected.
+
+### Added — `lib/validators/no-validation-check.sh` (new)
+
+Drops findings claiming a function has "no validation" / "no format check"
+/ "missing validation" when the function body contains validation tells.
+Tiered tells (Gemini peer review counterexample): STRONG tells (regex
+`.test`, `instanceof`, `Array.isArray`, `.parse`, `.safeParse`, `isValid*`,
+explicit RegExp construction) are decisive — 1 strong = drop. WEAK tells
+(`if (!`, `throw new`, `validate(`, `assert(`) are state-checks not
+format-validation; require ≥3 weak before dropping.
+
+This avoids false-dropping legitimate "no format validation" findings on
+functions like `prepareData(input) { if (!input.ready) throw new Error(); }`
+which have 2 weak tells but no real format validation.
+
+Brace-matching is depth-aware and indentation-agnostic — works for class
+methods, nested arrow functions, IIFEs (Gemini peer review fix; v1's
+regex-only `^}` would miss class methods). Function-start patterns
+recognized: `function NAME(`, `const NAME = (`, `NAME(args) {` (object
+method), and TS class methods with `public/private/protected/static/async`
+modifiers.
+
+### Changed — `lib/validators/citation-discipline.sh` extended
+
+Detects unverifiable tool-run prose in WHAT/EVIDENCE — first-person claims
+of running shell commands ("I ran a grep…", "confirmed with grep", "verified
+zero hits") which the LLM cannot have actually done. Downgrades severity by
+one tier (BLOCKING → SHOULD-FIX → NIT) and annotates with the offending
+phrase.
+
+Stacks with the existing missing-citation-fields downgrade — a finding both
+missing all 3 fields AND containing tool-run prose drops two tiers. They
+are independent evidence for the same hallucination class (PR #127 / PR
+#7145 patterns), so stacking is correct.
+
+### Changed — `lib/validators/ref-exists.sh` extended
+
+- Scans ALL backticked plain identifiers in WHAT/EVIDENCE, not just the
+  first. PR #7145 F4 had `setTimeout` (real, found first) plus
+  `persistWithRetry` (hallucinated, never extracted by the old first-symbol
+  logic).
+- Sibling-directory search added: when symbol isn't in the cited file,
+  also check `.ts/.tsx/.js/.py` files in the same directory (with the
+  same comment-stripping). Reduces false drops when the LLM cites a spec
+  file but the function lives in the source file alongside it.
+- Skiplist expanded for jest globals (`beforeEach`, `afterEach`, `beforeAll`,
+  `afterAll`, `jest`, `fn`, `spyOn`, `mock`, `requireActual`, etc.) and
+  language built-ins. Gemini peer review identified 5+ false-trigger names.
+- New ABSENCE_WORDS exemption: findings about `deleted` / `removed` /
+  `missing` / `was renamed` symbols pass through unchanged. Gemini peer
+  review: a legit "function `foo` was deleted but still referenced"
+  finding was being false-dropped because `foo` is genuinely absent from
+  the file.
+- New EXISTENCE_WORDS patterns for behavior assertions: "X runs N…",
+  "X throws…", "X returns…", "X calls…" — F4 patterns where the LLM
+  invents a function and confidently describes its non-existent behavior.
+
+### Tests
+
+53/53 fixtures pass (47 prior + 6 new):
+
+- `migration-column-check/column-exists-drops` — F1/F2 reproduction.
+- `migration-column-check/no-migration-name-noop` — pass-through guard.
+- `migration-column-check/column-genuinely-missing-keeps` — false-drop guard.
+- `migration-column-check/droppedColumn-not-falsely-dropped` — Gemini's
+  `dropColumn` counterexample; absence-wording exemption preserves the
+  legitimate finding.
+- `no-validation-check/function-has-validation-drops` — F7 reproduction
+  (5 strong tells in `fromMaybeGlobalId`).
+- `no-validation-check/state-check-only-keeps` — Gemini's `prepareData`
+  counterexample (2 weak tells, below threshold).
+- `no-validation-check/genuinely-no-validation-keeps` — false-drop guard.
+- `citation-discipline/ran-grep-downgrades` — BLOCKING with tool-run
+  prose downgrades to SHOULD-FIX.
+- `ref-exists/hallucinated-fn-with-runs-drops` — F4 reproduction.
+- `ref-exists/absence-wording-keeps` — Gemini's deleted-function
+  counterexample.
+- `ref-exists/jest-globals-skipped` — `beforeEach` doesn't trigger drops.
+
+### Peer review
+
+Plan reviewed in parallel by Codex + Gemini. Gemini caught two critical
+flaws in the v1 design:
+- Fix C would false-drop legitimate "function deleted" findings →
+  introduced ABSENCE_WORDS exemption.
+- Fix A.1 could false-drop findings about `dropColumn` rollback context →
+  introduced absence-wording exemption in migration-column-check too.
+- Fix D's brace-matching couldn't handle class methods → rewrote awk to
+  use depth-aware brace counting regardless of indentation.
+- Fix D's flat 2-tells threshold would false-drop on state-check-only
+  functions → introduced strong/weak tell tiering.
+
+Final design reflects all four mitigations with fixtures replaying the
+exact counterexamples Gemini provided.
+
+### Expected hit rate on PR #7145's 6 wrong findings
+
+- F1 (BLOCKING `file_path`) — DROPPED by migration-column-check
+- F2 (BLOCKING `settled_tab`/`pa_tab`) — DROPPED by migration-column-check
+- F3 (test/code error class mismatch) — unchanged (deferred to v0.5.8+;
+  Gemini suggested a diff-context validator, not yet implemented)
+- F4 (hallucinated `persistWithRetry`) — DROPPED by ref-exists
+- F6 (semaphore race anchored on explanatory comment) — unchanged
+  (deferred; needs comment-vs-code intent detection)
+- F7 (`fromMaybeGlobalId` "no validation") — DROPPED by no-validation-check
+
+**Expected: 4 of 6 false positives killed, including both BLOCKINGs.**
+F3 and F6 explicitly remain; revisit with more PR data.
+
+### Out of scope (deferred)
+
+- Pre-LLM context injection (model file → matching migration's
+  `createTable` block in prompt) — bigger change, deferred to v0.5.8 if
+  validators alone prove insufficient.
+- F3 adjacent-test conflation — Gemini suggested a diff-context validator
+  (drop if cited symbol appears only in space-prefix context lines, not
+  +/- modified lines). Compelling but requires diff parsing in a new
+  validator. Deferred.
+- F6 anchoring on explanatory comments — needs comment-vs-code intent
+  detection. Defer indefinitely until data shows the pattern recurring.
+
+[BX-3010]
+
 ## [0.5.6] - 2026-04-28 — Self-describing comment markers for cross-round dedup
 
 Driven by monorepo PR #7145 — 74 inline comments + 8 CHANGES_REQUESTED reviews
