@@ -23,8 +23,13 @@
 #      TODO(TICKET) documents the deferral).
 #   9. citation-discipline — final severity gate. Any BLOCKING/SHOULD-FIX
 #      missing DIFF_LINE/REACHABLE_PATH/REJECTED_ALTERNATIVE gets downgraded.
-#      Runs last so it enforces the citation contract against the FINAL
-#      severity after all other mutations/drops.
+#      Enforces the citation contract against the final severity after all
+#      other mutations/drops.
+#  10. dedup-helper       — drops current findings whose logical identity_key
+#      matches a prior finding (cross-round dedup; line-shift- and severity-
+#      mutation-tolerant). No-op when DIFFHOUND_PRIOR_FINDINGS env unset.
+#      Runs LAST so any severity mutations / annotations from upstream
+#      validators are part of the block_raw that's either kept or dropped.
 #
 # round-diff isn't in this pipeline — it's invoked separately with access
 # to the prior-findings state.
@@ -42,4 +47,5 @@ V="$ROOT/lib/validators"
   | "$V/pre-existing-pattern.sh" \
   | "$V/consumer-check.sh" \
   | "$V/todo-deferral.sh" \
-  | "$V/citation-discipline.sh"
+  | "$V/citation-discipline.sh" \
+  | "$V/dedup-helper.py"

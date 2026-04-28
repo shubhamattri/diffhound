@@ -1,0 +1,7 @@
+FINDING: app.py:5:BLOCKING
+WHAT: `process` swallows errors silently
+EVIDENCE: app.py:5
+IMPACT: bugs hidden
+OPTIONS:
+1. rethrow
+UNVERIFIABLE: no

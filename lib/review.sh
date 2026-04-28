@@ -3044,6 +3044,7 @@ if [ "${DIFFHOUND_SKIP_VALIDATORS:-0}" != "1" ] \
    && [ -s "$CLAUDE_OUT" ]; then
   _VALIDATED_OUT=$(mktemp -t "pr-${PR_NUMBER}-validated.XXXXXX")
   if DIFFHOUND_REPO="${DIFFHOUND_REPO:-${REPO_PATH:-$(pwd)}}" \
+     DIFFHOUND_PRIOR_FINDINGS="${PRIOR_FINDINGS_FILE:-}" \
      "${LIB_DIR}/validators/format-adapter.sh" < "$CLAUDE_OUT" > "$_VALIDATED_OUT" 2>/dev/null \
      && [ -s "$_VALIDATED_OUT" ]; then
     # Count findings in either format (JSON .findings[] OR raw FINDING: lines).

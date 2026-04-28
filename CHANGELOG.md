@@ -92,14 +92,50 @@ txn-vs-lock language.
 - `worker-job-grab-no-skip-locked` → KEPT BLOCKING (multi-worker flow cited)
 - `nearby-transaction-different-scope` → KEPT (brace-aware scope check)
 
-### Bug 2 — comprehensiveness / cross-round dedup
+### Bug 2 — cross-round dedup
 
-Deferred to v0.5.3. The minimum-viable two-tier (logical_hash + site_hash)
-dedup intersects with existing posting-time dedup at lib/review.sh:4372 in
-ways that need careful design and dedicated fixtures to avoid false-drop
-regressions Gemini specifically flagged ("two distinct null-check findings in
-same function dedup'd to one"). Loop containment and concurrency disambiguation
-in this release stop the worst of the developer-experience pain.
+The dedup at `lib/review.sh:4372` is `(file, line ± 5, dev-touched)` — too
+narrow when the LLM rephrases a finding or the underlying line shifts beyond
+five lines. Result: the same logical issue is re-posted across rounds even
+after the dev addressed it.
+
+#### Added — validator (`lib/validators/dedup-helper.py`)
+- New stage at the **end** of the validator pipeline (after
+  `citation-discipline`), so any severity mutations or annotations from
+  upstream validators are part of the kept-or-dropped block.
+- Drops a current-round finding whose `identity_key = (file_basename,
+  primary_symbol, normalized_what[:80])` matches a prior-round finding.
+- `file_basename` (no full path, no line number) is line-shift- and rename-
+  tolerant. `primary_symbol` (first backtick-quoted identifier in WHAT) is
+  the protection against the false-drop Gemini specifically flagged: two
+  distinct findings on different vars (`userId` vs `accountId`) in the same
+  function have different `primary_symbol` and therefore different
+  `identity_key`, so both survive. `normalized_what[:80]` (lowercase,
+  whitespace-collapsed, validator annotations stripped) is severity- and
+  trailing-rephrase-tolerant.
+- Opt-out: `DIFFHOUND_DEDUP_DISABLE=1`.
+- No-op when `DIFFHOUND_PRIOR_FINDINGS` is unset, missing, or empty (first
+  reviews pass through verbatim).
+
+#### Changed — env propagation (`lib/review.sh`)
+- The format-adapter call site now passes
+  `DIFFHOUND_PRIOR_FINDINGS=${PRIOR_FINDINGS_FILE}` so the new dedup-helper
+  in `run-all.sh` actually receives the prior baseline that lib/review.sh
+  reconstructs at line 1772 from existing inline PR comments.
+
+#### Added — fixtures (`tests/fixtures/dedup-helper/`)
+- `prior-match-drops` — line-shift case (line 5 → line 8, same WHAT) DROPPED.
+- `prior-different-symbol-keeps` — same wording template, different
+  `primary_symbol` (`process` vs `validate`) — KEPT (false-drop protection).
+- `no-prior-noop` — first-review case, no `DIFFHOUND_PRIOR_FINDINGS` env →
+  pass-through verbatim.
+
+#### Why a new validator and not extending round-diff.py
+`round-diff.py` continues to compute the `CHANGES_SINCE_LAST_REVIEW` trailer
+("+N new, -M resolved, =K unchanged") with its existing keep-and-count
+semantics. Existing round-diff fixtures encode that contract; a separate
+dedup-helper lets the **drop** behaviour live independently and be opt-ed out
+cleanly without touching the trailer.
 
 ### Added — sweep fallback (carried forward from prior unreleased)
 - **`bin/diffhound-sweep`** — poller that runs outside GitHub Actions and
@@ -113,7 +149,8 @@ in this release stop the worst of the developer-experience pain.
   `DIFFHOUND_SWEEP_PR_LIMIT`), state layout, observability, troubleshooting.
 
 ### Tests
-- 34/34 fixture tests pass (up from 30/30): 4 new for `concurrency-helper`.
+- 37/37 fixture tests pass (up from 30/30): 4 new for `concurrency-helper`,
+  3 new for `dedup-helper`.
 - `bash -n lib/review.sh` clean.
 
 ### Peer review

@@ -1,0 +1,7 @@
+FINDING: app.py:12:BLOCKING
+WHAT: `validate` swallows errors silently
+EVIDENCE: app.py:12
+IMPACT: bugs hidden
+OPTIONS:
+1. rethrow
+UNVERIFIABLE: no
