@@ -1,0 +1,7 @@
+FINDING: badProcess.ts:6:SHOULD-FIX
+WHAT: race condition - concurrent modification possible between two unrelated table writes
+EVIDENCE: badProcess.ts:5,6
+IMPACT: audit record may not match user state if interrupted
+OPTIONS:
+1. wrap in transaction
+UNVERIFIABLE: no

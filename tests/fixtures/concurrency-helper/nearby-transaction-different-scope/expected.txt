@@ -1,0 +1,7 @@
+FINDING: twoFunctions.ts:31:SHOULD-FIX
+WHAT: race condition - concurrent modification of user balance and audit row could leave them inconsistent
+EVIDENCE: twoFunctions.ts:30,31
+IMPACT: audit drift on partial failure
+OPTIONS:
+1. wrap in transaction
+UNVERIFIABLE: no

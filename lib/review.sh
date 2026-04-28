@@ -623,6 +623,31 @@ _respond_to_dev_replies() {
   local pr="$1" repo_owner="$2" repo_name="$3" all_comments="$4"
   local responded=0 max_responses=5
 
+  # ── v0.5.2 loop-break: registry of bot comment IDs (per repo, per PR) ──
+  # Authority for "is this comment from us?" — the registry is the source of
+  # truth, the anchored signature is a hint. The registry is bootstrapped from
+  # current PR state on every run, so a fresh VM or lost cache cannot restart
+  # the loop seen in monorepo PR #7132.
+  local DIFFHOUND_SIG_PREFIX='<!-- diffhound-'
+  local DIFFHOUND_REPLY_SIG='<!-- diffhound-reply v0.5.2 -->'
+  local DIFFHOUND_ESCALATION_SIG='<!-- diffhound-escalation v0.5.2 -->'
+  local registry_file="$HOME/.diffhound/state/${repo_owner}_${repo_name}/pr-${pr}-bot-comments.txt"
+  mkdir -p "$(dirname "$registry_file")" 2>/dev/null || true
+  touch "$registry_file"
+  # Bootstrap: any current PR comment whose body STARTS with our anchored
+  # signature is registered as bot-authored. The leading-anchor check defeats
+  # GitHub's Quote-reply (which prefixes the body with "> ") so a human quoting
+  # us is not misclassified.
+  printf '%s' "$all_comments" \
+    | jq -r --arg pfx "$DIFFHOUND_SIG_PREFIX" '
+        .[] | select(.body | startswith($pfx)) | .id' \
+    2>/dev/null >> "$registry_file" || true
+  sort -un "$registry_file" -o "$registry_file" 2>/dev/null || true
+
+  # response_cache kept for back-compat with _auto_resolve_replied_threads;
+  # it tracks dev-reply IDs the bot has answered, not the bot's own replies.
+  local response_cache="$REVIEW_CACHE_DIR/pr-${pr}-responses.txt"
+
   # Find reviewer top-level comment IDs
   local reviewer_ids
   reviewer_ids=$(printf '%s' "$all_comments" | jq -r \
@@ -639,34 +664,51 @@ _respond_to_dev_replies() {
       --argjson parent "$cid" \
       '[.[] | select(.id == $parent or .in_reply_to_id == $parent)] | sort_by(.id)')
 
-    # Check if the last message in thread is from the bot (not a human dev)
-    # Can't rely on username alone (reviewer and dev may share the same GH account).
-    # Instead: check if the last message's body is in our posted-comments cache
-    # or response cache. If it is, Diffhound posted it -- skip. If not, a human wrote it.
-    local last_body last_reply_id_check
+    # ── v0.5.2 loop-break: registry-authoritative bot detection ──
+    # The registry is the truth. The anchored signature is a hint that also
+    # catches cold-start cases before bootstrap completes.
+    local last_body last_reply_id
     last_body=$(printf '%s' "$thread" | jq -r '.[-1].body')
-    last_reply_id_check=$(printf '%s' "$thread" | jq -r '.[-1].id')
-    local _is_bot_message=false
-    # Check response cache (previous AI replies)
-    local response_cache="$REVIEW_CACHE_DIR/pr-${pr}-responses.txt"
-    if [ -f "$response_cache" ] && grep -qx "$last_reply_id_check" "$response_cache" 2>/dev/null; then
-      _is_bot_message=true
-    fi
-    # Check posted-comments cache (original review comments)
-    if [ "$_is_bot_message" = false ]; then
-      local _posted_cache="$REVIEW_CACHE_DIR/pr-${pr}-posted.json"
-      if [ -f "$_posted_cache" ]; then
-        # Match first 80 chars of the body against posted comments
-        local _body_prefix="${last_body:0:80}"
-        if jq -r '.comments[]' "$_posted_cache" 2>/dev/null | grep -qF "$_body_prefix" 2>/dev/null; then
-          _is_bot_message=true
-        fi
-      fi
-    fi
-    [ "$_is_bot_message" = true ] && continue
+    last_reply_id=$(printf '%s' "$thread" | jq -r '.[-1].id')
 
-    # Reuse last_reply_id_check as last_reply_id for the response cache write later
-    local last_reply_id="$last_reply_id_check"
+    # If the last comment is registered as ours, the bot already had the last
+    # word; nothing to respond to. Skip.
+    if grep -qx "$last_reply_id" "$registry_file" 2>/dev/null; then
+      continue
+    fi
+    # Anchored-signature fallback (cold-start before bootstrap, or cache loss).
+    if printf '%s' "$last_body" | head -1 | grep -qE "^${DIFFHOUND_SIG_PREFIX}"; then
+      continue
+    fi
+
+    # ── v0.5.2 hard turn limit @ 2 (signature-counted) ──
+    # If the registry shows we've already replied twice in this thread, post a
+    # one-shot escalation comment ("human reviewer needed") and stop. Defends
+    # against any future cache-write bug or webhook-storm scenario.
+    local _thread_ids _bot_replies_in_thread _has_escalation
+    _thread_ids=$(printf '%s' "$thread" | jq -r '.[].id')
+    if [ -s "$registry_file" ]; then
+      _bot_replies_in_thread=$(printf '%s\n' "$_thread_ids" | grep -cFf "$registry_file" 2>/dev/null || echo 0)
+    else
+      _bot_replies_in_thread=0
+    fi
+    if [ "${_bot_replies_in_thread:-0}" -ge 2 ]; then
+      _has_escalation=$(printf '%s' "$thread" | jq -r --arg sig "$DIFFHOUND_ESCALATION_SIG" '
+        [.[] | select(.body | startswith($sig))] | length' 2>/dev/null || echo 0)
+      if [ "${_has_escalation:-0}" -eq 0 ]; then
+        local _esc_body
+        _esc_body="${DIFFHOUND_ESCALATION_SIG}"$'\n\n'"This thread has reached the automated reply limit (2). Flagging for human review."
+        local _esc_resp _esc_id
+        _esc_resp=$(gh api --method POST \
+          -H "Accept: application/vnd.github+json" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          "/repos/${repo_owner}/${repo_name}/pulls/${pr}/comments/${cid}/replies" \
+          --field "body=${_esc_body}" 2>/dev/null) || true
+        _esc_id=$(printf '%s' "$_esc_resp" | jq -r '.id // empty' 2>/dev/null || true)
+        [ -n "$_esc_id" ] && echo "$_esc_id" >> "$registry_file"
+      fi
+      continue
+    fi
 
     # Gather context for the AI call
     local original_comment dev_reply file_path
@@ -749,15 +791,24 @@ RESPOND_RULES_END
 
     [ -z "$ai_reply" ] && continue
 
-    # Post the reply to the thread
-    if gh api \
+    # Post the reply with a leading anchored signature so the consumer workflow
+    # guard, the loop-breaker, and the registry-bootstrap all recognise it.
+    local signed_reply
+    signed_reply="${DIFFHOUND_REPLY_SIG}"$'\n\n'"${ai_reply}"
+    local _post_resp _new_id
+    _post_resp=$(gh api \
       --method POST \
       -H "Accept: application/vnd.github+json" \
       -H "X-GitHub-Api-Version: 2022-11-28" \
       "/repos/${repo_owner}/${repo_name}/pulls/${pr}/comments/${cid}/replies" \
-      --field "body=${ai_reply}" > /dev/null 2>&1; then
+      --field "body=${signed_reply}" 2>/dev/null) || continue
+    _new_id=$(printf '%s' "$_post_resp" | jq -r '.id // empty' 2>/dev/null || true)
+    if [ -n "$_new_id" ]; then
       responded=$((responded + 1))
-      # Record in response cache to prevent double-replying
+      # Register the new reply ID — authoritative source for next invocation.
+      echo "$_new_id" >> "$registry_file"
+      # Legacy: response_cache still tracks the dev reply we answered, used by
+      # _auto_resolve_replied_threads to skip threads with active push-back.
       echo "$last_reply_id" >> "$response_cache"
     fi
   done <<< "$reviewer_ids"
@@ -2203,7 +2254,10 @@ Apply each as a lens. For each principle, perform the concrete check listed.
 
 4. **Observability**: Search for console.log in changed files. If file already uses structured logger, show the exact replacement snippet.
 
-5. **DB queries**: Detect queries in loops. If DataLoader/withGraphFetched exists in context but is not used: BLOCKING N+1.
+5. **N+1 queries** — runtime cost simulation, not ORM-syntax pattern-match.
+    Flag a DB call inside a loop ONLY when you can demonstrate the queries are sequential and per-item. Cite (a) the loop, (b) the parent query that drives the loop, (c) max iteration count (with evidence — pagination limit, list cap). Do NOT prescribe a specific fix shape — DataLoader, `.withGraphFetched()`, raw SQL JOIN, batch with `.whereIn()`, custom batch loader are all valid; pick whichever the surrounding code already uses.
+    NOT an N+1: a JOIN in raw SQL, a batched query using whereIn/IN, or a DataLoader call (these resolve in one round-trip even though they look like a per-item call).
+    For GraphQL field resolvers: multiplied cost = (queries per invocation) × (max list size). The list size is the parent's pagination cap, not a guess.
 
 6. **Migrations & idempotency**: For migration files — check IF NOT EXISTS guards, CONCURRENTLY, NOT VALID patterns. Verify the down() function is valid SQL and does not have duplicate WHERE clauses.
 
@@ -2215,17 +2269,24 @@ Apply each as a lens. For each principle, perform the concrete check listed.
 
 10. **Vue guard audit**: For any removed v-if or conditional — does the same guard appear in a method body too? If yes, both must change together. Does removing it allow an unintended user cohort to initiate payment/booking/irreversible action? If yes: BLOCKING.
 
-11. **Race conditions**: Two separate DB calls updating related fields with no transaction = SHOULD-FIX. In financial operations: BLOCKING.
+11. **Race conditions** — runtime simulation, not syntax pattern-match.
+    Race-condition findings MUST cite (a) the concrete concurrent flow — which two callers race (different requests, different workers, multi-process queue, cron + handler), (b) the specific rows/state contended, (c) which existing primitive is insufficient and why.
+    NOT a race:
+    - Sequential awaits inside a single Node request handler (event loop is single-threaded; awaits within one request don't interleave with each other).
+    - Sequential awaits inside a `.transaction(async trx => {...})` block on rows already row-locked (`SELECT … FOR UPDATE`) — the DB engine serializes contending transactions.
+    - A null-check ergonomics finding on a value that the surrounding code has already row-locked. State as a TypeScript-types finding, not a race.
+    Worker-queue grab patterns require `FOR UPDATE SKIP LOCKED` or an advisory lock; `.transaction()` alone does NOT prevent two workers from picking the same row. Saying "wrap in transaction" for this case is a wrong fix.
+    If you cannot cite (a)+(b)+(c) concretely: do NOT post as a race. File as OPEN_QUESTION instead.
 
-12. **Resilience** (for external API calls, jobs, queues):
-    - No timeout on axios/fetch = BLOCKING
-    - Loop with no per-item try/catch (no bulkhead) = BLOCKING
-    - No DLQ for async queue processing = BLOCKING
-    - No retry/backoff = SHOULD-FIX
+12. **Resilience** (external API calls, jobs, queues) — verify at the layer that actually owns the behaviour.
+    - **Timeout**: BLOCKING only when you can verify NO timeout is set at any layer. Inline `{ timeout: X }` is one form. A shared axios instance configured with `axios.create({ timeout: X })`, an interceptor that injects timeouts, or a typed wrapper (e.g. `httpClient.ts`) all count. If a wrapper is involved, open the wrapper file and check before flagging. Cite the call site AND the resolved client config.
+    - **Bulkhead**: a loop calling external APIs with no per-item try/catch is BLOCKING. Cite the loop location and what one item's failure would do to the others.
+    - **DLQ for async queue processing**: BLOCKING when missing. Cite the queue and the failure path.
+    - **Retry / backoff**: SHOULD-FIX when missing on a critical-path external call.
 
 13. **Hardcoded values**: Config values, base TAT days, SLA values, URLs hardcoded in code instead of using a shared config object = SHOULD-FIX.
 
-14. **Timezone**: CURRENT_DATE or NOW() in cron SQL — verify timezone context. UTC vs IST mismatch = BLOCKING.
+14. **Timezone in cron / scheduled SQL** — any call returning current date/time (`CURRENT_DATE`, `NOW()`, `current_timestamp`, `sysdate`, `getdate()`, JS `new Date()`, `Date.now()`, dayjs/luxon equivalents) — verify the timezone the DB or runtime resolves it in. Nova's DB is UTC; business calendars are IST. If a query buckets by "today" using DB UTC for an IST-anchored business event: BLOCKING. State the DB timezone setting (the verification command is `SELECT current_setting('timezone')`) and the business expectation, then point at the mismatch.
 
 15. **NO LAZY VERIFICATION — do the work yourself, never push it back to the author**:
     If you can verify something by reading the diff, you MUST verify it before commenting.
