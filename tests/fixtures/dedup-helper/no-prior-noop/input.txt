@@ -1,0 +1,7 @@
+FINDING: app.py:5:SHOULD-FIX
+WHAT: `widget` typo in error message
+EVIDENCE: app.py:5
+IMPACT: minor
+OPTIONS:
+1. fix
+UNVERIFIABLE: no
