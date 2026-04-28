@@ -1,0 +1,7 @@
+FINDING: farAway.ts:11:SHOULD-FIX
+WHAT: division by `values.length` is unsafe on empty input
+EVIDENCE: farAway.ts:11
+IMPACT: NaN propagates through preview payloads
+OPTIONS:
+1. early-return for empty arrays
+UNVERIFIABLE: no

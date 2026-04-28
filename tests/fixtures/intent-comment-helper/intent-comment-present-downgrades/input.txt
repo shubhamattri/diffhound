@@ -1,0 +1,7 @@
+FINDING: metricsService.ts:3:SHOULD-FIX
+WHAT: `overallAvgTat` denominator is `months.length` not the count of months with data; one-month-of-data case shows wrong average
+EVIDENCE: metricsService.ts:3
+IMPACT: dashboard shows stale or misleading averages
+OPTIONS:
+1. divide by months.filter((m) => m.avgTat > 0).length
+UNVERIFIABLE: no

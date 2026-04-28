@@ -1,0 +1,7 @@
+FINDING: metricsService.ts:3:OPEN_QUESTION
+WHAT: `overallAvgTat` denominator is `months.length` not the count of months with data; one-month-of-data case shows wrong average [intent-comment-helper: downgraded from SHOULD-FIX; nearby comment cites intentional behaviour: "Average TAT always over 3 months; no-endorsement months count as 0 (zero-padd..."; verify before blocking]
+EVIDENCE: metricsService.ts:3
+IMPACT: dashboard shows stale or misleading averages
+OPTIONS:
+1. divide by months.filter((m) => m.avgTat > 0).length
+UNVERIFIABLE: no

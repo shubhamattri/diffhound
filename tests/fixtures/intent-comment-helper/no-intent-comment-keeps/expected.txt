@@ -1,0 +1,7 @@
+FINDING: handler.ts:4:SHOULD-FIX
+WHAT: division by `items.length` will throw on empty input despite the comment promising the caller handles it
+EVIDENCE: handler.ts:4
+IMPACT: runtime NaN if items is empty
+OPTIONS:
+1. guard with items.length === 0
+UNVERIFIABLE: no

@@ -11,6 +11,10 @@
 #      findings to OPEN_QUESTION when flagged code is inside a .transaction()
 #      block (or adjacent to FOR UPDATE / advisory lock) AND finding does not
 #      cite a concrete multi-process flow. Mirrors security-helper shape.
+#   3a. intent-comment-helper — downgrades any finding whose flagged line is
+#      immediately preceded (within 5 lines) by an inline comment containing
+#      intent markers ("intentional", "by design", "zero-padded", etc.).
+#      Same shape as security/concurrency helpers; downgrade-only.
 #   4. dry-vs-import      — narrow wording gate.
 #   5. ref-exists         — broader wording-conditional drop / annotate pass.
 #   6. pre-existing-pattern — drops "new X per request" findings when the
@@ -42,6 +46,7 @@ V="$ROOT/lib/validators"
 "$V/checklist-execute.py" \
   | "$V/security-helper.sh" \
   | "$V/concurrency-helper.sh" \
+  | "$V/intent-comment-helper.sh" \
   | "$V/dry-vs-import.sh" \
   | "$V/ref-exists.sh" \
   | "$V/pre-existing-pattern.sh" \

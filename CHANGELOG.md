@@ -2,6 +2,70 @@
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-04-28 — Intent-aware validators + anti-pattern prompt sweep
+
+Driven by feedback on Gurupriyan's BR deck PR #7145. After 27 + 8 diffhound
+findings across 5 review rounds, three classes of recurring failure showed up
+that the prompt and validator pipeline were missing. v0.5.4 closes those.
+
+### Added — `lib/validators/intent-comment-helper.sh`
+- New stage in the validator pipeline (after concurrency-helper, before
+  dry-vs-import). Mirrors security-helper.sh / concurrency-helper.sh shape.
+- For ANY finding (no keyword gate at WHAT level), scans the 5 lines above the
+  flagged line in the source file for an inline comment containing intent
+  markers: `intentional`, `by design`, `deliberately`, `on purpose`,
+  `zero-pad(ded)`, `always over/count/return/fall`, `same soft behaviour`.
+- If found AND severity is BLOCKING/SHOULD-FIX/NIT, downgrades to
+  OPEN_QUESTION and annotates the WHAT line with the matched comment excerpt.
+- Catches the PR #7145 case of `Math.round(reduce(...) / months.length)`
+  flagged as a "wrong denominator" when the directly-above comment said
+  *"Average TAT always over 3 months; no-endorsement months count as 0
+  (zero-padded)"* — explicit intent the model ignored.
+
+### Changed — prompt rules in `lib/review.sh`
+Four new rules in the CONCRETE VERIFICATION CHECKS list:
+
+- **Rule 26** — Intent-comment recognition. Upstream guard so the model does
+  not generate the finding in the first place; the validator above is the
+  mechanical catcher when rule 26 still misses.
+- **Rule 27** — Already-applied check. Before suggesting "declare X as Y",
+  grep the file for the suggested form. If already in place, drop the
+  finding. Catches the PR #7145 `Promise<Buffer>` hallucination (the function
+  was already typed `Promise<Buffer>` two lines above the flagged location).
+- **Rule 28** — Constant-value verification. When citing a numeric bound,
+  grep the constant declaration and quote the actual value. Off-by-one is a
+  recurring hallucination class — `SANITIZE_MAX_NESTING_DEPTH = 5` does not
+  "cap at 6". If the constant cannot be found, describe the bound abstractly.
+- **Rule 29** — Test-file anti-pattern sweep. When reviewing `*.spec.ts` /
+  `*.test.ts`, explicitly look for: loose comparison assertions where a MAX/
+  MIN constant applies (`toBeLessThan(N)` should be `toBe(MAX_X)`); mocks
+  declared but never asserted (`jest.fn()` for a side-effect with no
+  `expect(mock).toHaveBeenCalled()`); dead mocks (mocked identifiers that the
+  source never calls); type-only imports being mocked at runtime. These four
+  produce real findings with near-zero hallucination risk.
+
+### Added — fixtures (`tests/fixtures/intent-comment-helper/`)
+- `intent-comment-present-downgrades` — mirrors the PR #7145 zero-padded case
+  exactly. Finding flagged at line 3 with intent comment at line 2 → DOWNGRADED
+  SHOULD-FIX → OPEN_QUESTION with annotation.
+- `no-intent-comment-keeps` — a cautionary comment ("Caller is expected to
+  handle empty input") is NOT an intent marker → KEPT at original severity.
+- `intent-comment-far-away-keeps` — intent text in the file header (lines 1-3)
+  but flagged finding is at line 11, outside the 5-line window → KEPT.
+
+### Tests
+- 40/40 fixtures pass (up from 37/37): 3 new for `intent-comment-helper`.
+- `bash -n lib/review.sh` clean.
+
+### Why this release
+PR #7145 exposed that diffhound v0.5.3, while loop-safe, still generated noise
+on (a) intentional behaviour the dev had already documented, (b) suggestions
+that were already in the code, (c) numeric bounds quoted incorrectly (off by
+one), (d) test files with mock setups that no assertion exercised. v0.5.4
+addresses each: one new validator (a), three new prompt rules (a/b/c/d). The
+DNA is "every PR-review iteration ships a tool fix in the same session"
+(memory: feedback_above_beyond_dna.md).
+
 ## [0.5.3] - 2026-04-28 — Hotfix: thread-engagement guard
 
 ### Bug — spurious bot replies on threads with no dev engagement
