@@ -45,12 +45,12 @@ for vdir in "$FIXTURES"/*/; do
       continue
     fi
 
-    # Optional: prior-findings file for round-diff
-    if [ -f "$case_dir/prior.txt" ]; then
-      actual=$(env DIFFHOUND_REPO="$repo" DIFFHOUND_PRIOR_FINDINGS="$case_dir/prior.txt" "$script" < "$input" 2>/dev/null)
-    else
-      actual=$(env DIFFHOUND_REPO="$repo" "$script" < "$input" 2>/dev/null)
-    fi
+    # Optional: prior-findings file for round-diff / dedup-helper legacy path,
+    # and prior-keys.txt for dedup-helper v0.5.6+ exact-tuple path.
+    _env_args=(DIFFHOUND_REPO="$repo")
+    [ -f "$case_dir/prior.txt" ] && _env_args+=(DIFFHOUND_PRIOR_FINDINGS="$case_dir/prior.txt")
+    [ -f "$case_dir/prior-keys.txt" ] && _env_args+=(DIFFHOUND_PRIOR_KEYS="$case_dir/prior-keys.txt")
+    actual=$(env "${_env_args[@]}" "$script" < "$input" 2>/dev/null)
     expected_content=$(cat "$expected")
     if [ "$actual" = "$expected_content" ]; then
       echo "PASS  $vname/$cname"

@@ -1,0 +1,1 @@
+redisRateLimit.ts	DECR	raw `decr` on a key that doesn't exist creates it at `-1`. when `increment()` is
