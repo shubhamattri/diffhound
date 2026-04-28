@@ -2,41 +2,6 @@
 
 ## [Unreleased]
 
-## [0.5.6] - 2026-04-28 — Trivial-assertion + description-mismatch test sweep
-
-Two extensions to the test-file anti-pattern sweep (rule 29) driven by PR
-#7145 round-7 findings.
-
-### Changed — `lib/review.sh` rule 29 (extended)
-
-Two new test-file anti-pattern classes added to the existing list:
-
-- **Trivially-true ternary fallback assertions.** `expect(actual).toBe(cond ?
-  expected : actual)` collapses to `expect(actual).toBe(actual)` on the
-  false branch — zero coverage. Same shape: `expect(value).toBe(value)`,
-  `expect(arr.length).toBeGreaterThanOrEqual(0)`, `expect(typeof x).toBe(typeof
-  x)`, `expect(value!).toBeDefined()`. Flag with the simpler direct
-  assertion.
-  - Caught the round-7 case where
-    `expect(row.monthLabel).toBe(result.months[index] ? \`...\` : row.monthLabel)`
-    was a tautology on the false branch AND the false branch was
-    unreachable (rows.length === months.length).
-
-- **Test description vs. behaviour mismatch.** When a test's `it("...")`
-  description names a specific code branch ("below threshold", "with cache
-  hit", "when X is null") but the test setup does not exercise that branch,
-  flag. Wrong descriptions erode coverage signal — future readers infer the
-  wrong path is under test.
-  - Caught the round-7 case where the test was titled "saves manualPremium
-    without earnedPremium when paid premium is at or below threshold" but
-    the mock used `paidPremium: 3_000_000` which is far above the 500K floor;
-    the actual branch was `policyEndDate missing from payload`.
-
-### Tests
-- 40/40 fixtures still pass (no fixture change — these are prompt-rule
-  additions to existing rule 29).
-- `bash -n lib/review.sh` clean.
-
 ## [0.5.5] - 2026-04-28 — Knex idempotency recognition + sibling-test omission
 
 Two small prompt-rule additions driven by PR #7145 round-6 findings.
