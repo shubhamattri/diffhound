@@ -2,6 +2,62 @@
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-04-28 — Hotfix: thread-engagement guard
+
+### Bug — spurious bot replies on threads with no dev engagement
+
+**Regression introduced by v0.5.2.** Saw on monorepo PR #7145: one legitimate
+dev reply produced **five** bot replies — one real (on the thread the dev
+actually engaged with) and **four spurious** (on threads where only the bot's
+original review comment existed).
+
+**Root cause.** `_respond_to_dev_replies` is invoked once per `--learn` run
+when ANY thread receives a fresh dev reply (gated at line 521 by
+`replied > 0`). Once invoked, it iterates EVERY reviewer top-level comment
+and processes the corresponding thread.
+
+In v0.5.1 the per-thread check had two layers — the response_cache (dev reply
+IDs already answered) AND a `_posted_cache` body-prefix match against the
+bot's own original review comments. The body-prefix check was the implicit
+filter for "thread has only the root, no dev engagement → skip."
+
+In v0.5.2 I replaced both with a registry + anchored-signature check.
+Critically: original review comments **don't carry the anchored signature**
+(only replies do — that was a v0.5.2 change too) and **are not in the
+registry** (registry tracks REPLIES posted, not root review comments).
+So a thread containing only the bot's root review comment slips both checks
+and gets responded to.
+
+### Fix
+
+`lib/review.sh:_respond_to_dev_replies` now skips any thread whose
+`length <= 1` before reaching the registry / signature checks. A thread with
+no replies has nothing to respond to.
+
+```bash
+local _thread_length
+_thread_length=$(printf '%s' "$thread" | jq 'length' 2>/dev/null || echo 0)
+if [ "${_thread_length:-0}" -le 1 ]; then
+  continue
+fi
+```
+
+This is a strict super-set of the implicit filter v0.5.1's body-prefix check
+provided, but doesn't depend on the posted_cache being present (which the
+v0.5.2 plan was deliberately moving away from anyway).
+
+### Tests
+- 37/37 fixture tests still pass (no fixture change needed — this is a flow
+  guard, not a validator).
+- `bash -n lib/review.sh` clean.
+
+### Why this wasn't caught in v0.5.2 review
+The two rounds of Codex + Gemini peer review focused on the loop-back attack
+vectors (signature spoofing, identity collapse, in_reply_to_id pointing to
+root, race conditions on POST). None of us simulated the "thread without dev
+engagement during a learn run triggered by a sibling thread" case. Adding
+this scenario to the standard peer-review prompt for any reply-loop fix.
+
 ## [0.5.2] - 2026-04-28 — Loop break, concurrency disambiguation, sweep fallback
 
 ### Bug 1 — runaway self-reply loop on PR review threads (P0)
