@@ -1,0 +1,7 @@
+FINDING: services/api/src/brDeck/exportHandlers.ts:71:BLOCKING
+WHAT: accountAdmin cross-org data exposure via REST export endpoints; graphql path has the fix, REST doesn't
+EVIDENCE: exportHandlers.ts:71
+IMPACT: account admin scoped to org A could fetch a PPTX containing org B data
+OPTIONS:
+1. add ensureAccountAdminCanAccessBrDeckOrg in REST handlers
+UNVERIFIABLE: no

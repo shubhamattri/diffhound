@@ -1,0 +1,7 @@
+FINDING: services/api/src/brDeck/unguarded.ts:42:BLOCKING
+WHAT: graphql side has the fix, REST doesn't have any auth scoping
+EVIDENCE: unguarded.ts:42
+IMPACT: any authenticated user can hit this path
+OPTIONS:
+1. add the guard
+UNVERIFIABLE: no

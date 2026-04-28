@@ -1,0 +1,7 @@
+FINDING: services/api/src/brDeck/something.ts:99:NIT
+WHAT: minor naming inconsistency on the variable name `foo` vs `bar`
+EVIDENCE: something.ts:99
+IMPACT: cosmetic
+OPTIONS:
+1. rename
+UNVERIFIABLE: no

@@ -25,6 +25,12 @@
 #   5b. no-validation-check — drops "no validation" claims when the named
 #       function body has validation tells (PR #7145 F7). Tiered tells
 #       guard against state-check false drops. v0.5.7.
+#   5c. cross-file-comparison-check — drops "X has fix, Y doesn't" /
+#       "Y is missing the guard" findings when the FINDING file has
+#       2+ ensure/assert/verify/check/require guard-helper invocations.
+#       Driven by PR #7145 v0.5.7-deployed FP at exportHandlers.ts:71
+#       ("graphql path has fix, REST doesn't" — REST had the call at 4
+#       distinct line numbers in the same file). v0.5.8.
 #   6. pre-existing-pattern — drops "new X per request" findings when the
 #      pattern already exists >=3 times in the file (pre-dates the PR).
 #   7. consumer-check     — downgrades "breaking API change" BLOCKERS when
@@ -59,6 +65,7 @@ V="$ROOT/lib/validators"
   | "$V/ref-exists.sh" \
   | "$V/migration-column-check.sh" \
   | "$V/no-validation-check.sh" \
+  | "$V/cross-file-comparison-check.sh" \
   | "$V/pre-existing-pattern.sh" \
   | "$V/consumer-check.sh" \
   | "$V/todo-deferral.sh" \

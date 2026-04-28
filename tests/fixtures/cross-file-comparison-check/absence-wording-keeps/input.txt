@@ -1,0 +1,7 @@
+FINDING: services/api/src/brDeck/exportHandlers.ts:71:BLOCKING
+WHAT: the ensureAccountAdminCanAccessBrDeckOrg guard was removed in this PR; REST doesn't have any other auth scoping after the deletion
+EVIDENCE: exportHandlers.ts:71
+IMPACT: same as before — cross-org leak
+OPTIONS:
+1. restore the deleted guard
+UNVERIFIABLE: no
