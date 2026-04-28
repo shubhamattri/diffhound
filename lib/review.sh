@@ -1517,6 +1517,18 @@ _review_chunks_parallel() {
         echo "---"
         echo ""
       fi
+      # Inject deterministic grep evidence for symbols mentioned in the diff.
+      # Pre-resolves "Foo.bar doesn't exist" / "method missing" / "I grepped
+      # and got zero hits" hallucinations BEFORE the LLM writes its findings.
+      # See lib/build-evidence.sh — output is bounded at 50 symbols / 3KB.
+      local _chunk_evidence
+      _chunk_evidence=$(bash "${LIB_DIR}/build-evidence.sh" "$chunk_diff" "$repo_path" 2>/dev/null || true)
+      if [ -n "$_chunk_evidence" ]; then
+        printf '%s\n' "$_chunk_evidence"
+        echo ""
+        echo "---"
+        echo ""
+      fi
       # Inject re-review context with CONTEXTUAL BLINDERS approach:
       # - Full diff visibility (already provided as chunk diff)
       # - Scoped instructions: what to complain about depends on file type + change status
