@@ -1,0 +1,10 @@
+FINDING: api/handler.py:42:SHOULD-FIX
+WHAT: missing null check on user.organization before accessing user.organization.team — request from impersonator-without-org could throw
+EVIDENCE: api/handler.py:42
+IMPACT: 500 error on impersonator path
+OPTIONS:
+1. add null guard
+DIFF_LINE: +  return user.organization.team.id
+REACHABLE_PATH: ImpersonateMiddleware can populate user without org; team lookup is the next call
+REJECTED_ALTERNATIVE: skipping the lookup when org is null returns wrong default for downstream auth checks
+UNVERIFIABLE: no

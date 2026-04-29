@@ -50,7 +50,12 @@ for vdir in "$FIXTURES"/*/; do
     _env_args=(DIFFHOUND_REPO="$repo")
     [ -f "$case_dir/prior.txt" ] && _env_args+=(DIFFHOUND_PRIOR_FINDINGS="$case_dir/prior.txt")
     [ -f "$case_dir/prior-keys.txt" ] && _env_args+=(DIFFHOUND_PRIOR_KEYS="$case_dir/prior-keys.txt")
-    actual=$(env "${_env_args[@]}" "$script" < "$input" 2>/dev/null)
+    # Unset ANTHROPIC_API_KEY so verifier-stage fixtures take the offline
+    # passthrough branch deterministically — tests must not depend on the
+    # dev's parent-shell environment. Fixtures that need an API key in
+    # scope can opt in by setting it explicitly via a future per-fixture
+    # env file.
+    actual=$(env -u ANTHROPIC_API_KEY "${_env_args[@]}" "$script" < "$input" 2>/dev/null)
     expected_content=$(cat "$expected")
     if [ "$actual" = "$expected_content" ]; then
       echo "PASS  $vname/$cname"

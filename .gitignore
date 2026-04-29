@@ -22,3 +22,4 @@ Thumbs.db
 lib/__pycache__/
 *.bak
 *.bak.*
+__pycache__/
