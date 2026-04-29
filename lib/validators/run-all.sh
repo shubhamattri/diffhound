@@ -48,7 +48,16 @@
 #       round had `forUpdate at line 276` (real forUpdate is at 875)
 #       and `computeEarnedPremium at line 146` (function doesn't exist
 #       at all). Both wrong-line and hallucinated-symbol cases drop.
-#       v0.6.1.
+#       v0.6.1. v0.7.1 broadened: scans the entire FINDING block (not
+#       just WHAT/EVIDENCE/IMPACT/OPTIONS — DIFF_LINE/REACHABLE_PATH/
+#       REJECTED_ALTERNATIVE often carry the symbol claim now that
+#       citation-discipline made them mandatory), permissive backtick
+#       parsing extracts identifiers from `Record<string, string>`-shape
+#       backticks, and built-in TS types (Record, Promise, Array, etc.)
+#       are skipped so unique function/variable names carry the FP
+#       signal. Drove by PR #7145 v0.7.0 round FP at exportHandlers.ts:413
+#       claiming `as Record<string, string>` cast and `buildColumnMapForClaimCompass`
+#       symbol — neither exists at line 413.
 #   6. pre-existing-pattern — drops "new X per request" findings when the
 #      pattern already exists >=3 times in the file (pre-dates the PR).
 #   7. consumer-check     — downgrades "breaking API change" BLOCKERS when

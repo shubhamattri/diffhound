@@ -47,11 +47,17 @@ set -uo pipefail
 
 # Common JS/TS / English filler that appears as backticked tokens in legit
 # findings without being claims about a specific line's contents.
-SKIPLIST_RE='^(forEach|map|filter|reduce|find|findOne|findIndex|some|every|includes|indexOf|slice|splice|push|pop|shift|unshift|sort|reverse|join|split|trim|toLowerCase|toUpperCase|charAt|charCodeAt|substring|substr|replace|replaceAll|match|test|exec|valueOf|toString|hasOwnProperty|then|catch|finally|resolve|reject|all|race|allSettled|any|next|prev|done|value|key|name|type|id|err|error|true|false|null|undefined|this|self|new|of|in|as|is|do|to|on|at|or|and|not|the|a|an|it|its|be|its|util|utils|src|test|tests|spec|specs|exports|module|require|import|export|default|async|await|return|throw|try|class|function|const|let|var|interface|enum|type|extends|implements)$'
+# Extended v0.7.1 with TS built-in types (Record, Promise, Array, etc.) and
+# common English filler — the unique symbols (function/variable names) carry
+# the FP signal, not generic type/keyword tokens.
+SKIPLIST_RE='^(forEach|map|filter|reduce|find|findOne|findIndex|some|every|includes|indexOf|slice|splice|push|pop|shift|unshift|sort|reverse|join|split|trim|toLowerCase|toUpperCase|charAt|charCodeAt|substring|substr|replace|replaceAll|match|test|exec|valueOf|toString|hasOwnProperty|then|catch|finally|resolve|reject|all|race|allSettled|any|next|prev|done|value|key|name|type|id|err|error|true|false|null|undefined|this|self|new|of|in|as|is|do|to|on|at|or|and|not|the|a|an|it|its|be|its|util|utils|src|test|tests|spec|specs|exports|module|require|import|export|default|async|await|return|throw|try|class|function|const|let|var|interface|enum|type|extends|implements|Record|Promise|Array|Object|Function|Map|Set|WeakMap|WeakSet|Date|Number|Boolean|String|Symbol|RegExp|Error|TypeError|RangeError|SyntaxError|JSON|Math|Buffer|Partial|Required|Readonly|Pick|Omit|Exclude|Extract|NonNullable|ReturnType|Parameters|InstanceType|ThisType|Awaited|string|number|boolean|void|unknown|never|null|undefined|object|symbol|bigint|true|false)$'
 
 # Wording families that LEGITIMATELY claim a symbol is absent from a line —
 # don't fire when the finding is precisely about a deletion / removal.
-ABSENCE_WORDS='deleted|removed|dropped|never (called|invoked|used|appears|references)|no longer (defined|present|exists)|was renamed|has been (deleted|removed|renamed|dropped)|not in the (file|module|source)|not present|missing from|nowhere'
+# v0.7.1: extended to cover "doesn't exist", "isn't defined", "is undefined",
+# "no X anywhere", "cannot find" — common phrasings for true-positive absence
+# claims that should NOT be auto-dropped by this validator.
+ABSENCE_WORDS="deleted|removed|dropped|never (called|invoked|used|appears|references)|no longer (defined|present|exists)|was renamed|has been (deleted|removed|renamed|dropped)|not in the (file|module|source)|not present|missing from|nowhere|doesn'?t exist|does not exist|isn'?t defined|is not defined|is undefined|no .* (anywhere|in the codebase|in the file|in this file|in source)|cannot find|can'?t find|zero results|returns zero"
 
 block=""
 what=""
@@ -104,16 +110,18 @@ _check_and_emit() {
     _emit_block; block=""; what=""; header_prefix=""; finding_path=""; finding_line=""; return
   fi
 
-  # Extract backticked identifiers. Trim trailing punctuation / parens and
-  # any leading dot (writers often put `.forUpdate()` to indicate a method
-  # call rather than `forUpdate` directly — both should match against the
-  # same source identifier).
+  # Extract backticked identifiers — v0.7.1 permissive scan.
+  # Two-pass: pull every backtick span, then extract identifier-shape tokens
+  # from inside. Catches richer backtick contents like `Record<string, string>`,
+  # `effectiveJob.id`, `as Record<string, string>`, `Foo.bar()` — the previous
+  # version required the entire backtick body to match a strict identifier
+  # shape, so any ornament (angle brackets, spaces, dots, parens beyond simple
+  # method-call) caused the symbol to be missed entirely.
   local syms
   syms=$(printf '%s' "$what" \
-    | grep -oE '`\.?[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?(\(\))?`' \
+    | grep -oE '`[^`]+`' \
     | tr -d '`' \
-    | sed 's/()$//' \
-    | sed 's/^\.//' \
+    | grep -oE '[A-Za-z_][A-Za-z0-9_]+' \
     | sort -u || true)
 
   if [ -z "$syms" ]; then
@@ -189,16 +197,14 @@ while IFS= read -r line || [ -n "$line" ]; do
       header_prefix="${line#FINDING: }"
       _extract_path_and_line "$line"
       ;;
-    WHAT:*)
-      block+="$line"$'\n'
-      what="${what}${line} "
-      ;;
-    EVIDENCE:*|IMPACT:*|OPTIONS:*)
-      block+="$line"$'\n'
-      what="${what}${line} "
-      ;;
     *)
+      # v0.7.1: scan the entire block for backticked identifiers (not just
+      # WHAT/EVIDENCE/IMPACT/OPTIONS). DIFF_LINE/REACHABLE_PATH/REJECTED_ALTERNATIVE
+      # are now mandatory for BLOCKING/SHOULD-FIX and frequently carry the
+      # symbol claims. Skipping them meant findings whose only backticked
+      # identifier landed in REACHABLE_PATH bypassed the validator entirely.
       block+="$line"$'\n'
+      what="${what}${line} "
       ;;
   esac
 done

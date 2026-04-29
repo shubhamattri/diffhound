@@ -1,0 +1,11 @@
+FINDING: services/api/src/brDeck/exportHandlers.ts:413:BLOCKING
+WHAT: `buildColumnMapForClaimCompass` returns `Record<string, string> | Record<string, unknown>` and the cast to `Record<string, string>` at line 413 silently accepts nested `{ headers, rows }` from the `tat_report` branch.
+EVIDENCE: exportHandlers.ts:413
+IMPACT: future schema additions could land nested objects through unnoticed.
+OPTIONS:
+1. add a runtime guard
+2. discriminated union
+DIFF_LINE: services/api/src/brDeck/exportHandlers.ts:413
+REACHABLE_PATH: claims_dump branch reaches the cast via processBrDeckJob
+REJECTED_ALTERNATIVE: relying on TS narrowing alone
+UNVERIFIABLE: no
