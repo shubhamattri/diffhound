@@ -1,0 +1,7 @@
+FINDING: services/api/src/brDeck/exportHandlers.ts:71:BLOCKING
+WHAT: hypothetical finding for fixture purposes; without ANTHROPIC_API_KEY the verifier passes through unchanged.
+EVIDENCE: exportHandlers.ts:71
+IMPACT: noise
+OPTIONS:
+1. n/a
+UNVERIFIABLE: no

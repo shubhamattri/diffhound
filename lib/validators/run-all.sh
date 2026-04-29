@@ -57,6 +57,16 @@
 #      the final gate sees.
 #   8. todo-deferral      — severity mutation (BLOCKING→SHOULD-FIX when a
 #      TODO(TICKET) documents the deferral).
+#   8a. verifier         — LLM-as-judge stage. For each remaining BLOCKING
+#       or SHOULD-FIX finding, sends a Haiku call with the cited code +
+#       grep results for backticked identifiers, asking "TRUE / PARTIAL /
+#       HALLUCINATED?" Drops HALLUCINATED, downgrades PARTIAL one tier.
+#       Catches the residual FP classes the regex validators miss
+#       (recurring "X doesn't exist" wording variants, IDOR claims with
+#       new wording, behavior-claim hallucinations like "no timeout"
+#       when timeout is in the cited window). No-ops without
+#       ANTHROPIC_API_KEY — fixtures and offline runs pass through.
+#       v0.7.0.
 #   9. citation-discipline — final severity gate. Any BLOCKING/SHOULD-FIX
 #      missing DIFF_LINE/REACHABLE_PATH/REJECTED_ALTERNATIVE gets downgraded.
 #      Enforces the citation contract against the final severity after all
@@ -89,5 +99,6 @@ V="$ROOT/lib/validators"
   | "$V/pre-existing-pattern.sh" \
   | "$V/consumer-check.sh" \
   | "$V/todo-deferral.sh" \
+  | "$V/verifier.sh" \
   | "$V/citation-discipline.sh" \
   | "$V/dedup-helper.py"
