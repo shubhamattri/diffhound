@@ -39,6 +39,20 @@
 #       rounds 19:48-20:55: model claimed userCanAccessBrDeck was the
 #       gate when the actual code uses isAdmin || isBatman, blocking
 #       account admins entirely. v0.5.9.
+#   5cc. runtime-enforcement-check — drops "server policy will reject this"
+#        findings when REACHABLE_PATH cites a policy-config file but no
+#        call site in the affected feature dir actually invokes the
+#        policy's enforcement function. Driven by monorepo PR #7297
+#        (BX-3223) 4-round repeat: bot cited ClaimDocument extension
+#        policy in uploadPolicy.ts as REACHABLE_PATH, but the claim-upload
+#        mutation (services/api/src/claims/) doesn't call assertUploadAllowed
+#        at all — ClaimFilesHandler.uploadFile drops the `action` field
+#        before reaching the policy gate. Bot's symbol-existence + cited-line
+#        checks (verifier v0.7.0) all passed because the policy IS declared
+#        and the client diff DOES add doc/docx — the gap is call-graph
+#        reachability, which no prior validator checked. ABSENCE_WORDS
+#        exemption preserves regression findings about removed enforcement.
+#        Opt-out via DIFFHOUND_DISABLE_RUNTIME_ENFORCEMENT_CHECK=1. v0.7.3.
 #   5e. line-cite-verify-check — drops findings whose backticked
 #       identifiers don't appear within ±5 lines of the FINDING's cited
 #       file:line. Catches the inverse of v0.6.0's evidence injection:
@@ -103,6 +117,7 @@ V="$ROOT/lib/validators"
   | "$V/migration-column-check.sh" \
   | "$V/no-validation-check.sh" \
   | "$V/cross-file-comparison-check.sh" \
+  | "$V/runtime-enforcement-check.sh" \
   | "$V/auth-gate-precedes-check.sh" \
   | "$V/line-cite-verify-check.sh" \
   | "$V/pre-existing-pattern.sh" \

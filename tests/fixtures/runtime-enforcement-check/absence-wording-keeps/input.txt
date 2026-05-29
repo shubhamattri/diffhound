@@ -1,0 +1,10 @@
+FINDING: services/portal/src/portal/pages/admin/schemas/claims.js:212:BLOCKING
+WHAT: this PR removes the `assertUploadAllowed` call from `upsertClaimFiles`. The server-side `ClaimDocument` policy used to enforce on this path; with the call deleted the server will no longer reject disallowed extensions.
+DIFF_LINE: services/portal/src/portal/pages/admin/schemas/claims.js:212
+REACHABLE_PATH: services/api/src/files/uploadPolicy.ts:29
+REJECTED_ALTERNATIVE: leaving the deletion in
+EVIDENCE: previously assertUploadAllowed was invoked before upload
+IMPACT: regression — policy no longer fires
+OPTIONS:
+1. restore the deleted assertUploadAllowed call
+UNVERIFIABLE: no

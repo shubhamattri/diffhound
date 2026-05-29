@@ -1,0 +1,11 @@
+FINDING: services/portal/src/portal/pages/admin/schemas/claims.js:212:BLOCKING
+WHAT: `doc` and `docx` are in the client-side extensions list but the server-side `ClaimDocument` policy only allows pdf/jpg/jpeg/png/webp. Passes the file picker, then fails at the server with a CustomError.
+DIFF_LINE: services/portal/src/portal/pages/admin/schemas/claims.js:212
+REACHABLE_PATH: services/api/src/files/uploadPolicy.ts:29
+REJECTED_ALTERNATIVE: leaving doc/docx in client and letting server-side rejection surface to UI as a generic error
+EVIDENCE: uploadPolicy.ts:29 ClaimDocument extensions array
+IMPACT: user picks a .docx, picker accepts, server throws 500
+OPTIONS:
+1. add doc/docx to ClaimDocument policy
+2. strip doc/docx from client extensions
+UNVERIFIABLE: no

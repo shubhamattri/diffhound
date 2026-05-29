@@ -1,0 +1,10 @@
+FINDING: services/portal/src/portal/pages/admin/schemas/claims.js:212:BLOCKING
+WHAT: minor naming inconsistency on the variable name `foo` vs `bar` in this file
+DIFF_LINE: services/portal/src/portal/pages/admin/schemas/claims.js:212
+REACHABLE_PATH: services/api/src/files/uploadPolicy.ts:29
+REJECTED_ALTERNATIVE: leave names inconsistent
+EVIDENCE: file:212
+IMPACT: cosmetic
+OPTIONS:
+1. rename
+UNVERIFIABLE: no
