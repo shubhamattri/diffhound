@@ -1,0 +1,10 @@
+FINDING: services/api/src/processors/oneSpineCfBackfill.ts:171:BLOCKING
+WHAT: this PR removes the timeout option from `fetchCrmProductStartDate` and the helper no longer sets one either — the hourly job will now hang indefinitely on a slow CRM response. previously the timeout was enforced in the helper body.
+DIFF_LINE: services/api/src/processors/oneSpineCfBackfill.ts:171
+REACHABLE_PATH: services/api/src/integrations/zohoCrmProducts.ts:5
+REJECTED_ALTERNATIVE: leave the regression
+EVIDENCE: helper had timeout, now removed
+IMPACT: hourly job hangs indefinitely
+OPTIONS:
+1. restore the deleted timeout
+UNVERIFIABLE: no

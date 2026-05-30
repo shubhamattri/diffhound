@@ -1,0 +1,11 @@
+FINDING: services/api/src/processors/oneSpineCfBackfill.ts:169:SHOULD-FIX
+WHAT: token re-fetch per SO is wasteful if `getZohoCrmAccessToken` isn't caching. each iteration of the per-SO loop calls it.
+DIFF_LINE: services/api/src/processors/oneSpineCfBackfill.ts:169
+REACHABLE_PATH: services/api/src/processors/oneSpineCfBackfill.ts:169
+REJECTED_ALTERNATIVE: leave wasteful re-fetch
+EVIDENCE: oneSpineCfBackfill.ts:169
+IMPACT: rate-limit risk on hourly job
+OPTIONS:
+1. hoist token fetch outside loop
+2. add caching to getZohoCrmAccessToken
+UNVERIFIABLE: no

@@ -53,6 +53,23 @@
 #        reachability, which no prior validator checked. ABSENCE_WORDS
 #        exemption preserves regression findings about removed enforcement.
 #        Opt-out via DIFFHOUND_DISABLE_RUNTIME_ENFORCEMENT_CHECK=1. v0.7.3.
+#   5ccc. helper-property-check — drops "calling code lacks property P"
+#         findings (timeout, caching) when the called helper function
+#         actually provides P. Driven by monorepo PR #7303 (BF-44) v0.7.3
+#         run: bot scored Performance 5/15 citing "missing timeouts on CRM
+#         API calls" and "token re-fetch per SO is wasteful if
+#         getZohoCrmAccessToken isn't caching" — both false: every axios
+#         call in zohoCrmProducts.ts/zohoBooks.ts uses ZOHO_REQUEST_TIMEOUT_MS
+#         and getZohoCrmAccessToken is tokenCache.getAccessToken. Sibling
+#         pattern to runtime-enforcement-check (v0.7.3): that catches
+#         "policy enforces here" → check if it does; this catches "calling
+#         code lacks P" → check if the helper provides P. Extracts backticked
+#         helper identifiers from WHAT (verb-prefix or *Cache/*Client suffix),
+#         greps for definitions, reads body window, checks for `timeout:` /
+#         `signal:` (timeout claims) or Cache/memoize/TTL/getAccessToken
+#         (cache claims). ABSENCE_WORDS exemption preserves regression
+#         findings. Opt-out via DIFFHOUND_DISABLE_HELPER_PROPERTY_CHECK=1.
+#         v0.7.4.
 #   5e. line-cite-verify-check — drops findings whose backticked
 #       identifiers don't appear within ±5 lines of the FINDING's cited
 #       file:line. Catches the inverse of v0.6.0's evidence injection:
@@ -118,6 +135,7 @@ V="$ROOT/lib/validators"
   | "$V/no-validation-check.sh" \
   | "$V/cross-file-comparison-check.sh" \
   | "$V/runtime-enforcement-check.sh" \
+  | "$V/helper-property-check.sh" \
   | "$V/auth-gate-precedes-check.sh" \
   | "$V/line-cite-verify-check.sh" \
   | "$V/pre-existing-pattern.sh" \

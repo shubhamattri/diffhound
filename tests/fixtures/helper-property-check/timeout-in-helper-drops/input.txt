@@ -1,0 +1,10 @@
+FINDING: services/api/src/processors/oneSpineCfBackfill.ts:171:SHOULD-FIX
+WHAT: missing timeouts on CRM API calls in a per-SO loop risks hanging the hourly job. `fetchCrmProductStartDate` is called without a timeout option.
+DIFF_LINE: services/api/src/processors/oneSpineCfBackfill.ts:171
+REACHABLE_PATH: services/api/src/processors/oneSpineCfBackfill.ts:171
+REJECTED_ALTERNATIVE: leave hanging risk
+EVIDENCE: oneSpineCfBackfill.ts:171
+IMPACT: hourly job could hang indefinitely on a slow CRM response
+OPTIONS:
+1. add timeout to the axios call
+UNVERIFIABLE: no
