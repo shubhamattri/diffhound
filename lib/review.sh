@@ -3380,14 +3380,45 @@ PEER_EOF
   kill $_WATCHDOG_PID 2>/dev/null || true
   wait $_WATCHDOG_PID 2>/dev/null || true
 
-  # Validate peer output: empty or truncated = unusable
+  # Validate peer output: empty or truncated = unusable.
+  #
+  # v0.7.5 fix (BX-3010, 2026-05-30): Two compounding bugs caused 100% of
+  # peer reviews to be silently discarded since v0.6.0 (2026-04-29):
+  #   1. Regex `[.!?)}\]"]` was malformed for GNU grep — the first `]` after
+  #      `\]` closed the character class prematurely, so the regex actually
+  #      required the literal sequence `"]` at end-of-line. Mac BSD grep
+  #      happened to accept `\]` as escape so the bug went undetected in
+  #      local dev. Audit on nova-dev-shubham (GNU grep 3.11) confirmed:
+  #      `back.` → NO MATCH with old regex, MATCH with `[]".!?)}]$`
+  #      (POSIX-safe form: `]` first inside the class).
+  #   2. Codex CLI v0.110.0 appends `mcp startup: no servers` to stdout
+  #      after the real response. This wrapper noise has no trailing
+  #      sentence-ending char, so even with the regex fixed the validator
+  #      would discard the entire output. Strip CLI metadata lines before
+  #      checking the tail.
+  #
+  # Evidence pre-fix: 38/38 monorepo reviews since 2026-05-16 said
+  # "Cross-checked by 0/2 peer models (none)". Raw codex/gemini output
+  # captured on 2026-05-30 was 23 KB + 1.7 KB of valid review content
+  # that the validator threw out.
   _validate_peer_output() {
     local file="$1" name="$2"
     if [ ! -s "$file" ]; then
       echo "${name}_UNAVAILABLE" > "$file"
       return
     fi
-    # Truncated: file under 100 bytes or doesn't end with sentence-ending char
+    # Strip known CLI wrapper noise that the underlying tools emit AFTER
+    # the model's response. Patterns are conservative — only lines that
+    # clearly belong to the tool, never to the model.
+    local stripped="${file}.stripped"
+    grep -vE '^(mcp startup:|OpenAI Codex v|workdir:|model:|provider:|approval:|sandbox:|reasoning effort:|tokens used|--------$|Reading prompt from stdin)' \
+      "$file" > "$stripped" 2>/dev/null || cp "$file" "$stripped"
+    # Trim trailing blank lines so tail -c 20 doesn't land in whitespace.
+    awk 'BEGIN{blank=0} { if ($0 == "") { blank++ } else { for (i=0;i<blank;i++) print ""; blank=0; print $0 } }' \
+      "$stripped" > "${stripped}.2" && mv "${stripped}.2" "$stripped"
+    mv "$stripped" "$file"
+
+    # Truncated: file under 100 bytes or doesn't end with sentence-ending char.
     local size
     size=$(wc -c < "$file" | tr -d ' ')
     if [ "$size" -lt 100 ]; then
@@ -3397,7 +3428,8 @@ PEER_EOF
     fi
     local last_chars
     last_chars=$(tail -c 20 "$file" | tr -d '[:space:]')
-    if [ -n "$last_chars" ] && ! printf '%s' "$last_chars" | grep -qE '[.!?)}\]"]$'; then
+    # POSIX-safe character class: literal `]` must appear first inside `[]`.
+    if [ -n "$last_chars" ] && ! printf '%s' "$last_chars" | grep -qE '[]".!?)}]$'; then
       echo "  warning: ${name} output appears truncated -- discarding" >&2
       echo "${name}_UNAVAILABLE" > "$file"
     fi
