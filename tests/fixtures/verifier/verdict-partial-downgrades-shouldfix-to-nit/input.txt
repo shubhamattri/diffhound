@@ -1,0 +1,7 @@
+FINDING: services/api/qux.ts:77:SHOULD-FIX
+WHAT: Missing structured logging in catch block.
+EVIDENCE: qux.ts:77
+IMPACT: medium
+OPTIONS:
+1. Use logger.event.
+UNVERIFIABLE: no

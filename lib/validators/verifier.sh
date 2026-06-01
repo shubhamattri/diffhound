@@ -36,6 +36,31 @@ if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
   exit 0
 fi
 
+# ────────────────────────────────────────────────────────────────────
+# Mock verdict endpoint (opt-in via DIFFHOUND_VERIFIER_MOCK_FILE)
+#
+# When DIFFHOUND_VERIFIER_MOCK_FILE points at a JSONL file, the verifier
+# skips the real Anthropic API call entirely and looks up each finding's
+# verdict from that file. This is purely for deterministic fixture testing
+# of the TRUE/PARTIAL/HALLUCINATED branches; production runs never set
+# this env var.
+#
+# Format: one JSON object per line, with these keys:
+#   {"key":"<path>:<line>:<what_prefix>","verdict":"TRUE|PARTIAL|HALLUCINATED","reason":"<text>"}
+#
+# Where:
+#   path        = the file path from "FINDING: <path>:<line>:<sev>"
+#   line        = the line number from the same header
+#   what_prefix = first 30 chars of the WHAT: line, trimmed of leading space
+#
+# Lookup semantics:
+#   - File set + file missing on disk → fall back to TRUE (safe default)
+#   - File set + file exists + no matching key → fall back to TRUE (safe)
+#   - File set + matching key found → use its verdict
+#
+# Mock takes precedence over the real API call when its env var is set.
+# ────────────────────────────────────────────────────────────────────
+
 # Verifier model — Haiku is fast and accurate enough for "compare claim
 # to code" decisions. Override via DIFFHOUND_VERIFIER_MODEL for testing.
 MODEL="${DIFFHOUND_VERIFIER_MODEL:-claude-haiku-4-5-20251001}"
@@ -138,6 +163,40 @@ _verify_one() {
     printf -- '- TRUE: the cited code matches the claim, the symbols exist, the asserted behavior is consistent with the visible code\n'
   )
 
+  # Mock branch: opt-in via DIFFHOUND_VERIFIER_MOCK_FILE. Bypasses curl
+  # entirely so fixtures can exercise verdict handling deterministically.
+  if [ -n "${DIFFHOUND_VERIFIER_MOCK_FILE:-}" ]; then
+    local mock_verdict mock_reason
+    if [ ! -f "$DIFFHOUND_VERIFIER_MOCK_FILE" ]; then
+      # File set but missing → safe default = keep finding.
+      printf 'TRUE|mock file not found, defaulting to TRUE\n'
+      return
+    fi
+    # Build the lookup key: <path>:<line>:<first 30 chars of WHAT>
+    local what_line what_prefix
+    what_line=$(printf '%s' "$block" | grep -E '^WHAT:' | head -1 | sed 's/^WHAT:[[:space:]]*//')
+    what_prefix="${what_line:0:30}"
+    local mock_key="${path}:${line}:${what_prefix}"
+    # Find a matching line in the JSONL file. Use jq for safe field extraction.
+    local match
+    match=$(jq -r --arg k "$mock_key" \
+      'select(.key == $k) | "\(.verdict)|\(.reason // "mocked")"' \
+      "$DIFFHOUND_VERIFIER_MOCK_FILE" 2>/dev/null | head -1)
+    if [ -z "$match" ]; then
+      # No matching key → safe default = keep finding.
+      printf 'TRUE|no mock entry for %s, defaulting to TRUE\n' "$mock_key"
+      return
+    fi
+    mock_verdict="${match%%|*}"
+    mock_reason="${match#*|}"
+    case "$mock_verdict" in
+      HALLUCINATED|PARTIAL|TRUE) ;;
+      *) mock_verdict="TRUE" ;;
+    esac
+    printf '%s|%s\n' "$mock_verdict" "$mock_reason"
+    return
+  fi
+
   # Call Haiku
   local req_file resp
   req_file=$(mktemp -t "verify-req.XXXXXX")
@@ -203,10 +262,19 @@ _emit_block_if_kept() {
     PARTIAL)
       printf '[verifier] DOWNGRADED (PARTIAL): %s — %s\n' \
         "$(printf '%s' "$block" | head -1)" "$reason" >&2
-      # Downgrade BLOCKING→SHOULD-FIX, SHOULD-FIX→NIT
-      printf '%s' "$block" | sed \
-        -e '1s/:BLOCKING$/:SHOULD-FIX/' \
-        -e '1s/:SHOULD-FIX$/:NIT/'
+      # Downgrade exactly one tier: BLOCKING→SHOULD-FIX, SHOULD-FIX→NIT.
+      # Rewrite the FINDING header (first line) in shell so we don't risk
+      # the BLOCKING→SHOULD-FIX→NIT double-downgrade a two-stage sed chain
+      # would produce.
+      local _first _rest _new_first
+      _first="${block%%$'\n'*}"
+      _rest="${block#*$'\n'}"
+      case "$_first" in
+        *:BLOCKING)    _new_first="${_first%:BLOCKING}:SHOULD-FIX" ;;
+        *:SHOULD-FIX)  _new_first="${_first%:SHOULD-FIX}:NIT" ;;
+        *)             _new_first="$_first" ;;
+      esac
+      printf '%s\n%s' "$_new_first" "$_rest"
       ;;
     *)
       # TRUE or unknown → keep unchanged

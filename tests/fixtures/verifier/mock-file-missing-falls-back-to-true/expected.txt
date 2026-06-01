@@ -1,0 +1,7 @@
+FINDING: services/api/quux.ts:11:BLOCKING
+WHAT: Some claim that should be kept since mock file missing.
+EVIDENCE: quux.ts:11
+IMPACT: high
+OPTIONS:
+1. Fix.
+UNVERIFIABLE: no

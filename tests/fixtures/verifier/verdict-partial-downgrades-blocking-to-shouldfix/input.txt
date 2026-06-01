@@ -1,0 +1,7 @@
+FINDING: services/api/baz.ts:55:BLOCKING
+WHAT: IDOR risk on resource fetch endpoint.
+EVIDENCE: baz.ts:55
+IMPACT: high
+OPTIONS:
+1. Add owner check.
+UNVERIFIABLE: no

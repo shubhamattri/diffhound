@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # tests/run.sh — fixture-replay test runner for lib/validators/*.sh
 # Usage: tests/run.sh [validator-name]   # omit to run all
+#
+# Per-fixture env override: if a case directory contains an `env.sh` file,
+# the runner sources it (in a subshell) before invoking the validator. Use
+# this to opt specific fixtures into env vars like
+# DIFFHOUND_VERIFIER_MOCK_FILE or ANTHROPIC_API_KEY without polluting the
+# default offline-passthrough behavior other fixtures rely on.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -53,9 +59,23 @@ for vdir in "$FIXTURES"/*/; do
     # Unset ANTHROPIC_API_KEY so verifier-stage fixtures take the offline
     # passthrough branch deterministically — tests must not depend on the
     # dev's parent-shell environment. Fixtures that need an API key in
-    # scope can opt in by setting it explicitly via a future per-fixture
-    # env file.
-    actual=$(env -u ANTHROPIC_API_KEY "${_env_args[@]}" "$script" < "$input" 2>/dev/null)
+    # scope (e.g. to exercise the mock verdict branch) can opt in by
+    # dropping an env.sh file inside the case directory; it's sourced in
+    # a subshell before the validator runs.
+    if [ -f "$case_dir/env.sh" ]; then
+      # Strip the trailing slash so env.sh can reference DIFFHOUND_FIXTURE_DIR
+      # naturally (e.g. "$DIFFHOUND_FIXTURE_DIR/mock.jsonl").
+      fixture_dir="${case_dir%/}"
+      actual=$(env -u ANTHROPIC_API_KEY "${_env_args[@]}" \
+        DIFFHOUND_FIXTURE_DIR="$fixture_dir" bash -c '
+        # shellcheck disable=SC1090
+        source "$1"
+        shift
+        "$@"
+      ' _ "$case_dir/env.sh" "$script" < "$input" 2>/dev/null)
+    else
+      actual=$(env -u ANTHROPIC_API_KEY "${_env_args[@]}" "$script" < "$input" 2>/dev/null)
+    fi
     expected_content=$(cat "$expected")
     if [ "$actual" = "$expected_content" ]; then
       echo "PASS  $vname/$cname"

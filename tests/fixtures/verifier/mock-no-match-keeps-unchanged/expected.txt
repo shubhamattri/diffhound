@@ -1,0 +1,7 @@
+FINDING: services/api/zap.ts:200:SHOULD-FIX
+WHAT: Unmatched claim, mock has different keys only.
+EVIDENCE: zap.ts:200
+IMPACT: medium
+OPTIONS:
+1. Fix.
+UNVERIFIABLE: no

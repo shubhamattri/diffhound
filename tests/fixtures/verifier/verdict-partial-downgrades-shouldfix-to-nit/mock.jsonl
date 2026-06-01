@@ -1,0 +1,1 @@
+{"key":"services/api/qux.ts:77:Missing structured logging in ","verdict":"PARTIAL","reason":"console.warn present, not fully missing"}

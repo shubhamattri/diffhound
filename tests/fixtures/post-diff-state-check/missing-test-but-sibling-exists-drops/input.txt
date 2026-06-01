@@ -1,0 +1,10 @@
+FINDING: services/api/src/financialEntities/commissionEntry/policyNormalizers/specMap.ts:42:SHOULD-FIX
+WHAT: `findSalesOrderMatch` got meaningfully changed (new `entryType` guard, spec param requirement) but the processor test file doesn't have corresponding updates. no test covering `findSalesOrderMatch` with the new spec parameter.
+DIFF_LINE: services/api/src/financialEntities/commissionEntry/policyNormalizers/specMap.ts:42
+REACHABLE_PATH: services/api/src/financialEntities/commissionEntry/policyNormalizers/specMap.ts:42
+REJECTED_ALTERNATIVE: ship without tests
+EVIDENCE: specMap.ts:42
+IMPACT: behavioral change not pinned in tests
+OPTIONS:
+1. add tests for findSalesOrderMatch
+UNVERIFIABLE: no

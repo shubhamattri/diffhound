@@ -1,0 +1,10 @@
+FINDING: services/api/src/quxFeature/handler.ts:10:SHOULD-FIX
+WHAT: `quxHandler` is a brand-new behavior and there is no test covering `quxHandler` anywhere in the repo. missing test for `quxHandler`.
+DIFF_LINE: services/api/src/quxFeature/handler.ts:10
+REACHABLE_PATH: services/api/src/quxFeature/handler.ts:10
+REJECTED_ALTERNATIVE: ship untested
+EVIDENCE: handler.ts:10
+IMPACT: regression risk on new path
+OPTIONS:
+1. add tests
+UNVERIFIABLE: no

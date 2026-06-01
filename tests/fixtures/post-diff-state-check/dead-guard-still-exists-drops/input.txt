@@ -1,0 +1,10 @@
+FINDING: services/api/src/processors/zohoBooksCommissionStatement.ts:117:NIT
+WHAT: dead `!matchedSalesOrder` guard at line 117 after the length-1 check on line 113, safe to remove
+DIFF_LINE: services/api/src/processors/zohoBooksCommissionStatement.ts:117
+REACHABLE_PATH: services/api/src/processors/zohoBooksCommissionStatement.ts:117
+REJECTED_ALTERNATIVE: leave as-is
+EVIDENCE: zohoBooksCommissionStatement.ts:117
+IMPACT: dead branch
+OPTIONS:
+1. remove the guard
+UNVERIFIABLE: no

@@ -1,0 +1,7 @@
+FINDING: services/api/bar.ts:99:BLOCKING
+WHAT: Symbol `nonexistentFn` is called without auth check.
+EVIDENCE: bar.ts:99
+IMPACT: high
+OPTIONS:
+1. Add auth.
+UNVERIFIABLE: no

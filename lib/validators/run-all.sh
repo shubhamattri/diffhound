@@ -53,6 +53,28 @@
 #        reachability, which no prior validator checked. ABSENCE_WORDS
 #        exemption preserves regression findings about removed enforcement.
 #        Opt-out via DIFFHOUND_DISABLE_RUNTIME_ENFORCEMENT_CHECK=1. v0.7.3.
+#   5cccc. post-diff-state-check — drops "dead guard Y" / "no test for X" /
+#          "file doesn't have updates" findings when the asserted-missing
+#          artifact is actually present in the post-diff tree. Driven by
+#          monorepo PR #7286 + PR #7293 (BF-43) reviews, 2026-05-29:
+#          PR #7286 nit cited "dead `!matchedSalesOrder` guard at line 117"
+#          — the guard was REMOVED in that very diff (bot read pre-diff
+#          code as post-diff current). PR #7293 SHOULD-FIX cited "the
+#          processor test file doesn't have corresponding updates" for
+#          `findSalesOrderMatch` — false, a NEW dedicated spec file
+#          findSalesOrderMatch.unit.spec.ts was added in the same diff,
+#          covering exactly the changed surface. Both FPs share the shape:
+#          an assertion about ABSENCE that can be falsified by grep'ing
+#          the post-diff state on disk. Citation-discipline + verifier
+#          (v0.7.0) don't catch them — file/line citations are syntactically
+#          valid, named symbols all exist; the asserted "X is missing" claim
+#          isn't reachable through verifier's existence probe. This runs
+#          the inverse probe. Triggers on dead-guard wording with backticked
+#          identifier (verifies it still appears in guard context), and on
+#          missing-test wording (greps test-file family under the feature
+#          dir 3 levels up for backticked symbols). ABSENCE_WORDS exemption
+#          preserves legitimate regression findings. Opt-out via
+#          DIFFHOUND_DISABLE_POST_DIFF_STATE_CHECK=1. v0.7.5.
 #   5ccc. helper-property-check — drops "calling code lacks property P"
 #         findings (timeout, caching) when the called helper function
 #         actually provides P. Driven by monorepo PR #7303 (BF-44) v0.7.3
@@ -144,6 +166,7 @@ V="$ROOT/lib/validators"
   | "$V/cross-file-comparison-check.sh" \
   | "$V/runtime-enforcement-check.sh" \
   | "$V/helper-property-check.sh" \
+  | "$V/post-diff-state-check.sh" \
   | "$V/auth-gate-precedes-check.sh" \
   | "$V/line-cite-verify-check.sh" \
   | "$V/pre-existing-pattern.sh" \

@@ -1,0 +1,1 @@
+{"key":"services/api/baz.ts:55:IDOR risk on resource fetch en","verdict":"PARTIAL","reason":"auth gate restricts to admin-only"}

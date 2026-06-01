@@ -1,0 +1,1 @@
+{"key":"services/api/bar.ts:99:Symbol `nonexistentFn` is call","verdict":"HALLUCINATED","reason":"symbol not found in source"}

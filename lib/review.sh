@@ -531,8 +531,18 @@ _learn_from_pr() {
     done <<< "$replies"
   done <<< "$reviewer_comment_ids"
 
-  # Auto-purge cache files older than 30 days
-  find "$REVIEW_CACHE_DIR" -name "pr-*-posted.json" -mtime +30 -delete 2>/dev/null || true
+  # v0.7.7 (BX-3010): cache-janitor agent surfaced that this purge was
+  # per-repo only — root-level orphans from pre-namespacing era (pr-10..pr-36
+  # *.json) and dead-repo subdirs (covercheck after diffhound stopped
+  # reviewing it) accumulated forever. Walk the full ~/.diffhound/cache tree
+  # and cover all 4 known file patterns, not just pr-*-posted.json.
+  find "$HOME/.diffhound/cache" -mindepth 1 -type f \
+    \( -name 'pr-*-posted.json' -o -name 'pr-*-feedback.jsonl' \
+       -o -name 'pr-*-responses.txt' -o -name 'pr-*-suggestions.jsonl' \) \
+    -mtime +30 -delete 2>/dev/null || true
+  # Also drop the state/bot-comments mirror under the same age policy.
+  find "$HOME/.diffhound/state" -mindepth 1 -type f \
+    -name 'pr-*-bot-comments.txt' -mtime +30 -delete 2>/dev/null || true
 
   echo ""
   echo "  ✅ $learned comments verified unchanged"
@@ -1076,7 +1086,7 @@ cleanup() {
   [ -n "${_spinner_pid:-}" ] && kill "$_spinner_pid" 2>/dev/null && wait "$_spinner_pid" 2>/dev/null || true
   _spinner_pid=""
   rm -f "${DIFF_FILE:-}" "${PROMPT_FILE:-}" "${CLAUDE_OUT:-}" "${CODEX_OUT:-}" "${GEMINI_OUT:-}" \
-        "${PEER_PROMPT_FILE:-}" "${SYNTH_PROMPT:-}" "${REVIEW_STRUCTURED:-}" "${REVIEW_SUMMARY:-}" \
+        "${PEER_PROMPT_FILE:-}" "${_GEMINI_PROMPT_FILE:-}" "${SYNTH_PROMPT:-}" "${REVIEW_STRUCTURED:-}" "${REVIEW_SUMMARY:-}" \
         "${REVIEW_JSON:-}" "${REVIEW_STRUCTURED:-}.comments" "${REVIEW_STRUCTURED:-}.new_comments" \
         "${REVIEW_STRUCTURED:-}.replies" "${SYNTH_FINDINGS:-}" "${STYLE_PROMPT:-}" \
         "${EXISTING_COMMENTS_FILE:-}" "${EXISTING_REVIEWS_FILE:-}" "${THREADS_SUMMARY_FILE:-}" \
@@ -3386,14 +3396,33 @@ PEER_EOF
     echo "CODEX_UNAVAILABLE" > "$CODEX_OUT") &
   CODEX_PID=$!
 
+  # v0.7.7 (BX-3010): Gemini CLI falls off a cliff above ~15 KB prompts on
+  # nova-dev-shubham (gradient probe 1K/5K/10K/15K return content, 20K+
+  # hangs at exit 124). The 22 KB real bot peer-prompt always timed out,
+  # yielding 0/2 even with the regex fix from v0.7.5. Trim Gemini's input
+  # specifically — Codex still gets the full prompt. Trim point chosen at
+  # 14 KB (under the observed cliff with buffer) with a brief note appended
+  # so Gemini knows context was clipped and won't hallucinate "I see only
+  # part of the diff" as a finding.
+  _GEMINI_PROMPT_FILE=$(mktemp -t "pr-${PR_NUMBER}-gemini-prompt.XXXXXX")
+  if [ "$(wc -c < "$PEER_PROMPT_FILE" 2>/dev/null || echo 0)" -gt 14000 ]; then
+    head -c 14000 "$PEER_PROMPT_FILE" > "$_GEMINI_PROMPT_FILE"
+    printf '\n\n[NOTE: context truncated to 14 KB for Gemini-CLI compatibility — review what is shown above. Do not flag missing context as a finding.]\n' >> "$_GEMINI_PROMPT_FILE"
+  else
+    cp "$PEER_PROMPT_FILE" "$_GEMINI_PROMPT_FILE"
+  fi
+
   # Run Gemini in background (prompt via stdin to avoid ARG_MAX on large diffs)
-  (gemini -o text < "$PEER_PROMPT_FILE" > "$GEMINI_OUT" 2>&1 || \
+  (gemini -o text < "$_GEMINI_PROMPT_FILE" > "$GEMINI_OUT" 2>&1 || \
     echo "GEMINI_UNAVAILABLE" > "$GEMINI_OUT") &
   GEMINI_PID=$!
 
-  # Wait with 180s timeout — Codex hangs on websocket disconnects (seen on PRs #35, #45, #47).
-  # Watchdog: background a sleep+kill, then wait for the real PIDs.
-  _PEER_TIMEOUT=90
+  # Wait with 240s timeout — v0.7.7 bumped from 90s. Gemini-CLI does a chunk
+  # of pre-flight setup on first call (auth refresh, model handshake) that
+  # can take 30-60s before the real generation starts. Codex is faster (<60s)
+  # but still benefits from the buffer when nova-dev-shubham is under load.
+  # The watchdog kills both peers if either hangs past the deadline.
+  _PEER_TIMEOUT=240
   ( sleep "$_PEER_TIMEOUT" && kill $CODEX_PID $GEMINI_PID 2>/dev/null ) &
   _WATCHDOG_PID=$!
 

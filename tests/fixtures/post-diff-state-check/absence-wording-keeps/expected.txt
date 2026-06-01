@@ -1,0 +1,10 @@
+FINDING: services/api/src/processors/cleanup.ts:55:SHOULD-FIX
+WHAT: the `validateOrgScope` guard was removed in this diff, leaving the handler without org-scope verification. previously the dead-guard check at line 55 used `validateOrgScope` to short-circuit cross-org access — this is a regression.
+DIFF_LINE: services/api/src/processors/cleanup.ts:55
+REACHABLE_PATH: services/api/src/processors/cleanup.ts:55
+REJECTED_ALTERNATIVE: ship without guard
+EVIDENCE: cleanup.ts:55
+IMPACT: cross-org access regression
+OPTIONS:
+1. restore validateOrgScope
+UNVERIFIABLE: no

@@ -1,0 +1,3 @@
+# Env var set, but the file deliberately does not exist on disk.
+export ANTHROPIC_API_KEY="fixture-mock-key"
+export DIFFHOUND_VERIFIER_MOCK_FILE="$DIFFHOUND_FIXTURE_DIR/does-not-exist.jsonl"
