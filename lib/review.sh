@@ -112,6 +112,15 @@ _health_check() {
     echo "Error: Less than 100MB free in /tmp" >&2
     errors=$((errors + 1))
   fi
+  # v0.7.6 (BX-3010): warn LOUDLY if ANTHROPIC_API_KEY is missing. Without
+  # it, the verifier stage (Haiku LLM-as-judge), voice rewrite, and Voice
+  # RAG all silently no-op — half the safety net is invisible. Verifier
+  # offline-passthrough is intentional for fixture tests; this warning makes
+  # sure a misconfigured prod run can't go unnoticed.
+  if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+    echo "  ⚠️  ANTHROPIC_API_KEY is not set — verifier, voice rewrite, RAG will all silently degrade" >&2
+    echo "  ⚠️  Set it in ~/.profile if running in production. (See lib/validators/verifier.sh for the offline fallback path.)" >&2
+  fi
   return $errors
 }
 
@@ -186,6 +195,21 @@ fi
 if [ -z "$PR_NUMBER" ]; then
   echo "Usage: $0 <PR_NUMBER> [--auto-post] [--fast] [--repo owner/name]"
   exit 1
+fi
+
+# v0.7.6 (BX-3010): fail loud when --auto-post is used without
+# ANTHROPIC_API_KEY. Prod runs would otherwise silently ship reviews
+# without verifier, voice rewrite, or RAG — degraded findings posted to
+# real PRs. Set DIFFHOUND_ALLOW_DEGRADED_AUTO_POST=1 to bypass (e.g.,
+# emergency dry-runs that intentionally want raw Claude output).
+if [ "$AUTO_POST" = true ] && [ -z "${ANTHROPIC_API_KEY:-}" ] \
+   && [ "${DIFFHOUND_ALLOW_DEGRADED_AUTO_POST:-0}" != "1" ]; then
+  echo "FATAL: --auto-post requires ANTHROPIC_API_KEY. Without it the verifier" >&2
+  echo "       stage, voice rewrite, and Voice RAG all silently no-op, meaning" >&2
+  echo "       degraded findings would be posted to a real PR." >&2
+  echo "       Set ANTHROPIC_API_KEY in ~/.profile, or pass" >&2
+  echo "       DIFFHOUND_ALLOW_DEGRADED_AUTO_POST=1 if you know what you're doing." >&2
+  exit 2
 fi
 
 
@@ -5027,4 +5051,54 @@ else
   echo "   Summary: $REVIEW_SUMMARY"
   echo "   Inline comments: ${REVIEW_STRUCTURED}.comments"
   trap - EXIT
+fi
+
+# ============================================================
+# v0.7.6 (BX-3010): RUN LOG ARCHIVE
+# ============================================================
+# Pre-fix: only 2 /tmp/pr-*-summary.* files survived after 7 days. Every
+# /tmp artifact (peer outputs, raw findings, peer prompt) was wiped by the
+# cleanup trap or by /tmp turnover. Diagnostic sweeps had nothing to read.
+# Now: archive a per-run directory under ~/.diffhound/logs/<repo>/pr-<N>/<ts>/
+# with everything useful for postmortem. Auto-purge older than 30 days.
+# Opt-out: DIFFHOUND_DISABLE_RUN_ARCHIVE=1.
+if [ "${DIFFHOUND_DISABLE_RUN_ARCHIVE:-0}" != "1" ]; then
+  _LOG_REPO_ID="${_CACHE_REPO_ID:-unknown-repo}"
+  _LOG_TS=$(date -u +%Y%m%dT%H%M%SZ)
+  _LOG_SHA_SHORT="${HEAD_SHA:0:7}"
+  _LOG_DIR="$HOME/.diffhound/logs/${_LOG_REPO_ID}/pr-${PR_NUMBER}/${_LOG_TS}-${_LOG_SHA_SHORT}"
+  mkdir -p "$_LOG_DIR" 2>/dev/null && {
+    # Best-effort archive — every cp uses ' || true' so a missing artifact
+    # never breaks the script. Verifier stderr is reconstructed from the
+    # captured review summary; raw validator stderr would need a separate
+    # plumbing change (deferred).
+    [ -f "$REVIEW_SUMMARY" ]                        && cp "$REVIEW_SUMMARY"                      "$_LOG_DIR/summary.md" 2>/dev/null
+    [ -f "${REVIEW_STRUCTURED}.comments" ]          && cp "${REVIEW_STRUCTURED}.comments"        "$_LOG_DIR/inline-comments.txt" 2>/dev/null
+    [ -f "${CLAUDE_OUT:-}" ]                        && cp "${CLAUDE_OUT}"                        "$_LOG_DIR/claude-raw-findings.txt" 2>/dev/null
+    [ -f "${CODEX_OUT:-}" ]                         && cp "${CODEX_OUT}"                         "$_LOG_DIR/codex-output.txt" 2>/dev/null
+    [ -f "${GEMINI_OUT:-}" ]                        && cp "${GEMINI_OUT}"                        "$_LOG_DIR/gemini-output.txt" 2>/dev/null
+    [ -f "${PEER_PROMPT_FILE:-}" ]                  && cp "${PEER_PROMPT_FILE}"                  "$_LOG_DIR/peer-prompt.txt" 2>/dev/null
+    [ -f "${PROMPT_FILE:-}" ]                       && cp "${PROMPT_FILE}"                       "$_LOG_DIR/main-prompt.txt" 2>/dev/null
+    [ -f "${DIFF_FILE:-}" ]                         && cp "${DIFF_FILE}"                         "$_LOG_DIR/diff.txt" 2>/dev/null
+    [ -f "${SYNTH_FINDINGS:-}" ]                    && cp "${SYNTH_FINDINGS}"                    "$_LOG_DIR/synth-findings.txt" 2>/dev/null
+
+    # Tiny manifest for fast scanning.
+    {
+      echo "pr=$PR_NUMBER"
+      echo "repo=$_LOG_REPO_ID"
+      echo "head_sha=${HEAD_SHA:-unknown}"
+      echo "head_ref=${HEAD_REF_NAME:-unknown}"
+      echo "author=${PR_AUTHOR:-unknown}"
+      echo "ts_utc=$_LOG_TS"
+      echo "fast_mode=${FAST_MODE:-false}"
+      echo "force_full=${FORCE_FULL:-false}"
+      echo "is_rereview=${IS_REREVIEW:-false}"
+      echo "auto_post=${AUTO_POST:-false}"
+      echo "peer_coverage=${PEER_COVERAGE:-unknown}"
+      echo "comment_count=${COMMENT_COUNT:-0}"
+      echo "diffhound_version=$(cd "$DIFFHOUND_ROOT" 2>/dev/null && git describe --tags --abbrev=0 2>/dev/null || echo unknown)"
+    } > "$_LOG_DIR/manifest.txt" 2>/dev/null
+  }
+  # Purge logs older than 30 days. Quiet on failure.
+  find "$HOME/.diffhound/logs" -mindepth 3 -maxdepth 3 -type d -mtime +30 -exec rm -rf {} + 2>/dev/null || true
 fi

@@ -1,0 +1,13 @@
+// Preamble line that has no FINDING header — should not crash the parser.
+some stray output from an upstream stage
+
+FINDING-but-malformed: services/api/src/foo.ts
+not-a-real-block: 12
+
+FINDING: services/api/src/foo.ts:7:SHOULD-FIX
+WHAT: Real finding mixed in after garbage.
+EVIDENCE: foo.ts:7
+IMPACT: low
+OPTIONS:
+1. Fix it.
+UNVERIFIABLE: no

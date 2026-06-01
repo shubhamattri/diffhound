@@ -1,0 +1,7 @@
+FINDING: services/api/src/colored.ts:5:BLOCKING
+WHAT: Stray [31mANSI red[0m bytes from an upstream pretty-printer — should still parse.
+EVIDENCE: [1mcolored.ts:5[0m
+IMPACT: parser robustness
+OPTIONS:
+1. Strip ANSI upstream.
+UNVERIFIABLE: no

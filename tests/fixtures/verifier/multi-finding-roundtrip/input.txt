@@ -1,0 +1,21 @@
+FINDING: services/api/src/a.ts:10:BLOCKING
+WHAT: A-block first in order.
+EVIDENCE: a.ts:10
+IMPACT: high
+OPTIONS:
+1. Fix A.
+UNVERIFIABLE: no
+FINDING: services/api/src/b.ts:20:SHOULD-FIX
+WHAT: B-block second in order.
+EVIDENCE: b.ts:20
+IMPACT: medium
+OPTIONS:
+1. Fix B.
+UNVERIFIABLE: no
+FINDING: services/api/src/c.ts:30:NIT
+WHAT: C-block third in order — NIT bypasses verifier entirely.
+EVIDENCE: c.ts:30
+IMPACT: low
+OPTIONS:
+1. Fix C.
+UNVERIFIABLE: no

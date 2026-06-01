@@ -1,0 +1,14 @@
+FINDING: services/api/src/payments/charge.ts:42:BLOCKING
+WHAT: Missing timeout on outbound `chargeCard` call could hang the worker thread indefinitely.
+EVIDENCE: charge.ts:42
+IMPACT: Payment worker can stall; queue backs up.
+OPTIONS:
+1. Add a 30s axios timeout.
+UNVERIFIABLE: no
+FINDING: services/api/src/payments/charge.ts:101:NIT
+WHAT: Magic number `30000` could be a named constant.
+EVIDENCE: charge.ts:101
+IMPACT: cosmetic
+OPTIONS:
+1. Extract `PAYMENT_TIMEOUT_MS`.
+UNVERIFIABLE: no

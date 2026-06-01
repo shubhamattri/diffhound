@@ -47,8 +47,8 @@ set -uo pipefail
 # IDOR / missing-scope wording families. Conservative — we want to fire on
 # claims that allege a body-reachability gap, not generic auth concerns.
 IDOR_WORDS_1='\b(IDOR|cross-?org|cross-?tenant)\b'
-IDOR_WORDS_2='\b(missing|no|without|skips?)\s+(org|tenant|account|ownership)[-\s]+(scope|scoping|check|verification|guard|isolation)'
-IDOR_WORDS_3='\b(any|every)\s+(account[\s-]?admin|user|caller|admin)\s+(can|could|may)\s+(delete|update|modify|access|fetch|read|export|view|trigger)\s+(other|another|any|cross-org)'
+IDOR_WORDS_2='\b(missing|no|without|skips?)\s+(org|tenant|account|ownership)[[:space:]-]+(scope|scoping|check|verification|guard|isolation)'
+IDOR_WORDS_3='\b(any|every)\s+(account[[:space:]-]?admin|user|caller|admin)\s+(can|could|may)\s+(delete|update|modify|access|fetch|read|export|view|trigger)\s+(other|another|any|cross-org)'
 IDOR_WORDS_4='\borg\s+A\s+(admin|user|caller).*\b(delete|access|export|fetch|read)\s+org\s+B\b'
 
 # Auth-gate predicates that count as "platform operators only." The patterns

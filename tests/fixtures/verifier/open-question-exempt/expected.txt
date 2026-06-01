@@ -1,0 +1,7 @@
+FINDING: services/api/src/sync/scheduler.ts:18:OPEN_QUESTION
+WHAT: Is the cron `0 */6 * * *` intentional, or should it follow the IST 8 AM window like sibling jobs?
+EVIDENCE: scheduler.ts:18
+IMPACT: coordination
+OPTIONS:
+1. Confirm with @ops.
+UNVERIFIABLE: yes

@@ -119,6 +119,14 @@
 #
 # round-diff isn't in this pipeline — it's invoked separately with access
 # to the prior-findings state.
+#
+# format-adapter isn't in this pipeline either — it WRAPS this script.
+# lib/review.sh:3183 calls format-adapter.sh, which detects the CLAUDE_OUT
+# format (JSON .findings[] / fenced ```json``` / FINDING: blocks / LARGE-tier
+# FINDINGS_START markers), normalizes it to FINDING: blocks, pipes through
+# THIS script, then re-emits in the original format with surviving findings,
+# mutated severities (todo-deferral), and appended annotations. Putting it
+# inside run-all.sh would create a circular call.
 set -uo pipefail
 : "${DIFFHOUND_REPO:?DIFFHOUND_REPO must be set}"
 

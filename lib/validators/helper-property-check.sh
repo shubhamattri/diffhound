@@ -67,16 +67,16 @@ fi
 # Wording gates
 
 # timeout-family triggers — any match qualifies the finding for verification.
-TIMEOUT_WORDS_1='\b(missing|no|without|lacks|lack of|absent)\b[^.\n]{0,40}\btimeouts?\b'
-TIMEOUT_WORDS_2='\b(risks?|may|could|might)\b[^.\n]{0,40}\bhang(ing)?\b'
+TIMEOUT_WORDS_1='\b(missing|no|without|lacks|lack of|absent)\b.{0,40}\btimeouts?\b'
+TIMEOUT_WORDS_2='\b(risks?|may|could|might)\b.{0,40}\bhang(ing)?\b'
 TIMEOUT_WORDS_3='\b(hang|hangs|hanging|block|blocks|blocking)\b\s+(indefinitely|forever|the (job|loop|process|hourly job|worker))'
 TIMEOUT_WORDS_4='\bno\s+timeout\s+on\b'
 
 # cache-family triggers.
 CACHE_WORDS_1='\b(uncached|not\s+cached|no\s+cach(e|ing))\b'
-CACHE_WORDS_2='\bwasteful\b[^.\n]{0,60}\b(if\b[^.\n]{0,40}(isn'"'"'t|not|aren'"'"'t)\b[^.\n]{0,20}\bcach(e|ing)|cach(e|ing))'
-CACHE_WORDS_3='\bre-?fetch(ed|ing|es)?\b[^.\n]{0,40}\b(per|each|every)\b'
-CACHE_WORDS_4='\b(token|access[- ]token|credential[s]?|secret[s]?)\b[^.\n]{0,40}\b(per|each|every)\s+(call|request|iteration|item|run|so|loop)'
+CACHE_WORDS_2='\bwasteful\b.{0,60}\b(if\b.{0,40}(isn'"'"'t|not|aren'"'"'t)\b.{0,20}\bcach(e|ing)|cach(e|ing))'
+CACHE_WORDS_3='\bre-?fetch(ed|ing|es)?\b.{0,40}\b(per|each|every)\b'
+CACHE_WORDS_4='\b(token|access[- ]token|credential[s]?|secret[s]?)\b.{0,40}\b(per|each|every)\s+(call|request|iteration|item|run|so|loop)'
 CACHE_WORDS_5='\b(fetched|loaded|retrieved)\s+(each|every|on\s+each|on\s+every)\b'
 
 # absence-wording exemption — claims about a property that was removed.

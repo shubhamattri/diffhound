@@ -75,7 +75,7 @@ fi
 
 # Enforcement-firing phrases. Any one match triggers consideration; the
 # policy-file and reachability checks then decide drop-vs-keep.
-ENFORCE_WORDS_1='\b(server[- ]side|server)\s+(will\s+)?(reject|throws?|return\s+\d{3}|400|500)\b'
+ENFORCE_WORDS_1='\b(server[- ]side|server)\s+(will\s+)?(reject|throws?|returns?\s+[0-9]{3}|400|500)\b'
 ENFORCE_WORDS_2='\b(passes?|passing|pass)\s+(the\s+)?(client|picker|file\s+picker|vue|vue-side|client-side)\s+(validation|check|validator)\b'
 ENFORCE_WORDS_3='\b(fails?|failing|fail)\s+(at\s+the\s+)?(server|server[- ]side|api\s+side|api)\b'
 ENFORCE_WORDS_4='\bthrows?\s+(a\s+)?(custom[- ]?error|errors?|exception)\b.*\b(server|api|policy)'
@@ -88,11 +88,15 @@ ENFORCE_WORDS_8='\b(after|then)\s+(it\s+)?(passes?|passing|client[- ]validation)
 # without any reject/throw/fail verb — the structural shape is "X policy
 # (still) only allows Y", which still implies server-side enforcement on
 # the affected path. Catch that.
-ENFORCE_WORDS_9='\bpolicy\b[^\n]{0,80}\b(only allows|only permits|disallows|allows only|restricts to)\b'
+# Use `.{0,N}` (any char) — `[^.]` would block matches across file paths
+# like `uploadPolicy.ts:29-33`. grep is line-oriented so `.` doesn't cross
+# newlines; we accept potential sentence-boundary crossing in exchange for
+# tolerating filename periods.
+ENFORCE_WORDS_9='\bpolicy\b.{0,80}\b(only allows|only permits|disallows|allows only|restricts to)\b'
 # Bidirectional mismatch wording — finding may say "doc/docx mismatch" or
 # "client-server mismatch" or "allowlist mismatch" without the verb.
-ENFORCE_WORDS_10='\b(client[- ]?server|extension|policy|allow-?list|allowlist|server[- ]side)\b[^\n]{0,40}\b(mismatch|gap|inconsistency|disconnect)\b'
-ENFORCE_WORDS_11='\b(mismatch|gap|inconsistency)\b[^\n]{0,40}\b(client[- ]?server|client|server|policy|allowlist)\b'
+ENFORCE_WORDS_10='\b(client[- ]?server|extension|policy|allow-?list|allowlist|server[- ]side)\b.{0,40}\b(mismatch|gap|inconsistency|disconnect)\b'
+ENFORCE_WORDS_11='\b(mismatch|gap|inconsistency)\b.{0,40}\b(client[- ]?server|client|server|policy|allowlist)\b'
 
 # Absence wording exemption — same shape as cross-file-comparison-check.sh.
 ABSENCE_WORDS='deleted|removed|dropped|drops? the|removes? the|no longer (defined|present|exists|enforces|checks|guards)|was renamed|has been (deleted|removed|renamed|dropped)|used to (call|invoke|enforce)|previously (called|invoked|enforced)'
