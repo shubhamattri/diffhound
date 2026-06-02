@@ -117,6 +117,9 @@ parse_summary() {
         fi
       fi
     } > "$summary_file"
+    # Enforce canonical /100 weighting on the JSON path too (model controls
+    # per-category max in JSON output, so it can drift the same way).
+    _normalize_markdown_scorecard_total "$summary_file"
     return 0
   fi
 
@@ -160,8 +163,18 @@ parse_summary() {
   _normalize_markdown_scorecard_total "$summary_file"
 }
 
-# Recompute the markdown scorecard total from per-category rows.
-# This prevents model arithmetic mistakes from leaking into posted reviews.
+# Normalize the markdown scorecard to canonical, weight-enforced scoring.
+#
+# Canonical weights (sum = 100):
+#   Security 25, Tests 20, Observability 10, Performance 15, Readability 15, Compatibility 15
+#
+# Why this is script-owned and not trusted from the model:
+#   The model used to control each category's denominator. When it dropped a
+#   category the total denominator silently became /85; when it emitted a wrong
+#   max (e.g. "Security: 18/20") the total was both wrong and un-weighted. This
+#   function pins each category to its canonical max, rescales the model's score
+#   onto that max, back-fills any missing category at full marks, and always
+#   denominates the total /100. The verdict word in the Total row is preserved.
 _normalize_markdown_scorecard_total() {
   local summary_file="$1"
   [ -f "$summary_file" ] || return 0
@@ -170,42 +183,76 @@ _normalize_markdown_scorecard_total() {
   tmp_file=$(mktemp -t "diffhound-summary.XXXXXX")
 
   awk '
-    function trim(s) {
-      gsub(/^[ \t]+|[ \t]+$/, "", s)
-      return s
+    function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
+    function rnd(x)  { return int(x + 0.5) }
+    # Map any model category label to a canonical key (or "" if not a category).
+    function canon(name,   n) {
+      n = tolower(name); gsub(/\*/, "", n); sub(/\(.*$/, "", n); n = trim(n)
+      if (n ~ /^secur/)                 return "Security"
+      if (n ~ /^test/)                  return "Tests"
+      if (n ~ /^observ/)                return "Observability"
+      if (n ~ /^perf/)                  return "Performance"
+      if (n ~ /^read/)                  return "Readability"
+      if (n ~ /^(compat|backward|api)/) return "Compatibility"
+      return ""
+    }
+    BEGIN {
+      cmax["Security"]=25; cmax["Tests"]=20; cmax["Observability"]=10
+      cmax["Performance"]=15; cmax["Readability"]=15; cmax["Compatibility"]=15
+      n = split("Security Tests Observability Performance Readability Compatibility", ord, " ")
     }
     {
       lines[NR] = $0
       if ($0 !~ /^\|/) next
-
       split($0, cols, /\|/)
-      col1 = trim(cols[2])
-      col2 = trim(cols[3])
-      col3 = trim(cols[4])
+      col1 = trim(cols[2]); col2 = trim(cols[3])
+      c1 = col1; c2 = col2; gsub(/\*/, "", c1); gsub(/\*/, "", c2)
 
-      clean_col1 = col1
-      clean_col2 = col2
-      gsub(/\*/, "", clean_col1)
-      gsub(/\*/, "", clean_col2)
+      if (tolower(trim(c1)) == "total") { total_row = NR; total_verdict = trim(cols[4]); next }
 
-      if (tolower(clean_col1) == "total") {
-        total_row = NR
-        total_verdict = col3
-        next
-      }
-
-      if (clean_col2 ~ /^[0-9]+\/[0-9]+$/) {
-        split(clean_col2, score_parts, "/")
-        score_sum += score_parts[1]
-        max_sum += score_parts[2]
-        found_scores = 1
+      if (c2 ~ /^[0-9]+\/[0-9]+$/) {
+        k = canon(c1)
+        if (k != "") {
+          split(c2, sp, "/"); sc = sp[1] + 0; mx = sp[2] + 0
+          if (mx > 0) {
+            v = rnd(sc / mx * cmax[k])
+            if (v > cmax[k]) v = cmax[k]; if (v < 0) v = 0
+            cscore[k] = v; cnote[k] = trim(cols[4]); seen[k] = 1
+            if (firstcat == 0 || NR < firstcat) firstcat = NR
+          }
+          found = 1
+        }
       }
     }
     END {
-      if (found_scores && total_row > 0 && max_sum > 0) {
-        lines[total_row] = "| **Total** | **" score_sum "/" max_sum "** | " total_verdict " |"
+      if (!found || total_row == 0) { for (i = 1; i <= NR; i++) print lines[i]; exit }
+      # Total is normalized to /100 over the dimensions the model ACTUALLY
+      # scored. A missing dimension is shown as "not scored" and excluded from
+      # the denominator — we never invent a full-marks score for a dimension the
+      # model did not evaluate (that would silently inflate toward APPROVE), nor
+      # penalize it to zero. Present dimensions are pinned to canonical weights.
+      pscore = 0; pmax = 0
+      for (i = 1; i <= n; i++) { k = ord[i]; if (k in seen) { pscore += cscore[k]; pmax += cmax[k] } }
+      tot = (pmax > 0) ? int(pscore / pmax * 100 + 0.5) : 0
+      for (i = 1; i <= NR; i++) {
+        if (i == total_row) { print "| **Total** | **" tot "/100** | " total_verdict " |"; continue }
+        is_cat = 0
+        if (lines[i] ~ /^\|/) {
+          split(lines[i], cc, /\|/); a = trim(cc[2]); b = trim(cc[3]); gsub(/\*/, "", a); gsub(/\*/, "", b)
+          if (tolower(trim(a)) != "total" && b ~ /^[0-9]+\/[0-9]+$/ && canon(a) != "") is_cat = 1
+        }
+        if (is_cat) {
+          if (i == firstcat) {
+            for (j = 1; j <= n; j++) {
+              k = ord[j]
+              if (k in seen) print "| " k " (" cmax[k] "%) | " cscore[k] "/" cmax[k] " | " cnote[k] " |"
+              else           print "| " k " (" cmax[k] "%) | — | not scored (excluded from total) |"
+            }
+          }
+          continue
+        }
+        print lines[i]
       }
-      for (i = 1; i <= NR; i++) print lines[i]
     }
   ' "$summary_file" > "$tmp_file" && mv "$tmp_file" "$summary_file" || rm -f "$tmp_file"
 }

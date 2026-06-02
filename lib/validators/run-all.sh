@@ -19,6 +19,10 @@
 #   5. ref-exists         — broader wording-conditional drop / annotate pass.
 #      Expanded v0.5.7: scans ALL backticked symbols, sibling-dir search,
 #      jest skiplist, absence-wording exemption.
+#   5z. node-modules-claim-check — drops findings citing a node_modules/<pkg>
+#       path that is absent in the shallow clone (no npm install). Kills the
+#       "checked node_modules/marked/package.json — version X" hallucination
+#       class (v0.7.9, monorepo PR #7317 marked.parse FP).
 #   5a. migration-column-check — drops claims that a column is missing from
 #       a named migration when the column literal exists in that file
 #       (PR #7145 F1, F2). v0.5.7.
@@ -161,6 +165,7 @@ V="$ROOT/lib/validators"
   | "$V/intent-comment-helper.sh" \
   | "$V/dry-vs-import.sh" \
   | "$V/ref-exists.sh" \
+  | "$V/node-modules-claim-check.sh" \
   | "$V/migration-column-check.sh" \
   | "$V/no-validation-check.sh" \
   | "$V/cross-file-comparison-check.sh" \

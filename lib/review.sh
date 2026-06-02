@@ -2444,6 +2444,7 @@ Apply each as a lens. For each principle, perform the concrete check listed.
     STRONGER RULE: If a finding says "verify", "check", "confirm", or "make sure" and the answer IS determinable from the diff — determine it yourself and state it as fact. If NOT determinable from the diff, put it in the CHECKLIST section (### SCORECARD_END → Checklist), NOT as a FINDING.
     A FINDING that says "verify X" is noise — the author already knows to verify uncertain things. Your job is to tell them things they DON'T know.
     ANTI-HALLUCINATION RULE: Never claim production counts, DB state, runtime behavior, or staging verification results unless that evidence is explicitly included in this prompt. If you don't know → say so and classify as a test checklist item. Unknown is always better than fabricated certainty.
+    PACKAGE-VERSION RULE (anti-hallucination): You are reviewing a shallow `git clone` with NO `npm install` — there is NO `node_modules/` directory. NEVER claim to have "checked node_modules/<pkg>/package.json" or state an installed version from node_modules; that file does not exist in what you are reviewing. To reason about a dependency's version, read the committed `package.json`. A range like `"marked": "^1.1.0"` resolves to the LATEST 1.x at install time — do NOT assume the floor (1.1.0) and do NOT assume an older major. Before raising ANY "method `.X()` doesn't exist / was only added in vN" or "this API isn't in version Y" finding, you MUST quote the actual version range from the committed package.json and confirm the major. If you cannot verify the installed major from package.json, do NOT raise a version-incompatibility finding. This applies to re-review STILL_OPEN re-assertions too: re-verify the version premise against the current package.json before re-raising a prior version-based concern.
 
 16. **BLOCKING context check — read surrounding lines before asserting**:
     Before marking anything BLOCKING, read 3-5 lines above the flagged line in the diff.
@@ -4878,6 +4879,24 @@ if [ "$POST_REVIEW" = true ]; then
 
   # Parse verdict using lib function (3-method fallback)
   REVIEW_EVENT=$(parse_verdict "$REVIEW_SUMMARY" "${REVIEW_STRUCTURED}.new_comments")
+
+  # Peer-coverage gate (v0.7.9): if peer review ran but produced 0 cross-check
+  # models, a REQUEST_CHANGES verdict rests on a single model with nothing to
+  # refute it. The Codex/Gemini peers fail open (Codex OAuth refresh_token_reused;
+  # Gemini GEMINI_API_KEY not always propagated), and confident single-model
+  # false positives have hard-blocked merges (marked.parse FP on monorepo #7317,
+  # posted while peer_coverage was 0/2). Cap the verdict at COMMENT and prepend a
+  # caveat — findings still post and stay actionable, but nothing auto-blocks a
+  # merge on unrefuted single-model say-so.
+  if [ "${_RUN_PEER_REVIEW:-false}" = true ] && [ "${_PEER_COUNT:-0}" -eq 0 ] && [ "$REVIEW_EVENT" = "REQUEST_CHANGES" ]; then
+    REVIEW_EVENT="COMMENT"
+    _gate_tmp=$(mktemp -t "pr-${PR_NUMBER}-gate.XXXXXX")
+    {
+      echo "> ⚠️ **Peer cross-check unavailable (0/2 models).** Findings below are single-model and were not independently verified — weigh them accordingly. Verdict capped at COMMENT (not blocking) until a peer model is restored."
+      echo ""
+      cat "$REVIEW_SUMMARY"
+    } > "$_gate_tmp" && mv "$_gate_tmp" "$REVIEW_SUMMARY"
+  fi
 
   # Reorder summary: move scorecard table to the top (after first paragraph)
   # so it survives GitHub's silent body truncation on large reviews.

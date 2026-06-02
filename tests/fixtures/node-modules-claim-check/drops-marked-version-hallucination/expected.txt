@@ -1,0 +1,7 @@
+FINDING: services/api/src/queries/claroPolicy.ts:7:NIT
+WHAT: `getUserById` imported but never called in this file. dead import.
+EVIDENCE: claroPolicy.ts:7
+IMPACT: dead code
+OPTIONS:
+1. remove the import
+UNVERIFIABLE: no

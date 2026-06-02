@@ -1,0 +1,7 @@
+FINDING: src/foo.ts:10:SHOULD-FIX
+WHAT: version pinned in node_modules/foo/package.json is 1.1.0 but the code assumes 2.x API surface.
+EVIDENCE: foo.ts:10
+IMPACT: runtime mismatch
+OPTIONS:
+1. bump foo to 2.x
+UNVERIFIABLE: no

@@ -91,4 +91,14 @@ done
 
 echo
 echo "RESULT: $PASS passed, $FAIL failed"
-[ "$FAIL" -eq 0 ]
+
+# Standalone unit tests (not validator fixture-replay) run too, so a single
+# `tests/run.sh` covers everything.
+_unit_fail=0
+if [ -z "$only" ] && [ -x "$ROOT/tests/test-scorecard.sh" ]; then
+  echo
+  echo "=== unit: test-scorecard.sh ==="
+  "$ROOT/tests/test-scorecard.sh" || _unit_fail=1
+fi
+
+[ "$FAIL" -eq 0 ] && [ "$_unit_fail" -eq 0 ]

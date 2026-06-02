@@ -1,0 +1,14 @@
+FINDING: services/portal/src/components/claro/PolicyQaMessage.vue:53:SHOULD-FIX
+WHAT: `marked.parse()` doesn't exist in the installed version. checked node_modules/marked/package.json — you're on marked 0.7.0, and .parse() didn't land until v4.0.0.
+EVIDENCE: PolicyQaMessage.vue:53
+IMPACT: TypeError: marked.parse is not a function at runtime
+OPTIONS:
+1. call marked(text) directly
+UNVERIFIABLE: no
+FINDING: services/api/src/queries/claroPolicy.ts:7:NIT
+WHAT: `getUserById` imported but never called in this file. dead import.
+EVIDENCE: claroPolicy.ts:7
+IMPACT: dead code
+OPTIONS:
+1. remove the import
+UNVERIFIABLE: no
