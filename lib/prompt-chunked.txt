@@ -89,6 +89,7 @@ you have additionally verified absence via Read/Bash tools yourself.
 19. Secrets in code: process.env.*KEY, password, secret, base64 → P0 BLOCKING.
 20. SQL injection: string concatenation in queries → BLOCKING.
 21. PII in logs: email, phone, ssn, aadhaar near log calls → BLOCKING.
+21b. Unauthenticated encryption: symmetric cipher in an unauthenticated mode (`aes-*-cbc`, `aes-*-ecb`, `createCipheriv`/`createDecipheriv` with `-cbc`/`-ecb`) WITHOUT a MAC (`createHmac` / encrypt-then-MAC) or an authenticated mode (`aes-*-gcm` + `getAuthTag`) gives confidentiality but NOT integrity — ciphertext is malleable, decrypt does not detect tampering. → OPEN_QUESTION, NOT BLOCKING (see verification checks + the crypto example below). External partner/TPA/insurer API contracts often MANDATE the algorithm + wire format, in which case it is out of our control to fix.
 
 ## Tests & CI
 22. FIRST: Fast, Independent, Repeatable, Self-validating, Timely.
@@ -125,9 +126,14 @@ EXAMPLE — SHOULD-FIX (not BLOCKING):
 No unit test covers the headless path (`ctx.user` is null) that caused the original crash.
 → SHOULD-FIX: regression test needed in GWT format.
 
+EXAMPLE — Unauthenticated cipher OPEN_QUESTION (not BLOCKING):
+A new TPA client encrypts with `aes-256-cbc` + random IV via `createCipheriv`, no `createHmac` and no `getAuthTag`. The response wire format is `"<ivB64>.<ciphertextB64>"` — no auth-tag field.
+The missing tag field in the format the code must interoperate with is strong evidence the external contract dictates CBC; we cannot switch to GCM unilaterally.
+→ OPEN_QUESTION: "CBC here is unauthenticated (no MAC/tag) — confirm AES-256-CBC + `iv.ciphertext` is mandated by the partner's API contract. If it is, the integrity gap is inherent to the contract and out of scope to fix here. If it is NOT mandated, prefer AES-256-GCM or encrypt-then-MAC." Do NOT flag as BLOCKING — flagging a contract-mandated algorithm is a false positive.
+
 # VERIFICATION CHECKS (abbreviated)
 - Type safety: `any`, `unknown`, `@ts-ignore`
-- Security: secrets, SQL injection, PII in logs
+- Security: secrets, SQL injection, PII in logs, unauthenticated ciphers (`aes-*-cbc`/`-ecb` without `createHmac`/`getAuthTag` → OPEN_QUESTION, confirm external contract mandates it)
 - DB queries: queries in loops, missing DataLoader
 - Migrations: IF NOT EXISTS, CONCURRENTLY, valid down()
 - Tests: verify presence for logic changes
