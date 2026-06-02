@@ -533,9 +533,10 @@ _learn_from_pr() {
 
   # v0.7.7 (BX-3010): cache-janitor agent surfaced that this purge was
   # per-repo only — root-level orphans from pre-namespacing era (pr-10..pr-36
-  # *.json) and dead-repo subdirs (covercheck after diffhound stopped
-  # reviewing it) accumulated forever. Walk the full ~/.diffhound/cache tree
-  # and cover all 4 known file patterns, not just pr-*-posted.json.
+  # *.json) and orphaned per-repo subdirs (left behind when a repo is renamed,
+  # so the old slug's cache key is never written to again) accumulated
+  # forever. Walk the full ~/.diffhound/cache tree and cover all 4 known
+  # file patterns, not just pr-*-posted.json.
   find "$HOME/.diffhound/cache" -mindepth 1 -type f \
     \( -name 'pr-*-posted.json' -o -name 'pr-*-feedback.jsonl' \
        -o -name 'pr-*-responses.txt' -o -name 'pr-*-suggestions.jsonl' \) \
