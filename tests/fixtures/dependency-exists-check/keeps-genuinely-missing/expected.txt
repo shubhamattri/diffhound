@@ -1,0 +1,7 @@
+FINDING: src/foo.ts:3:BLOCKING
+WHAT: `foobar-xyz` is imported but is not in package.json — this dependency is missing entirely and the build will fail.
+EVIDENCE: foo.ts:3
+IMPACT: build fails
+OPTIONS:
+1. add foobar-xyz to package.json
+UNVERIFIABLE: no

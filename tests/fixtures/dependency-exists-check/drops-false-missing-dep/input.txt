@@ -1,0 +1,14 @@
+FINDING: services/portal/src/components/claro/PolicyQaMessage.vue:53:BLOCKING
+WHAT: neither `marked` nor `dompurify` appear in any `package.json` in the repo — these aren't just the wrong version, they're missing entirely. the import will fail at build time.
+EVIDENCE: PolicyQaMessage.vue:53
+IMPACT: build fails before bot message rendering runs
+OPTIONS:
+1. add both as deps
+UNVERIFIABLE: no
+FINDING: services/api/src/queries/claroPolicy.ts:7:NIT
+WHAT: `getUserById` imported but never called. dead import.
+EVIDENCE: claroPolicy.ts:7
+IMPACT: dead code
+OPTIONS:
+1. remove the import
+UNVERIFIABLE: no

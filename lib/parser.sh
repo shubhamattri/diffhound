@@ -210,7 +210,7 @@ _normalize_markdown_scorecard_total() {
 
       if (tolower(trim(c1)) == "total") { total_row = NR; total_verdict = trim(cols[4]); next }
 
-      if (c2 ~ /^[0-9]+\/[0-9]+$/) {
+      if (c2 ~ /^-?[0-9]+\/[0-9]+$/) {
         k = canon(c1)
         if (k != "") {
           split(c2, sp, "/"); sc = sp[1] + 0; mx = sp[2] + 0
@@ -239,7 +239,7 @@ _normalize_markdown_scorecard_total() {
         is_cat = 0
         if (lines[i] ~ /^\|/) {
           split(lines[i], cc, /\|/); a = trim(cc[2]); b = trim(cc[3]); gsub(/\*/, "", a); gsub(/\*/, "", b)
-          if (tolower(trim(a)) != "total" && b ~ /^[0-9]+\/[0-9]+$/ && canon(a) != "") is_cat = 1
+          if (tolower(trim(a)) != "total" && b ~ /^-?[0-9]+\/[0-9]+$/ && canon(a) != "") is_cat = 1
         }
         if (is_cat) {
           if (i == firstcat) {

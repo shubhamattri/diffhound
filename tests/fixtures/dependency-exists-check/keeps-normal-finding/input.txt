@@ -1,0 +1,7 @@
+FINDING: src/foo.ts:10:SHOULD-FIX
+WHAT: `vue` reactivity caveat — array index assignment won't trigger re-render. use splice.
+EVIDENCE: foo.ts:10
+IMPACT: stale UI
+OPTIONS:
+1. use Vue.set or splice
+UNVERIFIABLE: no

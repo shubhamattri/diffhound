@@ -166,6 +166,7 @@ V="$ROOT/lib/validators"
   | "$V/dry-vs-import.sh" \
   | "$V/ref-exists.sh" \
   | "$V/node-modules-claim-check.sh" \
+  | "$V/dependency-exists-check.sh" \
   | "$V/migration-column-check.sh" \
   | "$V/no-validation-check.sh" \
   | "$V/cross-file-comparison-check.sh" \

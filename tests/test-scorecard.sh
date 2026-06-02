@@ -104,6 +104,31 @@ else
   PASS=$((PASS+1)); echo "ok   E: does not back-fill missing category"
 fi
 
+# --- Case F: out-of-range NEGATIVE score (real #7317 bug) → clamp to 0/max, no leak, single row ---
+F=$(run_norm '| Category | Score | Notes |
+|----------|-------|-------|
+| Security | 22/25 | x |
+| Tests | 2/20 | x |
+| Observability | 5/10 | x |
+| Performance | 13/15 | x |
+| Readability | 12/15 | x |
+| Compatibility | -16/15 | build breaks |
+| **Total** | **38/110** | **REQUEST_CHANGES** |')
+# -16 clamped to 0 → Compatibility 0/15 ; total = 22+2+5+13+12+0 = 54/100
+assert_contains "F: negative clamped to 0/15" "$F" "Compatibility (15%) | 0/15"
+assert_contains "F: total 54/100" "$F" "54/100"
+if printf '%s' "$F" | grep -qF -- "-16/15"; then
+  FAIL=$((FAIL+1)); FAILED+=("F: leaked raw -16/15"); echo "FAIL F: leaked raw -16/15"
+else
+  PASS=$((PASS+1)); echo "ok   F: no leaked -16/15"
+fi
+_compat_rows=$(printf '%s\n' "$F" | grep -c "Compatibility (15%)")
+if [ "$_compat_rows" = "1" ]; then
+  PASS=$((PASS+1)); echo "ok   F: single Compatibility row"
+else
+  FAIL=$((FAIL+1)); FAILED+=("F: $_compat_rows Compatibility rows (want 1)"); echo "FAIL F: $_compat_rows Compatibility rows (want 1)"
+fi
+
 echo ""
 echo "PASS=$PASS FAIL=$FAIL"
 if [ "$FAIL" -gt 0 ]; then printf 'FAILED: %s\n' "${FAILED[@]}"; exit 1; fi
