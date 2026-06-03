@@ -2,6 +2,55 @@
 # diffhound — output parsing & comment extraction
 # Supports JSON structured output (primary) with regex fallback
 
+# Shared claim checkers (single ground-truth implementation) — used by the
+# fresh-path engine (validators/claim-verify.sh) AND the summary-level scrub
+# below, so re-review blockers (generated as summary prose) get the SAME
+# deterministic verification as fresh findings (the single chokepoint).
+# shellcheck disable=SC1091
+source "$(dirname "${BASH_SOURCE[0]}")/claim-checkers.sh" 2>/dev/null || true
+
+# Deterministic claim-verify pass over the FINAL summary's finding bullets.
+# This is the single chokepoint for the POSTED text: re-review thread
+# re-assertions become Blockers/Should-Fix bullets in the model's summary prose,
+# bypassing the FINDING-block pipeline — so verify them here too. A bullet whose
+# extracted claim is contradicted by the repo is removed (FP). Gated by the same
+# DIFFHOUND_CLAIM_VERIFY flag. Real incident: monorepo #7317 re-asserted
+# SEARCH_ORGS/marked.parse blockers that the fresh-path engine never saw.
+_claim_verify_summary() {
+  local summary_file="$1" repo="$2"
+  [ -f "$summary_file" ] || return 0
+  [ -d "$repo" ] || return 0
+  [ "${DIFFHOUND_CLAIM_VERIFY:-1}" = "1" ] || return 0
+  type _extract_implicit_claims >/dev/null 2>&1 || return 0
+  local DIFFHOUND_REPO="$repo"  # dynamic scope -> shared checkers use it
+  local tmp; tmp=$(mktemp -t "diffhound-cvsum.XXXXXX")
+  local line claims c v drop insec=""
+  while IFS= read -r line; do
+    case "$line" in
+      "### Blockers"*) insec=1 ;;
+      "### Should-Fix"*) insec=1 ;;
+      "### Nits"*|"### Open Questions"*) insec="" ;;
+      "## "*|"### "*) insec="" ;;
+    esac
+    if [ -n "$insec" ] && printf '%s' "$line" | grep -qE '^- '; then
+      claims=$(_extract_implicit_claims "$line"); drop=0
+      if [ -n "$claims" ]; then
+        local IFS_s="$IFS"; IFS=';'
+        for c in $claims; do
+          c=$(printf '%s' "$c" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'); [ -z "$c" ] && continue
+          v=$(_verify_claim "$c"); [ "$v" = "FALSE" ] && { drop=1; break; }
+        done
+        IFS="$IFS_s"
+      fi
+      if [ "$drop" = "1" ]; then
+        printf '[claim-verify-summary: removed FP bullet (%s): %s]\n' "$c" "$(printf '%s' "$line" | cut -c1-80)" >&2
+        continue
+      fi
+    fi
+    printf '%s\n' "$line"
+  done < "$summary_file" > "$tmp" && mv "$tmp" "$summary_file" || rm -f "$tmp"
+}
+
 # Extract JSON block from LLM output (between ```json and ```)
 _extract_json() {
   local file="$1"

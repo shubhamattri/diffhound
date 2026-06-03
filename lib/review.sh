@@ -3230,9 +3230,12 @@ if [ "${DIFFHOUND_SKIP_VALIDATORS:-0}" != "1" ] \
    && [ -x "${LIB_DIR}/validators/format-adapter.sh" ] \
    && [ -s "$CLAUDE_OUT" ]; then
   _VALIDATED_OUT=$(mktemp -t "pr-${PR_NUMBER}-validated.XXXXXX")
+  # Capture validator-pipeline stderr (claim-verify DROP/DOWNGRADE audit lines)
+  # for governance metrics instead of discarding it (v0.7.19).
+  _VALIDATOR_AUDIT=$(mktemp -t "pr-${PR_NUMBER}-vaudit.XXXXXX")
   if DIFFHOUND_REPO="${DIFFHOUND_REPO:-${REPO_PATH:-$(pwd)}}" \
      DIFFHOUND_PRIOR_FINDINGS="${PRIOR_FINDINGS_FILE:-}" \
-     "${LIB_DIR}/validators/format-adapter.sh" < "$CLAUDE_OUT" > "$_VALIDATED_OUT" 2>/dev/null \
+     "${LIB_DIR}/validators/format-adapter.sh" < "$CLAUDE_OUT" > "$_VALIDATED_OUT" 2>"$_VALIDATOR_AUDIT" \
      && [ -s "$_VALIDATED_OUT" ]; then
     # Count findings in either format (JSON .findings[] OR raw FINDING: lines).
     # LARGE tier emits FINDING:-format after chunked merge; MEDIUM/SMALL emit JSON.
@@ -4904,6 +4907,13 @@ fi
 # correct. _derive_scorecard_from_summary is kept in parser.sh but no longer
 # called.
 
+# Single chokepoint (v0.7.19): deterministic claim-verify over the FINAL summary
+# bullets — runs ALWAYS (fresh + re-review), so re-review blockers generated as
+# summary prose (which bypass the fresh FINDING pipeline) get the same
+# ground-truth verification. Drops bullets whose claim is contradicted by the
+# repo (e.g. monorepo #7317 SEARCH_ORGS/marked.parse re-assertions).
+_claim_verify_summary "$REVIEW_SUMMARY" "${REPO_PATH:-${DIFFHOUND_REPO:-$(pwd)}}"
+
 if [ "$POST_REVIEW" = true ]; then
   spinner_start "Posting review to GitHub..."
 
@@ -5183,9 +5193,9 @@ if [ "${DIFFHOUND_DISABLE_RUN_ARCHIVE:-0}" != "1" ]; then
   _LOG_DIR="$HOME/.diffhound/logs/${_LOG_REPO_ID}/pr-${PR_NUMBER}/${_LOG_TS}-${_LOG_SHA_SHORT}"
   mkdir -p "$_LOG_DIR" 2>/dev/null && {
     # Best-effort archive — every cp uses ' || true' so a missing artifact
-    # never breaks the script. Verifier stderr is reconstructed from the
-    # captured review summary; raw validator stderr would need a separate
-    # plumbing change (deferred).
+    # never breaks the script. Validator-pipeline stderr (claim-verify audit)
+    # is now captured (v0.7.19) and archived for governance metrics.
+    [ -f "${_VALIDATOR_AUDIT:-}" ]                  && cp "${_VALIDATOR_AUDIT}"                  "$_LOG_DIR/validator-audit.log" 2>/dev/null
     [ -f "$REVIEW_SUMMARY" ]                        && cp "$REVIEW_SUMMARY"                      "$_LOG_DIR/summary.md" 2>/dev/null
     [ -f "${REVIEW_STRUCTURED}.comments" ]          && cp "${REVIEW_STRUCTURED}.comments"        "$_LOG_DIR/inline-comments.txt" 2>/dev/null
     [ -f "${CLAUDE_OUT:-}" ]                        && cp "${CLAUDE_OUT}"                        "$_LOG_DIR/claude-raw-findings.txt" 2>/dev/null
@@ -5212,6 +5222,9 @@ if [ "${DIFFHOUND_DISABLE_RUN_ARCHIVE:-0}" != "1" ]; then
       echo "peer_coverage=${PEER_COVERAGE:-unknown}"
       echo "comment_count=${COMMENT_COUNT:-0}"
       echo "diffhound_version=$(cd "$DIFFHOUND_ROOT" 2>/dev/null && git describe --tags --abbrev=0 2>/dev/null || echo unknown)"
+      # Governance metric: claim-verify actions this run (FP-catch signal).
+      echo "claim_verify_dropped=$(grep -c 'claim-verify: DROP' "${_VALIDATOR_AUDIT:-/dev/null}" 2>/dev/null || echo 0)"
+      echo "claim_verify_downgraded=$(grep -c 'claim-verify: DOWNGRADE' "${_VALIDATOR_AUDIT:-/dev/null}" 2>/dev/null || echo 0)"
     } > "$_LOG_DIR/manifest.txt" 2>/dev/null
   }
   # Purge logs older than 30 days. Quiet on failure.
