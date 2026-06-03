@@ -1,0 +1,7 @@
+FINDING: services/api/src/user/queries.ts:540:BLOCKING
+WHAT: the `users` resolver is unscoped — no client scope applied, cross-client leak.
+EVIDENCE: queries.ts:540
+IMPACT: cross-client data exposure
+OPTIONS:
+1. apply client scope
+UNVERIFIABLE: no

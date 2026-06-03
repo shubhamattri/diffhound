@@ -1,0 +1,7 @@
+FINDING: src/foo.ts:1:NIT
+WHAT: `foo` could use a clearer name.
+EVIDENCE: foo.ts:1
+IMPACT: readability
+OPTIONS:
+1. rename
+UNVERIFIABLE: no

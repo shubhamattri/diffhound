@@ -1,0 +1,7 @@
+FINDING: services/api/src/user/queries.ts:546:BLOCKING
+WHAT: `usersCount` is the companion resolver to `users` and it's unscoped — a restricted org admin can query cross-client count directly via GraphQL.
+EVIDENCE: queries.ts:546
+IMPACT: cross-client data exposure
+OPTIONS:
+1. apply client scope to usersCount
+UNVERIFIABLE: no
