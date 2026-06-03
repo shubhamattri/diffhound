@@ -1,0 +1,7 @@
+FINDING: src/foo.ts:1:SHOULD-FIX
+WHAT: `madeUpHelperXyz` doesn't exist anywhere in the repo — imported here but absent. build will fail.
+EVIDENCE: foo.ts:1
+IMPACT: build break
+OPTIONS:
+1. add or remove the import
+UNVERIFIABLE: no

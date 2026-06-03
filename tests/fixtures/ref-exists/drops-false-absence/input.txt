@@ -1,0 +1,7 @@
+FINDING: services/portal/src/pages/PolicyQaPane.vue:3:BLOCKING
+WHAT: `SEARCH_ORGS` and `GET_ORG_ACTIVE_BENEFITS` don't exist anywhere in the repo. i scanned the graphql queries exhaustively — the only exports are GET_JOBS and GET_DECK_POLICY. the org selection flow is dead.
+EVIDENCE: PolicyQaPane.vue:3
+IMPACT: org search and policy loading break at runtime
+OPTIONS:
+1. define the constants
+UNVERIFIABLE: no

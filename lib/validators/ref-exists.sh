@@ -27,6 +27,15 @@ EXISTENCE_WORDS='defined|duplicate|duplicated|mutates|overrides|redefines|alread
 # referenced" — symbol absence is the finding, not a hallucination.
 ABSENCE_WORDS='deleted|removed|missing|no longer|absent|stripped|dropped from|gone from|was renamed|has been (deleted|removed|renamed)|undefined export'
 
+# v0.7.12: false-ABSENCE wording — a finding asserting a symbol is NOT THERE
+# ("doesn't exist anywhere", "the only exports are X", "scanned exhaustively").
+# Distinct from ABSENCE_WORDS (deletion/change, which is legit). If the symbol IS
+# actually defined somewhere in the repo, this is a hallucination → DROP. This is
+# the inverse of the existing existence-wording drop; ref-exists already greps,
+# it just never applied the result to existence-DENIAL claims (monorepo #7337:
+# "SEARCH_ORGS doesn't exist anywhere" — it is at brDeck/queries.js:83).
+FALSE_ABSENCE_WORDS="does(n'?t| not) exist|do(n'?t| not) exist|not (found|defined) anywhere|exist anywhere in the (repo|codebase)|nowhere in the (repo|codebase)|scanned[^.]{0,60}exhaustively|the only exports are|never (defined|existed)|doesn'?t exist anywhere|don'?t exist anywhere"
+
 # Skiplist — well-known framework / runtime / test-harness names that are
 # always "in scope" and shouldn't trigger absence-based drops. Expanded
 # v0.5.7 per Gemini peer review for jest globals (PR #7145 had hallucinated
@@ -84,6 +93,18 @@ _check_symbol_present() {
   return 1
 }
 
+# v0.7.12: repo-wide symbol-definition check. _check_symbol_present only looks
+# in the cited file + same-dir siblings; a "doesn't exist ANYWHERE" claim needs
+# a repo-wide grep because the definition usually lives in a different file.
+_symbol_defined_anywhere() {
+  local s="$1"
+  printf '%s' "$s" | grep -qE -- "$SKIPLIST" && return 1
+  grep -rqE "(export[[:space:]]+(const|default|function|class)|const|let|var|function|class|def)[[:space:]]+${s}([[:space:]]|=|\(|:|<)|^[[:space:]]*${s}[[:space:]]*[:=]" \
+    "$DIFFHOUND_REPO" \
+    --include='*.ts' --include='*.tsx' --include='*.js' --include='*.jsx' --include='*.vue' --include='*.py' \
+    --exclude-dir=node_modules 2>/dev/null
+}
+
 _classify_and_flush() {
   if [ -z "$block" ]; then return; fi
 
@@ -92,6 +113,24 @@ _classify_and_flush() {
     printf '%s' "$block"
     block=""; what_line=""; header_file=""; sym=""; all_syms=""
     return
+  fi
+
+  # v0.7.12: false-absence DROP. If the finding denies a symbol's existence
+  # ("doesn't exist anywhere", "the only exports are…") but the symbol IS
+  # defined somewhere in the repo, it's a hallucination. Runs BEFORE the
+  # deletion-absence exemption below (deletion claims use different wording).
+  if printf '%s' "$what_line" | grep -qiE "$FALSE_ABSENCE_WORDS"; then
+    local fa_sym fa_present=""
+    for fa_sym in $all_syms; do
+      [ -z "$fa_sym" ] && continue
+      if _symbol_defined_anywhere "$fa_sym"; then fa_present="$fa_sym"; break; fi
+    done
+    if [ -n "$fa_present" ]; then
+      printf '[ref-exists] DROPPED (false absence — "%s" claimed missing but IS defined in repo): %s\n' \
+        "$fa_present" "$(printf '%s' "$block" | head -1)" >&2
+      block=""; what_line=""; header_file=""; sym=""; all_syms=""
+      return
+    fi
   fi
 
   # Gemini-mitigation: if absence-wording is present, this is a finding

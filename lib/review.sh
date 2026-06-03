@@ -3392,10 +3392,26 @@ Respond in the same FINDING block format. Plain text. No style concerns.
 PEER_EOF
   fi
 
-  # Run Codex in background (prompt via stdin to avoid ARG_MAX on large diffs)
-  (cd "$REPO_PATH" 2>/dev/null || cd /tmp; \
-    codex exec --skip-git-repo-check -s read-only < "$PEER_PROMPT_FILE" > "$CODEX_OUT" 2>&1 || \
-    echo "CODEX_UNAVAILABLE" > "$CODEX_OUT") &
+  # Peer slot 1: Claude Opus 4.8, ADVERSARIAL (v0.7.12). Replaces the Codex CLI,
+  # whose ChatGPT-OAuth kept dying (refresh_token_reused) and needs interactive
+  # re-login. Uses the working ANTHROPIC_API_KEY — no OAuth fragility. A second
+  # Claude shares blind spots with the primary, so it's framed to REFUTE (assume
+  # a false positive exists) to extract independent signal. CODEX_* var names are
+  # kept as internal plumbing; user-facing labels say "Claude-4.8".
+  _CLAUDE_PEER_PROMPT=$(mktemp -t "pr-${PR_NUMBER}-claudepeer.XXXXXX")
+  {
+    echo "You are an ADVERSARIAL second reviewer. The PRIMARY review (also Claude) is below."
+    echo "Your job is to REFUTE, not agree. Assume at least one finding is a FALSE POSITIVE."
+    echo "Rules:"
+    echo "- For any 'X does not exist / not defined / missing / the only exports are' claim: the symbol most likely DOES exist elsewhere in the repo. Unless the diff shown here proves absence, treat it as a PROBABLE FALSE POSITIVE."
+    echo "- For any version/API claim ('method .X does not exist in pkg@Y'): a caret range like ^1.1.0 means the LATEST 1.x, not the floor or an older major. If you cannot verify it from the prompt, call it UNSUPPORTED."
+    echo "- Only AFFIRM a finding you can defend from the diff shown. Otherwise list it as a false positive."
+    echo "- Output exactly two short plain-text sections: 'AFFIRMED:' (findings you can defend, with file:line) and 'FALSE_POSITIVES:' (findings to drop, one line each with why)."
+    echo ""
+    cat "$PEER_PROMPT_FILE"
+  } > "$_CLAUDE_PEER_PROMPT"
+  ( _call_api "claude-opus-4-8" 2048 120 < "$_CLAUDE_PEER_PROMPT" > "$CODEX_OUT" 2>&1; \
+    [ -s "$CODEX_OUT" ] || echo "CODEX_UNAVAILABLE" > "$CODEX_OUT" ) &
   CODEX_PID=$!
 
   # v0.7.7 (BX-3010): Gemini CLI falls off a cliff above ~15 KB prompts on
@@ -3499,7 +3515,7 @@ PEER_EOF
   _PEER_COUNT=0
   _PEER_NAMES=""
   if [ -n "$CODEX_CONTENT" ] && [ "$CODEX_CONTENT" != "CODEX_UNAVAILABLE" ]; then
-    _PEER_COUNT=$((_PEER_COUNT + 1)); _PEER_NAMES="Codex"
+    _PEER_COUNT=$((_PEER_COUNT + 1)); _PEER_NAMES="Claude-4.8"
   fi
   if [ -n "$GEMINI_CONTENT" ] && [ "$GEMINI_CONTENT" != "GEMINI_UNAVAILABLE" ]; then
     _PEER_COUNT=$((_PEER_COUNT + 1)); _PEER_NAMES="${_PEER_NAMES:+$_PEER_NAMES + }Gemini"
@@ -4353,7 +4369,7 @@ fi
     # Fallback: raw peer outputs if merge failed
     if [ -n "$CODEX_CONTENT" ] && [ "$CODEX_CONTENT" != "CODEX_UNAVAILABLE" ]; then
       echo ""
-      echo "## CODEX FINDINGS"
+      echo "## ADVERSARIAL CLAUDE-4.8 PEER FINDINGS (AFFIRMED / FALSE_POSITIVES)"
       echo "$CODEX_CONTENT"
     fi
     if [ -n "$GEMINI_CONTENT" ] && [ "$GEMINI_CONTENT" != "GEMINI_UNAVAILABLE" ]; then
