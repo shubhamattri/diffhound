@@ -120,8 +120,13 @@ _reconcile_summary_verdict() {
   [ "${DIFFHOUND_CLAIM_VERIFY:-1}" = "1" ] || return 0
   grep -qiE '\*\*Total\*\*' "$sf" || return 0
   local nb ns v cur
-  nb=$(awk '/^### Blockers/{f=1;next} /^#{2,3} /{f=0} f&&/^- /{c++} END{print c+0}' "$sf")
-  ns=$(awk '/^### Should-Fix/{f=1;next} /^#{2,3} /{f=0} f&&/^- /{c++} END{print c+0}' "$sf")
+  # NOTE: section terminator is `/^#+ /` (any markdown heading), NOT `/^#{2,3} /`.
+  # awk interval expressions `{2,3}` are NON-PORTABLE — the VM's awk treats them
+  # LITERALLY, so the terminator never matched, `f` stayed on past the section, and
+  # it miscounted the Nits/Open-Question bullets as blockers (#7317 -> wrong
+  # REQUEST_CHANGES). `+` is standard ERE everywhere. (CLAUDE.md hard rule #5.)
+  nb=$(awk '/^### Blockers/{f=1;next} /^#+ /{f=0} f&&/^- /{c++} END{print c+0}' "$sf")
+  ns=$(awk '/^### Should-Fix/{f=1;next} /^#+ /{f=0} f&&/^- /{c++} END{print c+0}' "$sf")
   if [ "${nb:-0}" -gt 0 ]; then v=REQUEST_CHANGES
   elif [ "${ns:-0}" -gt 0 ]; then v=COMMENT
   else v=APPROVE; fi

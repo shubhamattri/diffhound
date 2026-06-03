@@ -171,3 +171,36 @@ hasnt "S5: FP dropped despite control-char in structured JSON" "$OUT5" "imported
 has   "S5: verdict reconciled to APPROVE" "$OUT5" "**APPROVE**"
 echo ""; echo "FINAL4 PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ] || { printf 'FAILED: %s\n' "${FAILED[@]}"; exit 1; }
+
+# --- Scenario 6: empty Blockers/Should-Fix but Nits + Open-Question bullets
+#     present must reconcile to APPROVE (not miscount later-section bullets as
+#     blockers). This is the #7317 awk-interval portability bug. ---
+mkdir -p "$TMP/repo6"
+cat > "$TMP/summary6.md" <<'MD'
+re-review: prior blockers resolved.
+
+### Blockers (must fix before merge)
+none
+
+### Should-Fix (merge ok, follow-up needed)
+none
+
+### Nits
+- `Foo.vue:55` — dead code, delete when convenient
+- `Bar.vue:12` — naming nit
+
+### Open Questions (needs an answer, not a code change)
+- `~2000 lines, 0 tests` — follow-up ticket for coverage?
+
+## Scorecard
+| Category | Score | Notes |
+|----------|-------|-------|
+| **Total** | **66/100** | **REQUEST_CHANGES** — blocking issue(s) must be fixed before merge |
+MD
+_claim_verify_summary "$TMP/summary6.md" "$TMP/repo6" ""
+OUT6=$(cat "$TMP/summary6.md")
+has   "S6: nits+open-q present but verdict reconciled to APPROVE" "$OUT6" "**APPROVE**"
+hasnt "S6: stale REQUEST_CHANGES gone" "$OUT6" "REQUEST_CHANGES"
+has   "S6: nit bullets preserved" "$OUT6" "dead code, delete when convenient"
+echo ""; echo "FINAL5 PASS=$PASS FAIL=$FAIL"
+[ "$FAIL" -eq 0 ] || { printf 'FAILED: %s\n' "${FAILED[@]}"; exit 1; }
