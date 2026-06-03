@@ -1469,21 +1469,25 @@ _build_pr_manifest() {
       [ -z "$file" ] && continue
       echo "### ${file} [${prio}]"
       # Extract key definitions from this file's diff (+ lines only)
+      # awk self-limits to 15 prints and stops scanning this file's section —
+      # no `| head` pipe, so no SIGPIPE/"Broken pipe" noise on HUGE diffs, and
+      # less work (awk skips once it has 15 instead of being killed by head).
       $_AWK_CMD -v target="$file" '
         /^diff --git/ { in_file = (index($0, "b/" target) > 0) }
         in_file && /^\+/ {
+          if (c >= 15) next
           line = substr($0, 2)
           # Python: class/def/async def
-          if (line ~ /^[[:space:]]*(class |def |async def )[A-Za-z_]/) { print "  - " line }
+          if (line ~ /^[[:space:]]*(class |def |async def )[A-Za-z_]/) { print "  - " line; c++ }
           # TypeScript/JS: export, function, class, interface, enum, const
-          else if (line ~ /^[[:space:]]*(export |function |class |interface |enum |const |type )[A-Za-z_]/) { print "  - " line }
+          else if (line ~ /^[[:space:]]*(export |function |class |interface |enum |const |type )[A-Za-z_]/) { print "  - " line; c++ }
           # Config: key assignments (settings, env vars)
           else if (line ~ /^[[:space:]]*[A-Za-z_]+[[:space:]]*[:=].*/) {
             # Only capture top-level config-like assignments (not deep nesting)
-            if (line ~ /^[[:space:]]{0,4}[A-Za-z_]/) { print "  - " line }
+            if (line ~ /^[[:space:]]{0,4}[A-Za-z_]/) { print "  - " line; c++ }
           }
         }
-      ' "$diff_file" | head -15
+      ' "$diff_file"
       echo ""
     done < "$triage_file"
   } > "$output_file"
@@ -3631,7 +3635,7 @@ Evidence: \(.value.evidence // "none")
         if [ -f "$_lp_file" ] && [ -s "$_lp_file" ]; then
           echo ""
           echo "## LEARNED FALSE POSITIVE PATTERNS (from past reviews)"
-          jq -r '.lesson' "$_lp_file" 2>/dev/null | sort -u | head -20 | while read -r _lesson; do
+          jq -r '.lesson' "$_lp_file" 2>/dev/null | sort -u | awk "NR<=20" | while read -r _lesson; do
             echo "- $_lesson"
           done
         fi

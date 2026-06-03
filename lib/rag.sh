@@ -74,7 +74,7 @@ _extract_changed_functions() {
   grep -E '^\+.*\b(function|const|export|async)\s+\w+|^\+.*\w+\s*[=(]\s*(async\s*)?\(' "$DIFF_FILE" 2>/dev/null | \
     grep -oE '\b[a-zA-Z_][a-zA-Z0-9_]*\s*[=(]' | \
     sed 's/[=(]//g' | \
-    sort -u | head -20
+    sort -u | awk "NR<=20"
 }
 
 # ── File pattern cache ───────────────────────────────────────────────────────
@@ -245,12 +245,12 @@ $_TIMEOUT_CMD 15 bash -c '
   echo ""
   # Extract type/interface names from the diff
   types=$(grep -oE "(interface|type)\s+[A-Z][a-zA-Z0-9]+" "'"$DIFF_FILE"'" 2>/dev/null | \
-    awk "{print \$2}" | sort -u | head -10)
+    awk "{print \$2}" | sort -u | awk "NR<=10")
 
   # Also look for type annotations in changed lines
   more_types=$(grep -oE ":\s*[A-Z][a-zA-Z0-9]+[<\[\|]?" "'"$DIFF_FILE"'" 2>/dev/null | \
-    grep -oE "[A-Z][a-zA-Z0-9]+" | sort -u | head -10)
-  types=$(printf "%s\n%s" "$types" "$more_types" | sort -u | head -15)
+    grep -oE "[A-Z][a-zA-Z0-9]+" | sort -u | awk "NR<=10")
+  types=$(printf "%s\n%s" "$types" "$more_types" | sort -u | awk "NR<=15")
 
   [ -z "$types" ] && { echo "  (no type references found in diff)"; echo ""; exit 0; }
 
@@ -321,7 +321,7 @@ _PID6=$!
 $_TIMEOUT_CMD 15 bash -c '
   echo "## 7. RELATED ENUMS & CONSTANTS (check completeness)"
   echo ""
-  candidates=$(grep -oE "[A-Z][A-Z_]{3,}" "'"$DIFF_FILE"'" | sort -u | head -10 || true)
+  candidates=$(grep -oE "[A-Z][A-Z_]{3,}" "'"$DIFF_FILE"'" | sort -u | awk "NR<=10" || true)
   if [ -n "$candidates" ]; then
     while IFS= read -r candidate; do
       definition=$(cd "'"$REPO_PATH"'" && git grep -n "export.*${candidate}\|const ${candidate}\|enum ${candidate}" -- "*.ts" "*.js" 2>/dev/null | head -3 || true)
@@ -344,7 +344,7 @@ $_TIMEOUT_CMD 15 bash -c '
     [ -f "'"$REPO_PATH"'/$file" ] || continue
     # Find files that co-changed with this file in last 50 commits
     partners=$(cd "'"$REPO_PATH"'" && git log --name-only --pretty=format: -50 -- "$file" 2>/dev/null | \
-      grep -v "^$" | grep -v "^${file}$" | sort | uniq -c | sort -rn | head -5)
+      grep -v "^$" | grep -v "^${file}$" | sort | uniq -c | sort -rn | awk "NR<=5")
     [ -z "$partners" ] && continue
     echo "### Co-change partners of $file:"
     while IFS= read -r line; do
