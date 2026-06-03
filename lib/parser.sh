@@ -17,33 +17,73 @@ source "$(dirname "${BASH_SOURCE[0]}")/claim-checkers.sh" 2>/dev/null || true
 # DIFFHOUND_CLAIM_VERIFY flag. Real incident: monorepo #7317 re-asserted
 # SEARCH_ORGS/marked.parse blockers that the fresh-path engine never saw.
 _claim_verify_summary() {
-  local summary_file="$1" repo="$2"
+  local summary_file="$1" repo="$2" structured="${3:-}"
   [ -f "$summary_file" ] || return 0
   [ -d "$repo" ] || return 0
   [ "${DIFFHOUND_CLAIM_VERIFY:-1}" = "1" ] || return 0
-  type _extract_implicit_claims >/dev/null 2>&1 || return 0
+  type _verify_claim >/dev/null 2>&1 || return 0
   local DIFFHOUND_REPO="$repo"  # dynamic scope -> shared checkers use it
+
+  # 1) PRIMARY (robust, wording-independent): build the FP set from the model's
+  #    EXPLICIT structured claims. "basename:line" of any finding/thread_status
+  #    whose claim verifies FALSE against the repo. This is the real chokepoint —
+  #    we read the model's claims, NOT the rendered prose.
+  local fpset=" "
+  if [ -n "$structured" ] && [ -f "$structured" ] && command -v python3 >/dev/null 2>&1; then
+    local _json; _json=$(_extract_json "$structured" 2>/dev/null); [ -z "$_json" ] && _json=$(cat "$structured" 2>/dev/null)
+    local bn ln ctype subj loc exp c v
+    while IFS=$'\t' read -r bn ln ctype subj loc exp; do
+      [ -z "$bn" ] && continue
+      case "$ctype" in
+        file_contains)      c="file_contains:${subj}:${loc}:${exp:-true}" ;;
+        symbol_defined)     c="symbol_defined:${subj}:repo:${exp:-true}" ;;
+        dependency_version) c="dependency_version:${subj}::${exp:-missing}" ;;
+        *) continue ;;
+      esac
+      v=$(_verify_claim "$c")
+      [ "$v" = "FALSE" ] && fpset="${fpset}${bn}:${ln} "
+    done < <(printf '%s' "$_json" | python3 -c '
+import json,sys,os
+try: j=json.load(sys.stdin)
+except Exception: sys.exit(0)
+def emit(it):
+    bn=os.path.basename(str(it.get("file","")))
+    ln=str(it.get("line",""))
+    for cl in (it.get("claims") or []):
+        t=cl.get("type",""); subj=cl.get("subject","")
+        loc=cl.get("location","") or ""
+        exp=cl.get("expected", cl.get("expected_satisfies",""))
+        if isinstance(exp,bool): exp="true" if exp else "false"
+        print("\t".join([bn,ln,t,str(subj),str(loc),str(exp)]))
+for k in ("findings","thread_statuses"):
+    for it in (j.get(k) or []): emit(it)
+' 2>/dev/null)
+  fi
+
+  # 2) Scrub finding-bullets in Blockers/Should-Fix: drop if its file:line is in
+  #    the explicit FP set, OR (fallback) its own prose claim verifies FALSE.
   local tmp; tmp=$(mktemp -t "diffhound-cvsum.XXXXXX")
-  local line claims c v drop insec=""
+  local line bl claims c v drop insec=""
   while IFS= read -r line; do
     case "$line" in
-      "### Blockers"*) insec=1 ;;
-      "### Should-Fix"*) insec=1 ;;
-      "### Nits"*|"### Open Questions"*) insec="" ;;
+      "### Blockers"*|"### Should-Fix"*) insec=1 ;;
       "## "*|"### "*) insec="" ;;
     esac
     if [ -n "$insec" ] && printf '%s' "$line" | grep -qE '^- '; then
-      claims=$(_extract_implicit_claims "$line"); drop=0
-      if [ -n "$claims" ]; then
-        local IFS_s="$IFS"; IFS=';'
-        for c in $claims; do
-          c=$(printf '%s' "$c" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'); [ -z "$c" ] && continue
-          v=$(_verify_claim "$c"); [ "$v" = "FALSE" ] && { drop=1; break; }
-        done
-        IFS="$IFS_s"
+      drop=0
+      bl=$(printf '%s' "$line" | grep -oE '[A-Za-z0-9_./-]+\.(vue|ts|tsx|js|jsx|py):[0-9]+' | head -1)
+      [ -n "$bl" ] && bl=$(basename "$bl")
+      if [ -n "$bl" ] && printf '%s' "$fpset" | grep -qF " $bl "; then drop=1; fi
+      if [ "$drop" = "0" ] && type _extract_implicit_claims >/dev/null 2>&1; then
+        claims=$(_extract_implicit_claims "$line")
+        if [ -n "$claims" ]; then
+          local IFS_s="$IFS"; IFS=';'
+          for c in $claims; do c=$(printf '%s' "$c" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'); [ -z "$c" ] && continue; v=$(_verify_claim "$c"); [ "$v" = "FALSE" ] && { drop=1; break; }; done
+          IFS="$IFS_s"
+        fi
       fi
       if [ "$drop" = "1" ]; then
-        printf '[claim-verify-summary: removed FP bullet (%s): %s]\n' "$c" "$(printf '%s' "$line" | cut -c1-80)" >&2
+        printf '[claim-verify-summary: removed FP bullet: %s]\n' "$(printf '%s' "$line" | cut -c1-80)" >&2
         continue
       fi
     fi

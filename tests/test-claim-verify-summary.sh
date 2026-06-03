@@ -44,3 +44,37 @@ has   "section headers intact"            "$OUT" "### Blockers"
 
 echo ""; echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ] || { printf 'FAILED: %s\n' "${FAILED[@]}"; exit 1; }
+
+# --- Scenario 2: EXPLICIT structured claims catch what prose-matching misses ---
+# "defined nowhere" wording is NOT in the implicit absence_re, but the model's
+# explicit file_contains claim (expected:false, but SEARCH_ORGS IS in queries.js)
+# verifies FALSE -> bullet dropped via file:line match (the #7317 fix).
+mkdir -p "$TMP/repo2/services/portal/src/portal/graphql" "$TMP/repo2/svc"
+printf 'export const SEARCH_ORGS = gql`q`;\n' > "$TMP/repo2/services/portal/src/portal/graphql/queries.js"
+printf '{"dependencies":{"marked":"^1.1.0"}}' > "$TMP/repo2/package.json"
+cat > "$TMP/structured2.json" <<'JSON'
+```json
+{
+  "summary": "x",
+  "thread_statuses": [
+    {"file":"services/portal/src/portal/pages/support/PolicyQaPane.vue","line":57,"status":"STILL_OPEN",
+     "claims":[{"type":"file_contains","subject":"SEARCH_ORGS","location":"services/portal/src/portal/graphql/queries.js","expected":false}]}
+  ],
+  "findings": []
+}
+```
+JSON
+cat > "$TMP/summary2.md" <<'MD'
+body.
+
+### Blockers (must fix before merge)
+- `PolicyQaPane.vue:57` — `SEARCH_ORGS` is imported but defined nowhere. dead flow.
+- `RealFile.ts:10` — missing null check on user input.
+MD
+_claim_verify_summary "$TMP/summary2.md" "$TMP/repo2" "$TMP/structured2.json"
+OUT2=$(cat "$TMP/summary2.md")
+hasnt "S2: SEARCH_ORGS bullet dropped via EXPLICIT claim (defined nowhere)" "$OUT2" "SEARCH_ORGS"
+has   "S2: unrelated real bullet kept" "$OUT2" "RealFile.ts:10"
+
+echo ""; echo "FINAL PASS=$PASS FAIL=$FAIL"
+[ "$FAIL" -eq 0 ] || { printf 'FAILED: %s\n' "${FAILED[@]}"; exit 1; }

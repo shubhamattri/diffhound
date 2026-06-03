@@ -4916,7 +4916,7 @@ fi
 # summary prose (which bypass the fresh FINDING pipeline) get the same
 # ground-truth verification. Drops bullets whose claim is contradicted by the
 # repo (e.g. monorepo #7317 SEARCH_ORGS/marked.parse re-assertions).
-_claim_verify_summary "$REVIEW_SUMMARY" "${REPO_PATH:-${DIFFHOUND_REPO:-$(pwd)}}"
+_claim_verify_summary "$REVIEW_SUMMARY" "${REPO_PATH:-${DIFFHOUND_REPO:-$(pwd)}}" "${CLAUDE_OUT:-}"
 
 if [ "$POST_REVIEW" = true ]; then
   spinner_start "Posting review to GitHub..."
