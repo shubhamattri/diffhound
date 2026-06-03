@@ -1,0 +1,3 @@
+FINDING: services/portal/src/graphql/queries.js:540:BLOCKING
+WHAT: the `users` resolver is unscoped — no client scope applied, cross-client leak.
+UNVERIFIABLE: no

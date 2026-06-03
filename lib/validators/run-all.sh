@@ -180,4 +180,5 @@ V="$ROOT/lib/validators"
   | "$V/todo-deferral.sh" \
   | "$V/verifier.sh" \
   | "$V/citation-discipline.sh" \
-  | "$V/dedup-helper.py"
+  | "$V/dedup-helper.py" \
+  | "$V/claim-verify.sh"

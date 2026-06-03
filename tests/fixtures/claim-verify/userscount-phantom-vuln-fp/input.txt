@@ -1,0 +1,3 @@
+FINDING: services/portal/src/graphql/queries.js:546:BLOCKING
+WHAT: `usersCount` is the companion resolver to `users` and it's unscoped — restricted org admin can query cross-client count directly via GraphQL.
+UNVERIFIABLE: no

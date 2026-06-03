@@ -1,0 +1,4 @@
+FINDING: services/portal/src/pages/support/index.js:22:BLOCKING
+WHAT: the route rename was not propagated to claroAdmin.js which still references the old route name.
+CLAIMS: file_contains:claro_admin:services/portal/src/store/claroAdmin.js:true
+UNVERIFIABLE: no

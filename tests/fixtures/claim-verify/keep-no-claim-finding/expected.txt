@@ -1,0 +1,3 @@
+FINDING: services/notification/src/channels/whatsapp.ts:71:SHOULD-FIX
+WHAT: `contactNumber` (full phone) is logged in structured logs on every template failure — PII exposure.
+UNVERIFIABLE: no

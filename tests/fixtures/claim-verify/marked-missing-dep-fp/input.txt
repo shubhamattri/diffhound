@@ -1,0 +1,3 @@
+FINDING: services/portal/src/components/PolicyQaMessage.vue:53:BLOCKING
+WHAT: neither `marked` nor `dompurify` appear in any package.json — build fails before bot message rendering runs.
+UNVERIFIABLE: no

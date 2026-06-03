@@ -1,0 +1,3 @@
+FINDING: src/foo.ts:3:SHOULD-FIX
+WHAT: `madeUpHelperXyz` does not exist anywhere — imported here but never defined.
+UNVERIFIABLE: no
