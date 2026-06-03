@@ -2674,6 +2674,7 @@ For every finding, AND every STILL_OPEN / AUTHOR_WRONG thread_status, you MUST p
 - dependency_version: {"type":"dependency_version","subject":"<pkg>","expected_satisfies":"<4.0.0"} OR {"type":"dependency_version","subject":"<pkg>","expected":"missing"}. Use for any "package X is version Y / X not in package.json" claim.
 - file_contains: {"type":"file_contains","subject":"<exact string>","location":"<path>","expected":true|false}. Use for "string Z is/isn't in file F" claims (route names, config keys, env vars).
 - call_reachable: {"type":"call_reachable","subject":"<fn>","from":"<entrypoint>","expected":true}. Best-effort.
+- method_exists: {"type":"method_exists","subject":"<pkg>","method":"<method>","expected":true|false}. Use for ANY claim that a THIRD-PARTY DEPENDENCY does or doesn't expose a method/API at the installed version (e.g. "marked.parse() doesn't exist in marked@^1.1.0"). We have NO node_modules here, so this is NOT statically verifiable — such a finding MUST be raised as OPEN_QUESTION, NEVER BLOCKING/SHOULD-FIX. Do not block a merge on an unconfirmed dependency-API assertion; ask instead.
 HARD RULE: never assert a named resolver/function/endpoint/symbol is vulnerable, unscoped, missing, or wrong-version WITHOUT a claim grounding it. A BLOCKING/SHOULD-FIX whose claim cannot be verified becomes OPEN_QUESTION; whose claim is contradicted by the code is DROPPED. This is non-negotiable — it is the system's defense against confidently-wrong findings.
 
 # SCOPE DISCIPLINE (CRITICAL — violations of these rules waste developer time)

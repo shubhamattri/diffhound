@@ -78,3 +78,29 @@ has   "S2: unrelated real bullet kept" "$OUT2" "RealFile.ts:10"
 
 echo ""; echo "FINAL PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ] || { printf 'FAILED: %s\n' "${FAILED[@]}"; exit 1; }
+
+# --- Scenario 3: method_exists (dep API) is UNVERIFIABLE -> must NOT block ---
+mkdir -p "$TMP/repo3/services/portal/src/components"
+printf 'import marked from "marked";\n' > "$TMP/repo3/services/portal/src/components/PolicyQaMessage.vue"
+printf '{"dependencies":{"marked":"^1.1.0"}}' > "$TMP/repo3/package.json"
+cat > "$TMP/structured3.json" <<'JSON'
+```json
+{"summary":"x","findings":[],"thread_statuses":[
+  {"file":"services/portal/src/components/PolicyQaMessage.vue","line":53,"status":"STILL_OPEN",
+   "claims":[{"type":"method_exists","subject":"marked","method":"parse","expected":false}]}
+]}
+```
+JSON
+cat > "$TMP/summary3.md" <<'MD'
+body.
+
+### Blockers (must fix before merge)
+- `PolicyQaMessage.vue:53` — `marked.parse()` doesn't exist in marked@^1.1.0, throws TypeError.
+- `Other.ts:9` — real off-by-one in loop bound.
+MD
+_claim_verify_summary "$TMP/summary3.md" "$TMP/repo3" "$TMP/structured3.json"
+OUT3=$(cat "$TMP/summary3.md")
+hasnt "S3: marked.parse dep-API blocker dropped (unverifiable -> not a blocker)" "$OUT3" "marked.parse"
+has   "S3: unrelated real bullet kept" "$OUT3" "Other.ts:9"
+echo ""; echo "FINAL2 PASS=$PASS FAIL=$FAIL"
+[ "$FAIL" -eq 0 ] || { printf 'FAILED: %s\n' "${FAILED[@]}"; exit 1; }

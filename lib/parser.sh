@@ -38,10 +38,15 @@ _claim_verify_summary() {
         file_contains)      c="file_contains:${subj}:${loc}:${exp:-true}" ;;
         symbol_defined)     c="symbol_defined:${subj}:repo:${exp:-true}" ;;
         dependency_version) c="dependency_version:${subj}::${exp:-missing}" ;;
+        method_exists)      c="method_exists:${subj}:${loc}:" ;;
         *) continue ;;
       esac
       v=$(_verify_claim "$c")
-      [ "$v" = "FALSE" ] && fpset="${fpset}${bn}:${ln} "
+      # FALSE -> hallucination, drop. method_exists UNVERIFIABLE -> a dep API
+      # claim we cannot confirm statically must NOT block -> drop from blockers too.
+      if [ "$v" = "FALSE" ] || { [ "$ctype" = "method_exists" ] && [ "$v" = "UNVERIFIABLE" ]; }; then
+        fpset="${fpset}${bn}:${ln} "
+      fi
     done < <(printf '%s' "$_json" | python3 -c '
 import json,sys,os
 try: j=json.load(sys.stdin)
@@ -51,7 +56,7 @@ def emit(it):
     ln=str(it.get("line",""))
     for cl in (it.get("claims") or []):
         t=cl.get("type",""); subj=cl.get("subject","")
-        loc=cl.get("location","") or ""
+        loc=cl.get("location","") or cl.get("method","") or ""
         exp=cl.get("expected", cl.get("expected_satisfies",""))
         if isinstance(exp,bool): exp="true" if exp else "false"
         print("\t".join([bn,ln,t,str(subj),str(loc),str(exp)]))

@@ -61,6 +61,26 @@ _check_file_contains() {  # $1 subject  $2 location  $3 expected(true|false)
 
 _check_call_reachable() { echo UNVERIFIABLE; }  # best-effort placeholder
 
+# Whether a third-party dependency exposes a method/API at the installed version.
+# NOT statically verifiable in a shallow clone (no node_modules) -> UNVERIFIABLE,
+# unless the same `subject.method` is used in OTHER committed code in the repo
+# (evidence it exists) -> then a "does-not-exist" claim is FALSE.
+# This is the marked.parse class: "marked.parse() doesn't exist in marked@^1.1.0"
+# is a confident-but-unprovable assertion that must become an OPEN_QUESTION, never
+# a blocker. Args: $1 subject(pkg) $2 method.
+_check_method_exists() {
+  local pkg="$1" method="$2" repo="${DIFFHOUND_REPO:?}"
+  [ -z "$method" ] && { echo UNVERIFIABLE; return; }
+  # Evidence: is `pkg.method(` or `.method(` used anywhere in committed code?
+  if grep -rqE "\.${method}[[:space:]]*\(" "$repo" \
+       --include='*.ts' --include='*.tsx' --include='*.js' --include='*.jsx' --include='*.vue' \
+       --exclude-dir=node_modules 2>/dev/null; then
+    echo FALSE   # method IS used in committed code -> "doesn't exist" claim is false
+  else
+    echo UNVERIFIABLE  # cannot confirm a dep's API statically -> not a blocker
+  fi
+}
+
 # Dispatch "type:subject:scopeOrLoc:expected" -> verdict.
 _verify_claim() {
   local c="$1" type subject loc expected
@@ -72,6 +92,7 @@ _verify_claim() {
     symbol_defined)     _check_symbol_defined "$subject" "${expected:-true}" ;;
     dependency_version) _check_dependency_version "$subject" "${expected:-missing}" ;;
     file_contains)      _check_file_contains "$subject" "$loc" "${expected:-true}" ;;
+    method_exists)      _check_method_exists "$subject" "$loc" ;;
     call_reachable)     _check_call_reachable ;;
     *)                  echo UNVERIFIABLE ;;
   esac
