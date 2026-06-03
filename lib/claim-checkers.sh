@@ -62,24 +62,18 @@ _check_file_contains() {  # $1 subject  $2 location  $3 expected(true|false)
 _check_call_reachable() { echo UNVERIFIABLE; }  # best-effort placeholder
 
 # Whether a third-party dependency exposes a method/API at the installed version.
-# NOT statically verifiable in a shallow clone (no node_modules) -> UNVERIFIABLE,
-# unless the same `subject.method` is used in OTHER committed code in the repo
-# (evidence it exists) -> then a "does-not-exist" claim is FALSE.
-# This is the marked.parse class: "marked.parse() doesn't exist in marked@^1.1.0"
-# is a confident-but-unprovable assertion that must become an OPEN_QUESTION, never
-# a blocker. Args: $1 subject(pkg) $2 method.
-_check_method_exists() {
-  local pkg="$1" method="$2" repo="${DIFFHOUND_REPO:?}"
-  [ -z "$method" ] && { echo UNVERIFIABLE; return; }
-  # Evidence: is `pkg.method(` or `.method(` used anywhere in committed code?
-  if grep -rqE "\.${method}[[:space:]]*\(" "$repo" \
-       --include='*.ts' --include='*.tsx' --include='*.js' --include='*.jsx' --include='*.vue' \
-       --exclude-dir=node_modules 2>/dev/null; then
-    echo FALSE   # method IS used in committed code -> "doesn't exist" claim is false
-  else
-    echo UNVERIFIABLE  # cannot confirm a dep's API statically -> not a blocker
-  fi
-}
+# This is ALWAYS UNVERIFIABLE here: a shallow clone has no node_modules, so the
+# dep's real API can't be inspected. (An earlier version grepped for `.method(`
+# in committed code as "evidence it exists" — that was UNSOUND: `.parse(` matches
+# the very call being flagged, so a genuine "calls a method this version lacks"
+# bug self-cancels, and it also matches JSON.parse / path.parse / etc. That
+# heuristic suppressed REAL dep-API mismatches.) The correct, sound behavior:
+# a pure method-existence claim about a third-party dep is UNVERIFIABLE, and the
+# reconcile policy turns it into an OPEN_QUESTION (never a blocker). When the
+# version IS the real basis (e.g. "marked < 1.0.0 lacks .parse"), the model
+# should ground it as a `dependency_version` claim instead — which IS verifiable
+# against package.json. Args: $1 subject(pkg) $2 method (both ignored).
+_check_method_exists() { echo UNVERIFIABLE; }
 
 # Dispatch "type:subject:scopeOrLoc:expected" -> verdict.
 _verify_claim() {

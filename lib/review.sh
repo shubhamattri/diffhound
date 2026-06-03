@@ -1030,24 +1030,48 @@ HEAD_REF_NAME=$(echo "$PR_DATA" | jq -r '.headRefName // empty')
 spinner_stop "PR metadata fetched"
 
 # ============================================================
-# STEP 0.65: CHECKOUT PR BRANCH (so Read/Bash tools see PR code, not base branch)
+# STEP 0.65: MATERIALIZE PR HEAD IN AN ISOLATED WORKTREE
 # ============================================================
-_ORIGINAL_REF=""
-if [ -n "$REPO_PATH" ] && [ -d "$REPO_PATH/.git" ]; then
-  _ORIGINAL_REF=$(git -C "$REPO_PATH" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
-  # Fetch the PR's head commit and checkout
-  if [ -n "$HEAD_SHA" ]; then
-    (
-      cd "$REPO_PATH"
-      git fetch origin "$HEAD_SHA" --depth=50 -q 2>/dev/null || \
-        git fetch origin "+refs/pull/${PR_NUMBER}/head:refs/remotes/origin/pr-${PR_NUMBER}" -q 2>/dev/null || true
-      git checkout "$HEAD_SHA" -q 2>/dev/null || true
-    )
-    _CURRENT_SHA=$(git -C "$REPO_PATH" rev-parse HEAD 2>/dev/null || true)
-    if [ "${_CURRENT_SHA:0:8}" = "${HEAD_SHA:0:8}" ]; then
-      echo "  🔀 Repo checked out to PR HEAD (${HEAD_SHA:0:8})"
-    else
-      echo "  ⚠ Could not checkout PR HEAD — file reads may use base branch" >&2
+# The review's ENTIRE ground truth — claim-verify, every grep-based validator,
+# and code-context extraction — depends on REPO_PATH reflecting the PR HEAD, not
+# the base branch. The shared clone ($HOME/repos/owner/name) is mutable: it goes
+# dirty (e.g. `M yarn.lock` from a prior run), detached, and is shared across
+# concurrent PR runs. An in-place `git checkout $HEAD_SHA` ABORTS on a dirty tree
+# and the old `|| true` swallowed that failure SILENTLY — so the whole pipeline
+# then verified against STALE base code: FPs leaked AND, worse, a stale tree turns
+# a real FP's "symbol absent" claim from FALSE (drop) into TRUE (keep+confirm the
+# hallucination). A per-run worktree is immune to a dirty main tree, isolated
+# across concurrent PRs, and removed in cleanup(). Failure is now LOUD.
+_ORIGINAL_REF=""          # kept for cleanup() compatibility; unused with worktree
+_DH_MAIN_CLONE=""
+_DH_WORKTREE=""
+if [ -n "$REPO_PATH" ] && [ -d "$REPO_PATH/.git" ] && [ -n "$HEAD_SHA" ]; then
+  _DH_MAIN_CLONE="$REPO_PATH"
+  (
+    cd "$REPO_PATH"
+    git fetch origin "+refs/pull/${PR_NUMBER}/head:refs/dh/pr-${PR_NUMBER}" --depth=50 -q 2>/dev/null \
+      || git fetch origin "$HEAD_SHA" --depth=50 -q 2>/dev/null || true
+  )
+  _wt=$(mktemp -d -t "dh-wt-${PR_NUMBER}.XXXXXX")
+  if git -C "$REPO_PATH" worktree add --detach -f "$_wt" "$HEAD_SHA" >/dev/null 2>&1 \
+     || git -C "$REPO_PATH" worktree add --detach -f "$_wt" "refs/dh/pr-${PR_NUMBER}" >/dev/null 2>&1; then
+    _wt_sha=$(git -C "$_wt" rev-parse HEAD 2>/dev/null || true)
+    if [ "${_wt_sha:0:8}" = "${HEAD_SHA:0:8}" ]; then
+      _DH_WORKTREE="$_wt"
+      REPO_PATH="$_wt"
+      echo "  🔀 PR HEAD worktree (${HEAD_SHA:0:8})"
+    fi
+  fi
+  if [ -z "$_DH_WORKTREE" ]; then
+    rm -rf "$_wt" 2>/dev/null || true
+    # LOUD failure: do NOT silently verify against the wrong tree.
+    echo "  ⚠⚠ FAILED to materialize PR HEAD worktree — grep ground-truth would" >&2
+    echo "     run against STALE base code. claim-verify ground-truth DISABLED" >&2
+    echo "     for this run to avoid confirming hallucinations." >&2
+    export DIFFHOUND_TREE_UNVERIFIED=1
+    if [ "${DIFFHOUND_REQUIRE_HEAD:-0}" = "1" ]; then
+      echo "  ✋ DIFFHOUND_REQUIRE_HEAD=1 set — aborting rather than posting an unverified review." >&2
+      exit 3
     fi
   fi
 fi
@@ -1097,9 +1121,17 @@ cleanup() {
         "${CLEANED_DIFF:-}" "${COMPRESSED_DIFF:-}" "${TRIAGE_FILE:-}" "${PR_SUMMARY_HEADER_FILE:-}"
   [ -n "${CHUNK_DIR:-}" ] && rm -rf "$CHUNK_DIR" 2>/dev/null || true
 
-  # Restore original branch after PR HEAD checkout
+  # Restore original branch after PR HEAD checkout (legacy in-place path)
   if [ -n "${_ORIGINAL_REF:-}" ] && [ -d "${REPO_PATH:-}/.git" ]; then
     git -C "$REPO_PATH" checkout "$_ORIGINAL_REF" -q 2>/dev/null || true
+  fi
+
+  # Remove the per-run PR HEAD worktree (STEP 0.65). Worktree removal is run
+  # against the MAIN clone, not REPO_PATH (which now points INTO the worktree).
+  if [ -n "${_DH_WORKTREE:-}" ] && [ -n "${_DH_MAIN_CLONE:-}" ]; then
+    git -C "$_DH_MAIN_CLONE" worktree remove --force "$_DH_WORKTREE" 2>/dev/null \
+      || rm -rf "$_DH_WORKTREE" 2>/dev/null || true
+    git -C "$_DH_MAIN_CLONE" worktree prune 2>/dev/null || true
   fi
 
   # Post failure comment if review crashed mid-way
