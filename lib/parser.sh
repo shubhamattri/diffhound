@@ -163,6 +163,89 @@ parse_summary() {
   _normalize_markdown_scorecard_total "$summary_file"
 }
 
+# Derive the scorecard from the actual findings instead of trusting the model's
+# free-form per-category guesses (v0.7.13). The old scorecard let the model pick
+# "Tests 12/20" on vibes, so a CLEAN review (zero findings) still scored 86 with
+# no finding to justify the deduction — verdict and score disagreed. Now: start
+# at 100, deduct per finding by severity. No findings → 100. APPROVE (no
+# blockers/should-fix) therefore lands high, and every lost point maps to a
+# comment you can read. Counts come from the rendered ### Blockers / ### Should-
+# Fix / ### Nits sections of the summary. Replaces the "## Scorecard" table.
+#   Blocking -20, Should-Fix -7, Nit -2 (OPEN_QUESTION excluded), floored at 0.
+_derive_scorecard_from_summary() {
+  local summary_file="$1"
+  [ -f "$summary_file" ] || return 0
+  local tmp; tmp=$(mktemp -t "diffhound-derivesc.XXXXXX")
+  awk '
+    function lc(s){ return tolower(s) }
+    { lines[NR]=$0 }
+    /^### / {
+      cur=""
+      if ($0 ~ /^### Blockers/)            cur="B"
+      else if ($0 ~ /^### Should[- ]?[Ff]ix/) cur="S"
+      else if ($0 ~ /^### Nits/)           cur="N"
+      next
+    }
+    /^## / { cur="" }
+    {
+      if (cur!="" && $0 ~ /^- / && lc($0) !~ /^- *none/) {
+        if (cur=="B") B++; else if (cur=="S") S++; else if (cur=="N") N++
+      }
+    }
+    END {
+      B=B+0; S=S+0; N=N+0
+      score = 100 - 20*B - 7*S - 2*N
+      if (score < 0) score = 0
+      # Locate the scorecard table: "## Scorecard" (or a "| Category" header) → **Total** row.
+      start=0; end=0
+      for (i=1;i<=NR;i++){ if (lines[i] ~ /^##[ ]*Scorecard/){ start=i; break } }
+      if (start==0) for (i=1;i<=NR;i++){ if (lines[i] ~ /^\|[ ]*Category/){ start=i; break } }
+      verdict=""
+      if (start>0) for (i=start;i<=NR;i++){
+        if (lines[i] ~ /\*\*Total\*\*/){
+          end=i
+          # Preserve the model verdict word so parse_verdict still works if it
+          # runs after this (and so the derived row stays informative).
+          if (lines[i] ~ /REQUEST_CHANGES/)   verdict="REQUEST_CHANGES"
+          else if (lines[i] ~ /APPROVE/)      verdict="APPROVE"
+          else if (lines[i] ~ /COMMENT/)      verdict="COMMENT"
+          break
+        }
+      }
+      vsuffix = (verdict != "") ? " (" verdict ")" : ""
+
+      for (i=1;i<=NR;i++){
+        if (start>0 && i==start){
+          print "## Scorecard (derived from findings)"
+          print ""
+          print "| Severity | Count | Penalty | Deduction |"
+          print "|----------|-------|---------|-----------|"
+          print "| Blocking | " B " | -20 | -" 20*B " |"
+          print "| Should-Fix | " S " | -7 | -" 7*S " |"
+          print "| Nit | " N " | -2 | -" 2*N " |"
+          print "| **Total** | | | **" score "/100**" vsuffix " |"
+          if (end>=start){ i=end; continue }   # skip the old table rows
+        } else if (start>0 && end>=start && i>start && i<=end){
+          continue
+        } else {
+          print lines[i]
+        }
+      }
+      if (start==0){
+        print ""
+        print "## Scorecard (derived from findings)"
+        print ""
+        print "| Severity | Count | Penalty | Deduction |"
+        print "|----------|-------|---------|-----------|"
+        print "| Blocking | " B " | -20 | -" 20*B " |"
+        print "| Should-Fix | " S " | -7 | -" 7*S " |"
+        print "| Nit | " N " | -2 | -" 2*N " |"
+        print "| **Total** | | | **" score "/100**" vsuffix " |"
+      }
+    }
+  ' "$summary_file" > "$tmp" && mv "$tmp" "$summary_file" || rm -f "$tmp"
+}
+
 # Re-verify "X doesn't exist / not defined / missing" claims against the CURRENT
 # tree, and emit ground-truth corrections for any symbol that IS actually
 # defined. Used on re-reviews: the model re-asserts a round-1 STILL_OPEN concern

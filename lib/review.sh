@@ -4595,7 +4595,7 @@ fi
 
 
 # -- Scorecard fallback: recover from Claude JSON if voice rewrite dropped it --
-if ! grep -q '| Category' "$REVIEW_SUMMARY" 2>/dev/null; then
+if ! grep -qE '\| (Category|Severity)' "$REVIEW_SUMMARY" 2>/dev/null; then
   echo "  Voice rewrite dropped scorecard -- recovering from Claude JSON" >&2
   _sc_json=$(_extract_json "$CLAUDE_OUT" 2>/dev/null || true)
   if [ -z "$_sc_json" ]; then
@@ -4885,6 +4885,15 @@ else
   done
 fi
 
+# Findings-derived scorecard (v0.7.13) — runs ALWAYS (not just when posting), so
+# the saved summary.md reflects the real score whether or not we post. Replaces
+# the model's free-form per-category guesses with a score from the actual
+# findings (100 - 20*blockers - 7*should-fix - 2*nits; clean review -> 100). It
+# preserves the model's verdict word, so parse_verdict (below, in the post path)
+# still works. Previously this lived inside the POST_REVIEW block, which meant
+# dry-runs saved an un-derived summary — making dry-run verification misleading.
+_derive_scorecard_from_summary "$REVIEW_SUMMARY"
+
 if [ "$POST_REVIEW" = true ]; then
   spinner_start "Posting review to GitHub..."
 
@@ -4905,7 +4914,8 @@ if [ "$POST_REVIEW" = true ]; then
   NEW_COMMENT_COUNT=$(wc -l < "${REVIEW_STRUCTURED}.new_comments" | tr -d ' ')
   REPLY_COUNT=$(wc -l < "${REVIEW_STRUCTURED}.replies" | tr -d ' ')
 
-  # Parse verdict using lib function (3-method fallback)
+  # Parse verdict (3-method fallback). The scorecard was already derived above
+  # (before this block) and preserves the verdict word, so this still resolves.
   REVIEW_EVENT=$(parse_verdict "$REVIEW_SUMMARY" "${REVIEW_STRUCTURED}.new_comments")
 
   # Peer-coverage gate (v0.7.9): if peer review ran but produced 0 cross-check
@@ -4945,7 +4955,7 @@ if [ "$POST_REVIEW" = true ]; then
 
   # Reorder summary: move scorecard table to the top (after first paragraph)
   # so it survives GitHub's silent body truncation on large reviews.
-  if grep -q '| Category' "$REVIEW_SUMMARY" 2>/dev/null; then
+  if grep -qE '\| (Category|Severity)' "$REVIEW_SUMMARY" 2>/dev/null; then
     _reorder_tmp=$(mktemp -t "pr-${PR_NUMBER}-reorder.XXXXXX")
     _table_tmp=$(mktemp -t "pr-${PR_NUMBER}-table.XXXXXX")
     _body_tmp=$(mktemp -t "pr-${PR_NUMBER}-body.XXXXXX")
@@ -4953,7 +4963,7 @@ if [ "$POST_REVIEW" = true ]; then
     # Extract table lines (| rows) and everything else
     _in_table=false
     while IFS= read -r _line; do
-      if echo "$_line" | grep -q '^| Category'; then
+      if echo "$_line" | grep -qE '^\| (Category|Severity)'; then
         _in_table=true
       fi
       if [ "$_in_table" = true ]; then
@@ -4994,7 +5004,7 @@ if [ "$POST_REVIEW" = true ]; then
     fi
 
     # Only use reordered if valid
-    if [ -s "$_reorder_tmp" ] && grep -q '| Category' "$_reorder_tmp" 2>/dev/null; then
+    if [ -s "$_reorder_tmp" ] && grep -qE '\| (Category|Severity)' "$_reorder_tmp" 2>/dev/null; then
       mv "$_reorder_tmp" "$REVIEW_SUMMARY"
     else
       rm -f "$_reorder_tmp"
