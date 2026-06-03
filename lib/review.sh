@@ -4375,6 +4375,18 @@ fi
     echo "## EXISTING THREAD STATUSES (from engineering pass)"
     grep -A6 "^THREAD_STATUS:" "$CLAUDE_OUT" 2>/dev/null || echo "none"
     echo ""
+    # Re-review re-verification: the engineering pass re-asserts round-1 concerns
+    # ("X doesn't exist") without re-checking current code. grep the tree now and
+    # OVERRIDE any absence claim for a symbol that is actually defined. Kills the
+    # SEARCH_ORGS-class false positive that bypasses validators + peer review.
+    _GT_CORRECTIONS=$(_reverify_absence_claims "$CLAUDE_OUT" "$REPO_PATH")
+    if [ -n "$_GT_CORRECTIONS" ]; then
+      echo "## GROUND-TRUTH CORRECTIONS (verified by grep on the current tree — these OVERRIDE the thread statuses above)"
+      echo "$_GT_CORRECTIONS"
+      echo ""
+      echo "These symbols DEMONSTRABLY EXIST in the code under review. Do NOT emit any blocker, COMMENT, or STILL_OPEN reply claiming they are missing/undefined — those are stale round-1 concerns the author has since addressed. Mark them RESOLVED."
+      echo ""
+    fi
     cat << 'REREVIEW_BLOCK'
 ## HOW TO HANDLE THREAD REPLIES
 
@@ -4898,6 +4910,23 @@ if [ "$POST_REVIEW" = true ]; then
     } > "$_gate_tmp" && mv "$_gate_tmp" "$REVIEW_SUMMARY"
   fi
 
+  # Re-review verdict cap (v0.7.11): re-review verdicts flip-flop run-to-run and
+  # re-assert stale round-1 concerns (monorepo #7317: APPROVE 66 → APPROVE 90 →
+  # REQUEST_CHANGES across identical code), so a re-review REQUEST_CHANGES is not
+  # trustworthy enough to hard-block a merge. Cap ALL re-reviews at COMMENT —
+  # findings still post and stay actionable, but only a FRESH (round-1) review,
+  # or a human, blocks a merge. Removes the false-positive merge-blocking that is
+  # the actual harm; does not pretend the model is deterministic.
+  if [ "${IS_REREVIEW:-false}" = true ] && [ "$REVIEW_EVENT" = "REQUEST_CHANGES" ]; then
+    REVIEW_EVENT="COMMENT"
+    _rr_tmp=$(mktemp -t "pr-${PR_NUMBER}-rrcap.XXXXXX")
+    {
+      echo "> ℹ️ **Re-review — advisory only (not blocking).** Re-review verdicts are capped at COMMENT because they flip-flop run-to-run and can re-raise already-resolved concerns. Treat the findings below as signal to check, not a merge gate. A fresh review or a human makes the block/approve call."
+      echo ""
+      cat "$REVIEW_SUMMARY"
+    } > "$_rr_tmp" && mv "$_rr_tmp" "$REVIEW_SUMMARY"
+  fi
+
   # Reorder summary: move scorecard table to the top (after first paragraph)
   # so it survives GitHub's silent body truncation on large reviews.
   if grep -q '| Category' "$REVIEW_SUMMARY" 2>/dev/null; then
@@ -5128,6 +5157,7 @@ if [ "${DIFFHOUND_DISABLE_RUN_ARCHIVE:-0}" != "1" ]; then
     [ -f "${GEMINI_OUT:-}" ]                        && cp "${GEMINI_OUT}"                        "$_LOG_DIR/gemini-output.txt" 2>/dev/null
     [ -f "${PEER_PROMPT_FILE:-}" ]                  && cp "${PEER_PROMPT_FILE}"                  "$_LOG_DIR/peer-prompt.txt" 2>/dev/null
     [ -f "${PROMPT_FILE:-}" ]                       && cp "${PROMPT_FILE}"                       "$_LOG_DIR/main-prompt.txt" 2>/dev/null
+    [ -f "${_USER_TMP:-}" ]                         && cp "${_USER_TMP}"                         "$_LOG_DIR/voice-prompt.txt" 2>/dev/null
     [ -f "${DIFF_FILE:-}" ]                         && cp "${DIFF_FILE}"                         "$_LOG_DIR/diff.txt" 2>/dev/null
     [ -f "${SYNTH_FINDINGS:-}" ]                    && cp "${SYNTH_FINDINGS}"                    "$_LOG_DIR/synth-findings.txt" 2>/dev/null
 

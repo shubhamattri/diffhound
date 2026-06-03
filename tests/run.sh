@@ -100,5 +100,10 @@ if [ -z "$only" ] && [ -x "$ROOT/tests/test-scorecard.sh" ]; then
   echo "=== unit: test-scorecard.sh ==="
   "$ROOT/tests/test-scorecard.sh" || _unit_fail=1
 fi
+if [ -z "$only" ] && [ -x "$ROOT/tests/test-reverify.sh" ]; then
+  echo
+  echo "=== unit: test-reverify.sh ==="
+  "$ROOT/tests/test-reverify.sh" || _unit_fail=1
+fi
 
 [ "$FAIL" -eq 0 ] && [ "$_unit_fail" -eq 0 ]

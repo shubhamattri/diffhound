@@ -163,6 +163,45 @@ parse_summary() {
   _normalize_markdown_scorecard_total "$summary_file"
 }
 
+# Re-verify "X doesn't exist / not defined / missing" claims against the CURRENT
+# tree, and emit ground-truth corrections for any symbol that IS actually
+# defined. Used on re-reviews: the model re-asserts a round-1 STILL_OPEN concern
+# ("SEARCH_ORGS doesn't exist anywhere") without re-checking the code, and that
+# re-assertion bypasses the validator pipeline AND the peer cross-check. This
+# grep is deterministic — if the symbol is defined now, the absence claim is a
+# false positive (real incident: monorepo #7317, SEARCH_ORGS at queries.js:83).
+#
+# Args: $1 = model-output file (CLAUDE_OUT), $2 = repo working tree.
+# Stdout: markdown correction bullets (empty if none). Caller injects them into
+# the voice/format pass so the final review can't render the claim as a blocker.
+_reverify_absence_claims() {
+  local out="$1" repo="$2"
+  [ -f "$out" ] || return 0
+  [ -d "$repo" ] || return 0
+
+  # Lines that assert a symbol is absent.
+  local absence_re="does(n'?t| not) exist|do(n'?t| not) exist|not defined|don'?t exist anywhere|doesn'?t exist anywhere|missing entirely|not found anywhere|exist anywhere in the codebase"
+
+  # Candidate symbols from absence lines: backticked identifiers OR ALL_CAPS
+  # constants (gql query consts like SEARCH_ORGS). Defs-only check below keeps
+  # noise tokens (HTTP/JSON/API) from producing corrections.
+  grep -iE "$absence_re" "$out" 2>/dev/null \
+    | grep -oE '`@?[A-Za-z_][A-Za-z0-9_]{2,}`|[A-Z][A-Z0-9_]{3,}' \
+    | tr -d '`' | sort -u \
+    | while IFS= read -r sym; do
+        [ -z "$sym" ] && continue
+        local hit loc
+        # Look for a DEFINITION (export/const/function/class/def or `SYM =`/`SYM:`).
+        hit=$(grep -rnE "(export[[:space:]]+(const|default|function|class)|const|let|var|function|class|def)[[:space:]]+${sym}([[:space:]]|=|\(|:|<|\$)|^[[:space:]]*${sym}[[:space:]]*[:=]" "$repo" \
+              --include='*.ts' --include='*.tsx' --include='*.js' --include='*.jsx' --include='*.vue' --include='*.py' \
+              2>/dev/null | grep -v '/node_modules/' | head -1)
+        if [ -n "$hit" ]; then
+          loc=$(printf '%s' "$hit" | cut -d: -f1-2 | sed "s#${repo}/##")
+          printf -- '- `%s` IS defined at %s — any claim it does not exist is a FALSE POSITIVE; mark that thread RESOLVED and do not emit it as a blocker/comment.\n' "$sym" "$loc"
+        fi
+      done
+}
+
 # Normalize the markdown scorecard to canonical, weight-enforced scoring.
 #
 # Canonical weights (sum = 100):
