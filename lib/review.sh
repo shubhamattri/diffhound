@@ -4885,14 +4885,13 @@ else
   done
 fi
 
-# Findings-derived scorecard (v0.7.13) — runs ALWAYS (not just when posting), so
-# the saved summary.md reflects the real score whether or not we post. Replaces
-# the model's free-form per-category guesses with a score from the actual
-# findings (100 - 20*blockers - 7*should-fix - 2*nits; clean review -> 100). It
-# preserves the model's verdict word, so parse_verdict (below, in the post path)
-# still works. Previously this lived inside the POST_REVIEW block, which meant
-# dry-runs saved an un-derived summary — making dry-run verification misleading.
-_derive_scorecard_from_summary "$REVIEW_SUMMARY"
+# NOTE (v0.7.14): reverted the v0.7.13 findings-derived scorecard. Shubham
+# prefers the structured per-category table (Security/Tests/Observability/
+# Performance/Readability/Compatibility). The canonical /100 weighting +
+# negative-score clamp from v0.7.9–v0.7.10 (_normalize_markdown_scorecard_total,
+# run during parsing) still apply, so the category table is mathematically
+# correct. _derive_scorecard_from_summary is kept in parser.sh but no longer
+# called.
 
 if [ "$POST_REVIEW" = true ]; then
   spinner_start "Posting review to GitHub..."
