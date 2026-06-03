@@ -49,8 +49,15 @@ _claim_verify_summary() {
       fi
     done < <(printf '%s' "$_json" | python3 -c '
 import json,sys,os
-try: j=json.load(sys.stdin)
-except Exception: sys.exit(0)
+# strict=False: LLMs routinely emit LITERAL newlines/tabs inside string values
+# (multi-line "body"/"evidence" fields). Plain json.load() raises
+# "Invalid control character" on those and the old silent sys.exit(0) then left
+# the FP-scrub a no-op (marked FP leaked on #7317 this way). Tolerate control
+# chars; warn LOUDLY (never silently) if it still cannot parse.
+try: j=json.loads(sys.stdin.read(), strict=False)
+except Exception as e:
+    sys.stderr.write("[claim-verify-summary: WARN could not parse structured claims (%s); FP scrub fell back to prose-only]\n" % e)
+    sys.exit(0)
 def emit(it):
     bn=os.path.basename(str(it.get("file","")))
     ln=str(it.get("line",""))

@@ -1931,7 +1931,7 @@ while i < len(lines):
         head = line[:-len(":MARKED")]  # "FINDING: path:line"
         b64 = lines[i+1][len("MARKER_B64: "):].strip()
         try:
-            j = json.loads(base64.b64decode(b64).decode("utf-8"))
+            j = json.loads(base64.b64decode(b64).decode("utf-8"), strict=False)
             f_, s_, w_ = j.get("f", ""), j.get("s", ""), j.get("w", "")
             if not f_:
                 i += 2; continue  # malformed — drop

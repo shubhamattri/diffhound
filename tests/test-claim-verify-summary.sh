@@ -139,3 +139,35 @@ PV=$(parse_verdict "$TMP/summary4.md" "$TMP/sv4.comments" 2>/dev/null)
 [ "$PV" = "APPROVE" ] && { echo "ok   S4: parse_verdict honors reconciled APPROVE"; PASS=$((PASS+1)); } || { echo "FAIL S4: parse_verdict=$PV (want APPROVE)"; FAIL=$((FAIL+1)); FAILED+=("S4 parse_verdict"); }
 echo ""; echo "FINAL3 PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ] || { printf 'FAILED: %s\n' "${FAILED[@]}"; exit 1; }
+
+# --- Scenario 5: structured JSON with a LITERAL control char (newline in a
+#     string value) must still parse (strict=False) and drop the FP. This is the
+#     #7317 marked-leak root cause: json.load() threw -> silent no-op. ---
+mkdir -p "$TMP/repo5/svc"
+printf 'export const SEARCH_ORGS = gql`q`;\n' > "$TMP/repo5/svc/queries.js"
+# NOTE: the "evidence" value below contains a REAL newline (invalid strict JSON).
+printf '%s\n' '```json' > "$TMP/structured5.json"
+printf '%s\n' '{"summary":"x","findings":[],"thread_statuses":[' >> "$TMP/structured5.json"
+printf '%s\n' '  {"file":"svc/PolicyQaPane.vue","line":57,"status":"STILL_OPEN",' >> "$TMP/structured5.json"
+printf '%s\n' '   "evidence":"grep across services/ returns only the import line' >> "$TMP/structured5.json"
+printf '%s\n' 'on a second line — this raw newline breaks strict JSON",' >> "$TMP/structured5.json"
+printf '%s\n' '   "claims":[{"type":"file_contains","subject":"SEARCH_ORGS","location":"svc/queries.js","expected":false}]}' >> "$TMP/structured5.json"
+printf '%s\n' ']}' >> "$TMP/structured5.json"
+printf '%s\n' '```' >> "$TMP/structured5.json"
+cat > "$TMP/summary5.md" <<'MD'
+re-review.
+
+### Blockers (must fix before merge)
+- `PolicyQaPane.vue:57` — `SEARCH_ORGS` imported but never defined anywhere
+
+## Scorecard
+| Category | Score | Notes |
+|----------|-------|-------|
+| **Total** | **52/100** | **REQUEST_CHANGES** — one blocker |
+MD
+_claim_verify_summary "$TMP/summary5.md" "$TMP/repo5" "$TMP/structured5.json"
+OUT5=$(cat "$TMP/summary5.md")
+hasnt "S5: FP dropped despite control-char in structured JSON" "$OUT5" "imported but never defined"
+has   "S5: verdict reconciled to APPROVE" "$OUT5" "**APPROVE**"
+echo ""; echo "FINAL4 PASS=$PASS FAIL=$FAIL"
+[ "$FAIL" -eq 0 ] || { printf 'FAILED: %s\n' "${FAILED[@]}"; exit 1; }
