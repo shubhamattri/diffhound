@@ -94,6 +94,48 @@ for k in ("findings","thread_statuses"):
     fi
     printf '%s\n' "$line"
   done < "$summary_file" > "$tmp" && mv "$tmp" "$summary_file" || rm -f "$tmp"
+
+  # 3) Reconcile the verdict with the SURVIVING bullets. Dropping an FP blocker
+  #    bullet must also drop the verdict it drove (plan invariant 4: verdict is a
+  #    function of verified findings, not the model's self-assessment). Without
+  #    this, #7317 dropped both FP blockers yet still read REQUEST_CHANGES.
+  _reconcile_summary_verdict "$summary_file"
+}
+
+# Recompute the **Total** row verdict from the blocker/should-fix bullets that
+# SURVIVED claim-verify, and rewrite it (verdict token + reason) if it disagrees.
+# Score number is left as the model's (precise re-scoring needs the dropped
+# finding's category weight — a documented follow-up); the verdict is the signal
+# that matters and IS deterministically derivable from surviving bullets.
+_reconcile_summary_verdict() {
+  local sf="$1"
+  [ -f "$sf" ] || return 0
+  [ "${DIFFHOUND_CLAIM_VERIFY:-1}" = "1" ] || return 0
+  grep -qiE '\*\*Total\*\*' "$sf" || return 0
+  local nb ns v cur
+  nb=$(awk '/^### Blockers/{f=1;next} /^#{2,3} /{f=0} f&&/^- /{c++} END{print c+0}' "$sf")
+  ns=$(awk '/^### Should-Fix/{f=1;next} /^#{2,3} /{f=0} f&&/^- /{c++} END{print c+0}' "$sf")
+  if [ "${nb:-0}" -gt 0 ]; then v=REQUEST_CHANGES
+  elif [ "${ns:-0}" -gt 0 ]; then v=COMMENT
+  else v=APPROVE; fi
+  cur=$(grep -iE '\*\*Total\*\*' "$sf" | grep -oiE 'REQUEST_CHANGES|APPROVE|COMMENT' | head -1)
+  [ -n "$cur" ] && [ "$cur" = "$v" ] && return 0
+  local tmp; tmp=$(mktemp -t "diffhound-rv.XXXXXX")
+  awk -v V="$v" '
+    /\*\*Total\*\*/ {
+      n=split($0, a, "|")
+      if (n >= 4) {
+        reason = (V=="APPROVE") ? "no blocking issues after claim-verification" : \
+                 (V=="COMMENT") ? "should-fix items remain; merge ok with follow-ups" : \
+                 "blocking issue(s) must be fixed before merge"
+        a[4] = " **" V "** \xe2\x80\x94 " reason " "
+        out=a[1]; for(i=2;i<=n;i++) out=out "|" a[i]
+        print out; next
+      }
+    }
+    { print }
+  ' "$sf" > "$tmp" && mv "$tmp" "$sf" || { rm -f "$tmp"; return 0; }
+  printf '[claim-verify-summary: verdict reconciled %s -> %s (%s blockers, %s should-fix survive)]\n' "${cur:-?}" "$v" "${nb:-0}" "${ns:-0}" >&2
 }
 
 # Extract JSON block from LLM output (between ```json and ```)
@@ -497,6 +539,18 @@ parse_verdict() {
   local summary_file="$1"
   local comments_file="$2"
   local verdict=""
+
+  # Method 0a (claim-verify regime): the **Total** row is reconciled from the
+  # SURVIVING verified bullets by _reconcile_summary_verdict, so it is the source
+  # of truth — it must win over the model's self-assigned .verdict (which still
+  # reflects findings that claim-verify dropped as hallucinations).
+  if [ "${DIFFHOUND_CLAIM_VERIFY:-1}" = "1" ]; then
+    verdict=$(grep -i '\*\*Total\*\*' "$summary_file" | grep -oiE 'REQUEST_CHANGES|APPROVE|COMMENT' | head -1 || true)
+    if [ -n "$verdict" ]; then
+      echo "$verdict" | tr '[:lower:]' '[:upper:]'
+      return
+    fi
+  fi
 
   # Method 0: Check for parsed JSON
   local json_file="${comments_file%.comments}.json"

@@ -104,3 +104,38 @@ hasnt "S3: marked.parse dep-API blocker dropped (unverifiable -> not a blocker)"
 has   "S3: unrelated real bullet kept" "$OUT3" "Other.ts:9"
 echo ""; echo "FINAL2 PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ] || { printf 'FAILED: %s\n' "${FAILED[@]}"; exit 1; }
+
+# --- Scenario 4: dropping the sole FP blocker reconciles verdict to APPROVE ---
+mkdir -p "$TMP/repo4/svc"
+printf 'export const SEARCH_ORGS = gql`query{}`;\n' > "$TMP/repo4/svc/queries.js"
+cat > "$TMP/structured4.json" <<'JSON'
+```json
+{"summary":"x","findings":[],"thread_statuses":[
+  {"file":"svc/PolicyQaPane.vue","line":57,"status":"STILL_OPEN",
+   "claims":[{"type":"file_contains","subject":"SEARCH_ORGS","location":"svc/queries.js","expected":false}]}
+]}
+```
+JSON
+cat > "$TMP/summary4.md" <<'MD'
+re-review. one blocker still open.
+
+### Blockers (must fix before merge)
+- `PolicyQaPane.vue:57` — `SEARCH_ORGS` imported but never defined anywhere
+
+## Scorecard
+| Category | Score | Notes |
+|----------|-------|-------|
+| Compatibility (15%) | 5/15 | SEARCH_ORGS undefined |
+| **Total** | **52/100** | **REQUEST_CHANGES** — one blocker needs fixing |
+MD
+_claim_verify_summary "$TMP/summary4.md" "$TMP/repo4" "$TMP/structured4.json"
+OUT4=$(cat "$TMP/summary4.md")
+hasnt "S4: FP blocker bullet dropped" "$OUT4" "imported but never defined"
+has   "S4: verdict reconciled to APPROVE in Total row" "$OUT4" "**APPROVE**"
+hasnt "S4: stale REQUEST_CHANGES gone from Total" "$OUT4" "REQUEST_CHANGES"
+# parse_verdict must now return APPROVE (Total row is source of truth)
+echo '{"verdict":"REQUEST_CHANGES"}' > "$TMP/sv4.json"
+PV=$(parse_verdict "$TMP/summary4.md" "$TMP/sv4.comments" 2>/dev/null)
+[ "$PV" = "APPROVE" ] && { echo "ok   S4: parse_verdict honors reconciled APPROVE"; PASS=$((PASS+1)); } || { echo "FAIL S4: parse_verdict=$PV (want APPROVE)"; FAIL=$((FAIL+1)); FAILED+=("S4 parse_verdict"); }
+echo ""; echo "FINAL3 PASS=$PASS FAIL=$FAIL"
+[ "$FAIL" -eq 0 ] || { printf 'FAILED: %s\n' "${FAILED[@]}"; exit 1; }
