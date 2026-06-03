@@ -126,7 +126,7 @@ re-review. one blocker still open.
 | Category | Score | Notes |
 |----------|-------|-------|
 | Compatibility (15%) | 5/15 | SEARCH_ORGS undefined |
-| **Total** | **52/100** | **REQUEST_CHANGES** — one blocker needs fixing |
+| **Total** | **92/100** | **REQUEST_CHANGES** — one blocker needs fixing |
 MD
 _claim_verify_summary "$TMP/summary4.md" "$TMP/repo4" "$TMP/structured4.json"
 OUT4=$(cat "$TMP/summary4.md")
@@ -163,7 +163,7 @@ re-review.
 ## Scorecard
 | Category | Score | Notes |
 |----------|-------|-------|
-| **Total** | **52/100** | **REQUEST_CHANGES** — one blocker |
+| **Total** | **92/100** | **REQUEST_CHANGES** — one blocker |
 MD
 _claim_verify_summary "$TMP/summary5.md" "$TMP/repo5" "$TMP/structured5.json"
 OUT5=$(cat "$TMP/summary5.md")
@@ -195,12 +195,48 @@ none
 ## Scorecard
 | Category | Score | Notes |
 |----------|-------|-------|
-| **Total** | **66/100** | **REQUEST_CHANGES** — blocking issue(s) must be fixed before merge |
+| **Total** | **88/100** | **REQUEST_CHANGES** — blocking issue(s) must be fixed before merge |
 MD
 _claim_verify_summary "$TMP/summary6.md" "$TMP/repo6" ""
 OUT6=$(cat "$TMP/summary6.md")
-has   "S6: nits+open-q present but verdict reconciled to APPROVE" "$OUT6" "**APPROVE**"
+# 88/100, no surviving blockers/should-fix -> APPROVE. If the awk-interval bug
+# miscounted the Nits/Open-Q bullets as blockers, it would force REQUEST_CHANGES.
+has   "S6: high score + nits/open-q only -> APPROVE (interval bug fixed)" "$OUT6" "**APPROVE**"
 hasnt "S6: stale REQUEST_CHANGES gone" "$OUT6" "REQUEST_CHANGES"
 has   "S6: nit bullets preserved" "$OUT6" "dead code, delete when convenient"
+
+# --- Scenario 7: blocker dropped as FP but SCORE is low -> coherent
+#     REQUEST_CHANGES, NEVER "low-score APPROVE" (Shubham's 58/100-APPROVE bug). ---
+mkdir -p "$TMP/repo7/svc"
+printf 'export const SEARCH_ORGS = gql`q`;\n' > "$TMP/repo7/svc/queries.js"
+cat > "$TMP/structured7.json" <<'JSON'
+```json
+{"summary":"x","findings":[],"thread_statuses":[
+  {"file":"svc/PolicyQaPane.vue","line":57,"status":"STILL_OPEN",
+   "claims":[{"type":"file_contains","subject":"SEARCH_ORGS","location":"svc/queries.js","expected":false}]}
+]}
+```
+JSON
+cat > "$TMP/summary7.md" <<'MD'
+re-review.
+
+### Blockers (must fix before merge)
+- `PolicyQaPane.vue:57` — `SEARCH_ORGS` imported but never defined anywhere
+
+### Nits
+- `Foo.vue:9` — dead code
+
+## Scorecard
+| Category | Score | Notes |
+|----------|-------|-------|
+| Tests (20%) | 2/20 | zero tests for ~2000 lines |
+| **Total** | **58/100** | **REQUEST_CHANGES** — one blocker |
+MD
+_claim_verify_summary "$TMP/summary7.md" "$TMP/repo7" "$TMP/structured7.json"
+OUT7=$(cat "$TMP/summary7.md")
+hasnt "S7: FP blocker dropped" "$OUT7" "imported but never defined"
+hasnt "S7: NEVER low-score APPROVE (the 58/100-APPROVE bug)" "$OUT7" "**APPROVE**"
+has   "S7: coherent REQUEST_CHANGES at low score" "$OUT7" "**REQUEST_CHANGES**"
+has   "S7: reason cites the score gap, not a phantom blocker" "$OUT7" "below the approval bar"
 echo ""; echo "FINAL5 PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ] || { printf 'FAILED: %s\n' "${FAILED[@]}"; exit 1; }

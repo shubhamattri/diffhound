@@ -109,17 +109,28 @@ for k in ("findings","thread_statuses"):
   _reconcile_summary_verdict "$summary_file"
 }
 
-# Recompute the **Total** row verdict from the blocker/should-fix bullets that
-# SURVIVED claim-verify, and rewrite it (verdict token + reason) if it disagrees.
-# Score number is left as the model's (precise re-scoring needs the dropped
-# finding's category weight — a documented follow-up); the verdict is the signal
-# that matters and IS deterministically derivable from surviving bullets.
+# Make the **Total** row's VERDICT cohere with BOTH the surviving findings AND the
+# score, so "58/100 APPROVE" can never happen. Rules (one rubric, no second source
+# of truth):
+#   - any surviving BLOCKER bullet            -> REQUEST_CHANGES  (hard gate)
+#   - else derive from the score band:
+#       score >= 85 -> APPROVE   (a high score == approvable; matches Shubham's
+#                                 "approve should be ~86+")
+#       score >= 70 -> COMMENT
+#       score <  70 -> REQUEST_CHANGES
+#   - a surviving SHOULD-FIX can't be APPROVE -> cap at COMMENT
+# The score NUMBER stays the model's weighted category total (per Shubham: keep the
+# structured table). Dropping an FP blocker only docks ~a few points of one
+# category, which doesn't move the band — the dominant driver (e.g. Tests 2/20 on
+# an untested PR) is legit, so a low-score REQUEST_CHANGES is the CORRECT, coherent
+# call, not a hallucination. (Surgical per-category point restoration + note/checklist
+# FP-clause scrubbing is the remaining cosmetic follow-up.)
 _reconcile_summary_verdict() {
   local sf="$1"
   [ -f "$sf" ] || return 0
   [ "${DIFFHOUND_CLAIM_VERIFY:-1}" = "1" ] || return 0
   grep -qiE '\*\*Total\*\*' "$sf" || return 0
-  local nb ns v cur
+  local nb ns total v cur
   # NOTE: section terminator is `/^#+ /` (any markdown heading), NOT `/^#{2,3} /`.
   # awk interval expressions `{2,3}` are NON-PORTABLE — the VM's awk treats them
   # LITERALLY, so the terminator never matched, `f` stayed on past the section, and
@@ -127,19 +138,37 @@ _reconcile_summary_verdict() {
   # REQUEST_CHANGES). `+` is standard ERE everywhere. (CLAUDE.md hard rule #5.)
   nb=$(awk '/^### Blockers/{f=1;next} /^#+ /{f=0} f&&/^- /{c++} END{print c+0}' "$sf")
   ns=$(awk '/^### Should-Fix/{f=1;next} /^#+ /{f=0} f&&/^- /{c++} END{print c+0}' "$sf")
-  if [ "${nb:-0}" -gt 0 ]; then v=REQUEST_CHANGES
-  elif [ "${ns:-0}" -gt 0 ]; then v=COMMENT
-  else v=APPROVE; fi
+  total=$(grep -iE '\*\*Total\*\*' "$sf" | grep -oE '[0-9]+/100' | grep -oE '^[0-9]+' | head -1)
+  if [ "${nb:-0}" -gt 0 ]; then
+    v=REQUEST_CHANGES
+  elif [ -n "$total" ]; then
+    if   [ "$total" -ge 85 ]; then v=APPROVE
+    elif [ "$total" -ge 70 ]; then v=COMMENT
+    else v=REQUEST_CHANGES; fi
+    [ "${ns:-0}" -gt 0 ] && [ "$v" = "APPROVE" ] && v=COMMENT   # should-fix can't APPROVE
+  elif [ "${ns:-0}" -gt 0 ]; then
+    v=COMMENT
+  else
+    v=APPROVE
+  fi
   cur=$(grep -iE '\*\*Total\*\*' "$sf" | grep -oiE 'REQUEST_CHANGES|APPROVE|COMMENT' | head -1)
-  [ -n "$cur" ] && [ "$cur" = "$v" ] && return 0
+  # Skip the rewrite only if the verdict already matches AND is coherent. The
+  # incoherent case to still fix: verdict==REQUEST_CHANGES but NO blocker survives
+  # (it's score-driven), where the model's reason still cites a now-dropped
+  # "blocker" — rewrite so the reason matches reality (Shubham's "REQUEST_CHANGES —
+  # one blocker" with an empty Blockers section).
+  if [ -n "$cur" ] && [ "$cur" = "$v" ]; then
+    { [ "$v" != "REQUEST_CHANGES" ] || [ "${nb:-0}" -gt 0 ]; } && return 0
+  fi
   local tmp; tmp=$(mktemp -t "diffhound-rv.XXXXXX")
-  awk -v V="$v" '
+  awk -v V="$v" -v NB="${nb:-0}" -v T="${total:-}" '
     /\*\*Total\*\*/ {
       n=split($0, a, "|")
       if (n >= 4) {
-        reason = (V=="APPROVE") ? "no blocking issues after claim-verification" : \
-                 (V=="COMMENT") ? "should-fix items remain; merge ok with follow-ups" : \
-                 "blocking issue(s) must be fixed before merge"
+        if (V=="APPROVE")      reason = "no blocking issues; quality bar met"
+        else if (V=="COMMENT") reason = "merge ok; should-fix / quality items remain"
+        else if (NB+0 > 0)     reason = "blocking issue(s) must be fixed before merge"
+        else                   reason = "score " T "/100 below the approval bar — address quality gaps (e.g. test coverage)"
         a[4] = " **" V "** \xe2\x80\x94 " reason " "
         out=a[1]; for(i=2;i<=n;i++) out=out "|" a[i]
         print out; next
@@ -147,7 +176,7 @@ _reconcile_summary_verdict() {
     }
     { print }
   ' "$sf" > "$tmp" && mv "$tmp" "$sf" || { rm -f "$tmp"; return 0; }
-  printf '[claim-verify-summary: verdict reconciled %s -> %s (%s blockers, %s should-fix survive)]\n' "${cur:-?}" "$v" "${nb:-0}" "${ns:-0}" >&2
+  printf '[claim-verify-summary: verdict reconciled %s -> %s (total=%s/100, %s blockers, %s should-fix survive)]\n' "${cur:-?}" "$v" "${total:-?}" "${nb:-0}" "${ns:-0}" >&2
 }
 
 # Extract JSON block from LLM output (between ```json and ```)
