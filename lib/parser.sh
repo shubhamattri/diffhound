@@ -283,6 +283,25 @@ _reverify_absence_claims() {
           printf -- '- `%s` IS defined at %s — any claim it does not exist is a FALSE POSITIVE; mark that thread RESOLVED and do not emit it as a blocker/comment.\n' "$sym" "$loc"
         fi
       done
+
+  # v0.7.16: the INVERSE — a re-review concern asserting a named element IS a
+  # vulnerable/unscoped resolver/endpoint when that element does NOT exist (the
+  # "invented companion resolver" hallucination; monorepo #7268 `usersCount`).
+  # The vuln-symbol-exists-check validator catches this on fresh findings, but
+  # re-review thread re-assertions bypass the validator pipeline — so re-verify
+  # it here too and inject a correction into the re-review voice pass.
+  local vuln_re="is (the |a |an )?(companion )?(resolver|endpoint|query|mutation|handler)|companion (resolver|query|endpoint|to)|unscoped|can (be )?quer|queryable|directly via graphql|is exposed|missing (an |a )?(auth|access|scope|client.?scope)"
+  grep -iE "$vuln_re" "$out" 2>/dev/null \
+    | grep -oiE "\`[A-Za-z_][A-Za-z0-9_]+\`[^.\`]{0,45}(${vuln_re})" \
+    | grep -oE "\`[A-Za-z_][A-Za-z0-9_]+\`" | tr -d '`' | sort -u \
+    | while IFS= read -r vsym; do
+        [ -z "$vsym" ] && continue
+        if ! grep -rqE "(export[[:space:]]+(const|default|function|class)|const|let|var|function|class|def)[[:space:]]+${vsym}([[:space:]]|=|\(|:|<)|[\"']${vsym}[\"'][[:space:]]*:|^[[:space:]]*${vsym}[[:space:]]*[:(]" "$repo" \
+              --include='*.ts' --include='*.tsx' --include='*.js' --include='*.jsx' --include='*.vue' --include='*.py' --include='*.graphql' \
+              --exclude-dir=node_modules 2>/dev/null; then
+          printf -- '- `%s` is NOT defined anywhere in the repo — there is no such resolver/endpoint/function. Any claim that `%s` is unscoped/vulnerable/exposed is a FALSE POSITIVE (invented by analogy); mark that thread RESOLVED and do not emit it as a blocker/comment.\n' "$vsym" "$vsym"
+        fi
+      done
 }
 
 # Normalize the markdown scorecard to canonical, weight-enforced scoring.

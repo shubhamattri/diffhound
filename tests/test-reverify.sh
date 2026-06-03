@@ -57,6 +57,26 @@ echo "SEARCH_ORGS query looks well-formed and is used correctly." > "$out4"
 r4=$(_reverify_absence_claims "$out4" "$TMP/repo")
 chk_empty "4: no absence claim → no correction" "$r4"
 
+# Case 5: vuln claim on a NON-EXISTENT resolver -> correction (phantom resolver)
+out5="$TMP/out5.txt"
+cat > "$out5" <<'TXT'
+THREAD_STATUS: queries.ts:546
+STATUS: STILL_OPEN
+`usersCount` is the companion resolver to `users` and it's unscoped — a restricted org admin can query cross-client count directly via GraphQL.
+TXT
+r5=$(_reverify_absence_claims "$out5" "$TMP/repo")
+chk "5: phantom usersCount flagged as not-defined FP" "$r5" '`usersCount` is NOT defined anywhere'
+
+# Case 6: vuln claim on a REAL symbol -> NO correction (it exists)
+out6="$TMP/out6.txt"
+echo "the \`SEARCH_ORGS\` query is unscoped and can query cross-client data." > "$out6"
+r6=$(_reverify_absence_claims "$out6" "$TMP/repo")
+if printf '%s' "$r6" | grep -qF 'SEARCH_ORGS` is NOT defined'; then
+  FAIL=$((FAIL+1)); FAILED+=("6: must NOT flag real SEARCH_ORGS as phantom"); echo "FAIL 6: flagged real symbol as phantom"
+else
+  PASS=$((PASS+1)); echo "ok   6: real symbol vuln claim not flagged as phantom"
+fi
+
 echo ""
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ] || { printf 'FAILED: %s\n' "${FAILED[@]}"; exit 1; }
