@@ -2629,6 +2629,7 @@ LINE NUMBER RULES (critical — wrong lines cause GitHub to reject the comment):
       "diff_line": "+  const result = await db.raw(`SELECT * FROM claims WHERE id = ${claimId}`);",
       "reachable_path": "claimsHandler.ts:45 is the sole path for /api/claims/:id; claimId comes from req.params and is not validated anywhere upstream",
       "rejected_alternative": "Escape claimId via a custom sanitizer — rejected because Knex parameterized queries already exist in this file (line 22) and are the codebase-standard approach; custom sanitizer adds a new untrusted attack surface",
+      "claims": [{"type": "symbol_defined", "subject": "claimId", "scope": "repo", "expected": true}],
       "unverifiable": false
     }
   ],
@@ -2640,7 +2641,8 @@ LINE NUMBER RULES (critical — wrong lines cause GitHub to reject the comment):
       "original_concern": "...",
       "evidence": "...",
       "author_reply": "...",
-      "reviewer_verdict": "..."
+      "reviewer_verdict": "...",
+      "claims": [{"type": "symbol_defined", "subject": "theSymbolThisConcernIsAbout", "scope": "repo", "expected": true}]
     }
   ],
   "checklist": ["Run staging test for X", "Verify Y in prod"],
@@ -2661,6 +2663,14 @@ FINDING RULES:
 - If uncertain after reading surrounding context: set unverifiable to true and explain in body
 - confidence: 0.0-1.0 (how certain are you this is a real issue, not a false positive)
 - thread_statuses: only include in re-review mode, otherwise empty array
+
+CLAIMS (machine-verified — THIS is how we eliminate hallucinations):
+For every finding, AND every STILL_OPEN / AUTHOR_WRONG thread_status, you MUST populate `claims` with the falsifiable facts the finding depends on. Each claim is checked deterministically against the ACTUAL repo before your finding is posted: if a claim is FALSE the finding is DROPPED, if UNVERIFIABLE it is downgraded to OPEN_QUESTION. So: ground every finding in a checkable claim, or expect it to be dropped. Claim types:
+- symbol_defined: {"type":"symbol_defined","subject":"<identifier>","scope":"repo","expected":true|false}. expected:true = "this symbol/resolver/function EXISTS" (use when your finding assumes a named element exists and is buggy/vulnerable — e.g. `usersCount` is unscoped). expected:false = "this symbol does NOT exist anywhere" (use ONLY when your finding IS that something is missing — e.g. `SEARCH_ORGS` is imported but undefined).
+- dependency_version: {"type":"dependency_version","subject":"<pkg>","expected_satisfies":"<4.0.0"} OR {"type":"dependency_version","subject":"<pkg>","expected":"missing"}. Use for any "package X is version Y / X not in package.json" claim.
+- file_contains: {"type":"file_contains","subject":"<exact string>","location":"<path>","expected":true|false}. Use for "string Z is/isn't in file F" claims (route names, config keys, env vars).
+- call_reachable: {"type":"call_reachable","subject":"<fn>","from":"<entrypoint>","expected":true}. Best-effort.
+HARD RULE: never assert a named resolver/function/endpoint/symbol is vulnerable, unscoped, missing, or wrong-version WITHOUT a claim grounding it. A BLOCKING/SHOULD-FIX whose claim cannot be verified becomes OPEN_QUESTION; whose claim is contradicted by the code is DROPPED. This is non-negotiable — it is the system's defense against confidently-wrong findings.
 
 # SCOPE DISCIPLINE (CRITICAL — violations of these rules waste developer time)
 

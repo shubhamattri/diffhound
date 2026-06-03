@@ -27,8 +27,9 @@
 set -uo pipefail
 : "${DIFFHOUND_REPO:?DIFFHOUND_REPO must be set}"
 
-# Pass-through when disabled — keeps it a safe no-op until we flip the default.
-if [ "${DIFFHOUND_CLAIM_VERIFY:-0}" != "1" ]; then
+# Default ON as of v0.7.18 (strangler flag flipped after the corpus + real-PR
+# safety runs passed). Set DIFFHOUND_CLAIM_VERIFY=0 to force pass-through.
+if [ "${DIFFHOUND_CLAIM_VERIFY:-1}" != "1" ]; then
   cat
   exit 0
 fi
