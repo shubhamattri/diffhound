@@ -75,6 +75,40 @@ _check_call_reachable() { echo UNVERIFIABLE; }  # best-effort placeholder
 # against package.json. Args: $1 subject(pkg) $2 method (both ignored).
 _check_method_exists() { echo UNVERIFIABLE; }
 
+# Data-flow usage: is `subject` actually present within `scope`'s call/region?
+# Falsifies "X is never passed to / used by Y" claims: if X clearly DOES appear in
+# scope's args/region, the absence claim is FALSE -> the finding drops (this is the
+# #7291 clientNames FP: "clientNames dropped before getEffectiveClientIds" when it is
+# in fact passed in). CONSERVATIVE + DIRECTIONAL by design:
+#   - expected=false ("not used"): only return FALSE when we POSITIVELY find subject
+#     near scope; if not found -> UNVERIFIABLE (NEVER confirm an absence — a window/
+#     naming miss must not manufacture a "real" finding).
+#   - scope not locatable -> UNVERIFIABLE (don't judge).
+# SAFETY (learned from the #7291 auth-bypass case, where a REAL missing-guard finding
+# had a drifted citation): this checker is ONLY for plain "value X flows into Y"
+# assertions. It must NEVER be used to verify "a security guard is missing" — those
+# can be real with a wrong line cite and must never be auto-suppressed.
+# Args: $1 subject  $2 scope(function/call token)  $3 expected(true|false)
+_check_usage() {
+  local subject="$1" scope="$2" expected="${3:-false}" repo="${DIFFHOUND_REPO:?}"
+  { [ -z "$subject" ] || [ -z "$scope" ]; } && { echo UNVERIFIABLE; return; }
+  local hits present=no file ln s e
+  hits=$(grep -rnF -- "$scope" "$repo" \
+      --include='*.ts' --include='*.tsx' --include='*.js' --include='*.jsx' --include='*.vue' \
+      --exclude-dir=node_modules 2>/dev/null | head -40)
+  [ -z "$hits" ] && { echo UNVERIFIABLE; return; }
+  while IFS=: read -r file ln _; do
+    { [ -z "$file" ] || [ -z "$ln" ]; } && continue
+    s=$((ln>3?ln-3:1)); e=$((ln+8))
+    if sed -n "${s},${e}p" "$file" 2>/dev/null | grep -qF -- "$subject"; then present=yes; break; fi
+  done <<< "$hits"
+  if [ "$expected" = "false" ]; then
+    [ "$present" = "yes" ] && echo FALSE || echo UNVERIFIABLE
+  else
+    [ "$present" = "yes" ] && echo TRUE || echo UNVERIFIABLE
+  fi
+}
+
 # Dispatch "type:subject:scopeOrLoc:expected" -> verdict.
 _verify_claim() {
   local c="$1" type subject loc expected
@@ -87,6 +121,7 @@ _verify_claim() {
     dependency_version) _check_dependency_version "$subject" "${expected:-missing}" ;;
     file_contains)      _check_file_contains "$subject" "$loc" "${expected:-true}" ;;
     method_exists)      _check_method_exists "$subject" "$loc" ;;
+    usage)              _check_usage "$subject" "$loc" "${expected:-false}" ;;
     call_reachable)     _check_call_reachable ;;
     *)                  echo UNVERIFIABLE ;;
   esac

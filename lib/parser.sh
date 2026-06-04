@@ -39,6 +39,7 @@ _claim_verify_summary() {
         symbol_defined)     c="symbol_defined:${subj}:repo:${exp:-true}" ;;
         dependency_version) c="dependency_version:${subj}::${exp:-missing}" ;;
         method_exists)      c="method_exists:${subj}:${loc}:" ;;
+        usage)              c="usage:${subj}:${loc}:${exp:-false}" ;;
         *) continue ;;
       esac
       v=$(_verify_claim "$c")
@@ -63,7 +64,7 @@ def emit(it):
     ln=str(it.get("line",""))
     for cl in (it.get("claims") or []):
         t=cl.get("type",""); subj=cl.get("subject","")
-        loc=cl.get("location","") or cl.get("method","") or ""
+        loc=cl.get("location","") or cl.get("method","") or cl.get("scope","") or ""
         exp=cl.get("expected", cl.get("expected_satisfies",""))
         if isinstance(exp,bool): exp="true" if exp else "false"
         print("\t".join([bn,ln,t,str(subj),str(loc),str(exp)]))

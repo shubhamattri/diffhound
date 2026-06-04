@@ -240,3 +240,41 @@ has   "S7: coherent REQUEST_CHANGES at low score" "$OUT7" "**REQUEST_CHANGES**"
 has   "S7: reason cites the score gap, not a phantom blocker" "$OUT7" "below the approval bar"
 echo ""; echo "FINAL5 PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ] || { printf 'FAILED: %s\n' "${FAILED[@]}"; exit 1; }
+
+# --- Scenario 8: `usage` claim — data-flow FP (the #7291 clientNames class) +
+#     the conservative safety direction (absent -> UNVERIFIABLE -> NOT dropped). ---
+mkdir -p "$TMP/repo8/svc"
+cat > "$TMP/repo8/svc/queries.js" <<'JS'
+const clientIds = await getEffectiveClientIds(ctx.user, args.filter?.clientId, {
+  orgId: args.filter?.orgId,
+  clientNames: args.filter?.clientNames,
+});
+JS
+cat > "$TMP/structured8.json" <<'JSON'
+```json
+{"summary":"x","findings":[],"thread_statuses":[
+  {"file":"svc/queries.js","line":1,"status":"STILL_OPEN",
+   "claims":[{"type":"usage","subject":"clientNames","scope":"getEffectiveClientIds","expected":false}]},
+  {"file":"svc/queries.js","line":2,"status":"STILL_OPEN",
+   "claims":[{"type":"usage","subject":"unicornFlag","scope":"getEffectiveClientIds","expected":false}]}
+]}
+```
+JSON
+cat > "$TMP/summary8.md" <<'MD'
+re-review.
+
+### Blockers (must fix before merge)
+- `queries.js:1` — `clientNames` is never passed to `getEffectiveClientIds`, so claims client-name filtering silently does nothing
+- `queries.js:2` — `unicornFlag` is never passed to `getEffectiveClientIds`, real gap
+
+## Scorecard
+| Category | Score | Notes |
+|----------|-------|-------|
+| **Total** | **80/100** | **REQUEST_CHANGES** — two blockers |
+MD
+_claim_verify_summary "$TMP/summary8.md" "$TMP/repo8" "$TMP/structured8.json"
+OUT8=$(cat "$TMP/summary8.md")
+hasnt "S8: clientNames data-flow FP dropped (it IS passed)" "$OUT8" "claims client-name filtering silently does nothing"
+has   "S8: SAFETY — genuinely-absent usage claim NOT dropped (unverifiable, kept)" "$OUT8" "unicornFlag"
+echo ""; echo "FINAL6 PASS=$PASS FAIL=$FAIL"
+[ "$FAIL" -eq 0 ] || { printf 'FAILED: %s\n' "${FAILED[@]}"; exit 1; }
