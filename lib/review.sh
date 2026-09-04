@@ -27,69 +27,86 @@ source "${LIB_DIR}/rag.sh" 2>/dev/null || true  # for _filter_rag_for_files, _tr
 source "${LIB_DIR}/jira.sh" 2>/dev/null || true  # for _extract_jira_ticket, _fetch_jira_ticket
 source "${LIB_DIR}/lint.sh" 2>/dev/null || true  # for _run_static_analysis
 
-# ── API Helper: direct Anthropic API calls ───────────────────────────────────
-# Usage: printf '%s' "$prompt" | _call_api MODEL [MAX_TOKENS] [TIMEOUT_SECS]
-#        _call_api MODEL [MAX_TOKENS] [TIMEOUT_SECS] < prompt_file
-_call_api() {
+# ── Model backend: Claude Code CLI on the Max subscription ───────────────────
+# v0.7.29 (BX-3010): ANTHROPIC_API_KEY was withdrawn for cost cutting, so every
+# model call now goes through `claude -p` instead of curl to api.anthropic.com.
+#
+# Three of the CLI flags are load-bearing, not cosmetic:
+#   --setting-sources ''   the CLI otherwise reads the CLAUDE.md of its cwd, and
+#                          our cwd is the checked-out PR. Without this a PR author
+#                          edits CLAUDE.md on their own branch and steers their
+#                          own review. Proven, not theoretical.
+#   --strict-mcp-config    with an empty --mcp-config, drops MCP tool definitions
+#                          that otherwise cost ~30k input tokens on every call.
+#   --allowedTools ''      every diffhound pass is single-shot with context
+#                          pre-inlined, so tools are pure overhead.
+#
+# Two behaviours differ from the raw API and both fail silently if ignored:
+#   1. Exceeding max output tokens is an ERROR here, not a truncation. The API
+#      returned a clipped-but-parseable body; the CLI returns is_error with no
+#      content. Hence _CLI_MIN_TOKENS.
+#   2. The default Claude Code system prompt makes the model conversational, so
+#      a bare user message gets "I need more context" instead of the demanded
+#      JSON. Callers with no system prompt of their own get _NEUTRAL_SYSTEM.
+_CLI_MIN_TOKENS=1024
+
+# System prompts go in as an inline --system-prompt argument, never a file.
+# --system-prompt-file exists on current builds but `claude --help` renders it
+# as "--system-prompt[-file]", so any grep-the-help probe reports it missing and
+# silently picks inline anyway. Inline is supported on every build we run, and
+# the largest system prompt here is ~7 KB against an ARG_MAX of 1-2 MB, so the
+# file form buys nothing. Do not reintroduce a capability probe for this.
+
+_NEUTRAL_SYSTEM_FILE=""
+_neutral_system_file() {
+  if [ -z "$_NEUTRAL_SYSTEM_FILE" ] || [ ! -f "$_NEUTRAL_SYSTEM_FILE" ]; then
+    _NEUTRAL_SYSTEM_FILE=$(mktemp -t "dh-neutral-sys.XXXXXX")
+    printf '%s\n' \
+      "You are a non-interactive code-review engine inside a shell pipeline." \
+      "Follow the output format demanded by the user message exactly." \
+      "Never ask a clarifying question. Never add preamble, commentary or sign-off." \
+      "If the input is insufficient, emit the demanded format with empty contents." \
+      > "$_NEUTRAL_SYSTEM_FILE"
+  fi
+  printf '%s' "$_NEUTRAL_SYSTEM_FILE"
+}
+
+# _claude_cli MODEL MAX_TOKENS TIMEOUT [SYSTEM_FILE] < prompt
+_claude_cli() {
   local model="$1"
   local max_tokens="${2:-4096}"
   local timeout_secs="${3:-120}"
+  local system_file="${4:-}"
 
-  local _api_pf _api_jf
-  _api_pf=$(mktemp -t "api-prompt.XXXXXX")
-  _api_jf=$(mktemp -t "api-json.XXXXXX")
-  cat > "$_api_pf"
+  [ "$max_tokens" -lt "$_CLI_MIN_TOKENS" ] 2>/dev/null && max_tokens="$_CLI_MIN_TOKENS"
+  [ -n "$system_file" ] && [ -f "$system_file" ] || system_file=$(_neutral_system_file)
 
-  jq -n --arg model "$model" \
-        --argjson max_tokens "$max_tokens" \
-        --rawfile user "$_api_pf" \
-    '{model: $model, max_tokens: $max_tokens,
-      messages: [{role: "user", content: $user}]}' > "$_api_jf"
-  rm -f "$_api_pf"
+  local _sys_args=( --system-prompt "$(cat "$system_file")" )
 
-  local _api_r
-  _api_r=$($_TIMEOUT_CMD "$timeout_secs" curl -sf https://api.anthropic.com/v1/messages \
-    -H "x-api-key: ${ANTHROPIC_API_KEY}" \
-    -H "anthropic-version: 2023-06-01" \
-    -H "anthropic-beta: prompt-caching-2024-07-31" \
-    -H "content-type: application/json" \
-    -d @"$_api_jf" 2>/dev/null || echo "")
-  rm -f "$_api_jf"
+  local _raw
+  _raw=$(env -u ANTHROPIC_API_KEY -u CLAUDECODE \
+         CLAUDE_CODE_MAX_OUTPUT_TOKENS="$max_tokens" \
+         $_TIMEOUT_CMD "$timeout_secs" claude \
+           -p --output-format json \
+           --model "$model" \
+           "${_sys_args[@]}" \
+           --allowedTools '' \
+           --strict-mcp-config --mcp-config '{"mcpServers":{}}' \
+           --setting-sources '' 2>/dev/null || echo "")
 
-  printf '%s' "$_api_r" | jq -r '.content[0].text // empty' 2>/dev/null || true
+  printf '%s' "$_raw" \
+    | jq -r 'if (.is_error // false) then empty else (.result // empty) end' 2>/dev/null || true
+}
+
+# Usage: printf '%s' "$prompt" | _call_api MODEL [MAX_TOKENS] [TIMEOUT_SECS]
+#        _call_api MODEL [MAX_TOKENS] [TIMEOUT_SECS] < prompt_file
+_call_api() {
+  _claude_cli "$1" "${2:-4096}" "${3:-120}"
 }
 
 # _call_api_system MODEL MAX_TOKENS TIMEOUT SYSTEM_FILE < user_prompt
 _call_api_system() {
-  local model="$1"
-  local max_tokens="${2:-4096}"
-  local timeout_secs="${3:-120}"
-  local system_file="$4"
-
-  local _api_pf _api_jf
-  _api_pf=$(mktemp -t "api-prompt.XXXXXX")
-  _api_jf=$(mktemp -t "api-json.XXXXXX")
-  cat > "$_api_pf"
-
-  jq -n --arg model "$model" \
-        --argjson max_tokens "$max_tokens" \
-        --rawfile system "$system_file" \
-        --rawfile user "$_api_pf" \
-    '{model: $model, max_tokens: $max_tokens,
-      system: [{type: "text", text: $system, cache_control: {type: "ephemeral"}}],
-      messages: [{role: "user", content: $user}]}' > "$_api_jf"
-  rm -f "$_api_pf"
-
-  local _api_r
-  _api_r=$($_TIMEOUT_CMD "$timeout_secs" curl -sf https://api.anthropic.com/v1/messages \
-    -H "x-api-key: ${ANTHROPIC_API_KEY}" \
-    -H "anthropic-version: 2023-06-01" \
-    -H "anthropic-beta: prompt-caching-2024-07-31" \
-    -H "content-type: application/json" \
-    -d @"$_api_jf" 2>/dev/null || echo "")
-  rm -f "$_api_jf"
-
-  printf '%s' "$_api_r" | jq -r '.content[0].text // empty' 2>/dev/null || true
+  _claude_cli "$1" "${2:-4096}" "${3:-120}" "$4"
 }
 
 # ── Verify dependencies ─────────────────────────────────────
@@ -112,14 +129,20 @@ _health_check() {
     echo "Error: Less than 100MB free in /tmp" >&2
     errors=$((errors + 1))
   fi
-  # v0.7.6 (BX-3010): warn LOUDLY if ANTHROPIC_API_KEY is missing. Without
-  # it, the verifier stage (Haiku LLM-as-judge), voice rewrite, and Voice
-  # RAG all silently no-op — half the safety net is invisible. Verifier
+  # v0.7.6 (BX-3010): warn LOUDLY if there is no model backend. Without one,
+  # the verifier stage (Haiku LLM-as-judge), voice rewrite, and Voice RAG all
+  # silently no-op — half the safety net is invisible. Verifier
   # offline-passthrough is intentional for fixture tests; this warning makes
   # sure a misconfigured prod run can't go unnoticed.
-  if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-    echo "  ⚠️  ANTHROPIC_API_KEY is not set — verifier, voice rewrite, RAG will all silently degrade" >&2
-    echo "  ⚠️  Set it in ~/.profile if running in production. (See lib/validators/verifier.sh for the offline fallback path.)" >&2
+  # v0.7.29: the backend is the claude CLI, so an authenticated CLI is what
+  # matters. A present-but-unauthenticated binary is the failure mode to catch,
+  # hence a real call rather than `command -v`.
+  if ! printf 'ok' | env -u ANTHROPIC_API_KEY -u CLAUDECODE $_TIMEOUT_CMD 60 claude \
+       -p --model claude-haiku-4-5-20251001 --allowedTools '' \
+       --strict-mcp-config --mcp-config '{"mcpServers":{}}' \
+       --setting-sources '' >/dev/null 2>&1; then
+    echo "  ⚠️  claude CLI is not usable — verifier, voice rewrite, RAG will all silently degrade" >&2
+    echo "  ⚠️  On a headless runner: run 'claude setup-token' on a desktop, then export CLAUDE_CODE_OAUTH_TOKEN in ~/.profile." >&2
   fi
   return $errors
 }
@@ -202,12 +225,15 @@ fi
 # without verifier, voice rewrite, or RAG — degraded findings posted to
 # real PRs. Set DIFFHOUND_ALLOW_DEGRADED_AUTO_POST=1 to bypass (e.g.,
 # emergency dry-runs that intentionally want raw Claude output).
-if [ "$AUTO_POST" = true ] && [ -z "${ANTHROPIC_API_KEY:-}" ] \
+if [ "$AUTO_POST" = true ] \
+   && { ! command -v claude >/dev/null 2>&1 || [ "${DIFFHOUND_OFFLINE:-0}" = "1" ]; } \
    && [ "${DIFFHOUND_ALLOW_DEGRADED_AUTO_POST:-0}" != "1" ]; then
-  echo "FATAL: --auto-post requires ANTHROPIC_API_KEY. Without it the verifier" >&2
+  echo "FATAL: --auto-post requires a working claude CLI. Without it the verifier" >&2
   echo "       stage, voice rewrite, and Voice RAG all silently no-op, meaning" >&2
   echo "       degraded findings would be posted to a real PR." >&2
-  echo "       Set ANTHROPIC_API_KEY in ~/.profile, or pass" >&2
+  echo "       Install the Claude Code CLI and authenticate it (on a headless" >&2
+  echo "       runner: run 'claude setup-token' on a desktop and export" >&2
+  echo "       CLAUDE_CODE_OAUTH_TOKEN in ~/.profile), or pass" >&2
   echo "       DIFFHOUND_ALLOW_DEGRADED_AUTO_POST=1 if you know what you're doing." >&2
   exit 2
 fi
@@ -814,32 +840,10 @@ RESPOND_RULES_END
     prompt=$(cat "$_prompt_file")
     rm -f "$_prompt_file"
 
-    # Call Claude Haiku via API (fast + cheap)
+    # Call Claude Haiku (fast + cheap). v0.7.29: the duplicate hand-rolled curl
+    # that used to front this call is gone; _call_api is the only backend now.
     local ai_reply=""
-    if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-      local _resp_json
-      _resp_json=$(mktemp -t "respond-${pr}.XXXXXX")
-      jq -n --arg prompt "$prompt" '{
-        model: "claude-haiku-4-5-20251001",
-        max_tokens: 256,
-        messages: [{role: "user", content: $prompt}]
-      }' > "$_resp_json"
-
-      local _api_out
-      _api_out=$(curl -sf https://api.anthropic.com/v1/messages \
-        -H "x-api-key: ${ANTHROPIC_API_KEY}" \
-        -H "anthropic-version: 2023-06-01" \
-        -H "content-type: application/json" \
-        -d @"$_resp_json" 2>/dev/null || echo "")
-      rm -f "$_resp_json"
-
-      ai_reply=$(printf '%s' "$_api_out" | jq -r '.content[0].text // empty' 2>/dev/null || true)
-    fi
-
-    # Fallback: direct API (no CLI dependency)
-    if [ -z "$ai_reply" ]; then
-      ai_reply=$(printf '%s' "$prompt" | _call_api "claude-haiku-4-5-20251001" 256 30 || true)
-    fi
+    ai_reply=$(printf '%s' "$prompt" | _call_api "claude-haiku-4-5-20251001" 256 30 || true)
 
     [ -z "$ai_reply" ] && continue
 
@@ -3449,7 +3453,13 @@ PEER_EOF
   # re-login. Uses the working ANTHROPIC_API_KEY — no OAuth fragility. A second
   # Claude shares blind spots with the primary, so it's framed to REFUTE (assume
   # a false positive exists) to extract independent signal. CODEX_* var names are
-  # kept as internal plumbing; user-facing labels say "Claude-4.8".
+  # kept as internal plumbing; user-facing labels name the model actually used.
+  # v0.7.29: downshifted Opus 4.8 -> Sonnet 4.6. The backend moved from the
+  # metered API to the Claude subscription, so this call now spends Shubham's
+  # own quota. The peer's job is refuting over-confident claims, which Sonnet
+  # does adequately, and it is the cheapest slot to give up. The PRIMARY pass
+  # stays on Opus 4.6 deliberately: changing the backend and the primary model
+  # in one release would make any quality regression unattributable.
   _CLAUDE_PEER_PROMPT=$(mktemp -t "pr-${PR_NUMBER}-claudepeer.XXXXXX")
   {
     echo "You are an ADVERSARIAL second reviewer. The PRIMARY review (also Claude) is below."
@@ -3462,7 +3472,7 @@ PEER_EOF
     echo ""
     cat "$PEER_PROMPT_FILE"
   } > "$_CLAUDE_PEER_PROMPT"
-  ( _call_api "claude-opus-4-8" 2048 120 < "$_CLAUDE_PEER_PROMPT" > "$CODEX_OUT" 2>&1; \
+  ( _call_api "claude-sonnet-4-6" 2048 120 < "$_CLAUDE_PEER_PROMPT" > "$CODEX_OUT" 2>&1; \
     [ -s "$CODEX_OUT" ] || echo "CODEX_UNAVAILABLE" > "$CODEX_OUT" ) &
   CODEX_PID=$!
 
@@ -3567,7 +3577,7 @@ PEER_EOF
   _PEER_COUNT=0
   _PEER_NAMES=""
   if [ -n "$CODEX_CONTENT" ] && [ "$CODEX_CONTENT" != "CODEX_UNAVAILABLE" ]; then
-    _PEER_COUNT=$((_PEER_COUNT + 1)); _PEER_NAMES="Claude-4.8"
+    _PEER_COUNT=$((_PEER_COUNT + 1)); _PEER_NAMES="Claude-Sonnet-4.6"
   fi
   if [ -n "$GEMINI_CONTENT" ] && [ "$GEMINI_CONTENT" != "GEMINI_UNAVAILABLE" ]; then
     _PEER_COUNT=$((_PEER_COUNT + 1)); _PEER_NAMES="${_PEER_NAMES:+$_PEER_NAMES + }Gemini"
@@ -3675,25 +3685,9 @@ Evidence: \(.value.evidence // "none")
         fi
       } > "$VERIFY_PROMPT"
 
-      # Call Haiku for verification (cheap + fast)
+      # Cross-verification pass. v0.7.29: single backend, no duplicate curl.
       _verify_resp=""
-      if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-        _vj_tmp=$(mktemp -t "pr-${PR_NUMBER}-vj.XXXXXX")
-        jq -n --rawfile prompt "$VERIFY_PROMPT" '{
-          model: "claude-sonnet-4-6",
-          max_tokens: 2048,
-          messages: [{role: "user", content: $prompt}]
-        }' > "$_vj_tmp"
-
-        _verify_resp=$($_TIMEOUT_CMD 60 curl -sf https://api.anthropic.com/v1/messages           -H "x-api-key: ${ANTHROPIC_API_KEY}"           -H "anthropic-version: 2023-06-01"           -H "content-type: application/json"           -d @"$_vj_tmp" 2>/dev/null || echo "")
-        rm -f "$_vj_tmp"
-        _verify_resp=$(echo "$_verify_resp" | jq -r '.content[0].text // empty' 2>/dev/null || true)
-      fi
-
-      # Fallback: direct API call
-      if [ -z "$_verify_resp" ]; then
-        _verify_resp=$(_call_api "claude-sonnet-4-6" 2048 60 < "$VERIFY_PROMPT" 2>/dev/null || true)
-      fi
+      _verify_resp=$(_call_api "claude-sonnet-4-6" 2048 60 < "$VERIFY_PROMPT" 2>/dev/null || true)
 
       # Parse verification results and filter findings
       if [ -n "$_verify_resp" ]; then
@@ -4489,56 +4483,17 @@ REREVIEW_BLOCK
 
 } > "$_USER_TMP"
 
-# ── Call API with prompt caching (only if API key has credits, else claude CLI) ─
-# Test API key validity with a minimal call before committing to the full request.
-_API_CALLED=false
-_KEY_HAS_CREDITS=false
-if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-  _TEST_RESP=$(curl -sf https://api.anthropic.com/v1/messages \
-    -H "x-api-key: ${ANTHROPIC_API_KEY}" \
-    -H "anthropic-version: 2023-06-01" \
-    -H "content-type: application/json" \
-    -d '{"model":"claude-sonnet-4-6","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}' \
-    2>/dev/null || echo "")
-  if echo "$_TEST_RESP" | grep -q '"type":"message"'; then
-    _KEY_HAS_CREDITS=true
-  fi
-fi
-if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-  _JSON_TMP=$(mktemp -t "pr-${PR_NUMBER}-json.XXXXXX")
-  jq -n \
-    --arg system "$_STATIC_SYSTEM" \
-    --rawfile user "$_USER_TMP" \
-    '{
-      model: "claude-sonnet-4-6",
-      max_tokens: 16384,
-      system: [{type: "text", text: $system, cache_control: {type: "ephemeral"}}],
-      messages: [{role: "user", content: $user}]
-    }' > "$_JSON_TMP"
-
-  _API_RESP=$($_TIMEOUT_CMD 120 curl -sf https://api.anthropic.com/v1/messages \
-    -H "x-api-key: ${ANTHROPIC_API_KEY}" \
-    -H "anthropic-version: 2023-06-01" \
-    -H "anthropic-beta: prompt-caching-2024-07-31" \
-    -H "content-type: application/json" \
-    -d @"$_JSON_TMP" 2>/dev/null || echo "")
-  rm -f "$_JSON_TMP"
-
-  _REVIEW_TEXT=$(echo "$_API_RESP" | jq -r '.content[0].text // empty' 2>/dev/null || echo "")
-  if [ -n "$_REVIEW_TEXT" ]; then
-    echo "$_REVIEW_TEXT" > "$REVIEW_STRUCTURED"
-    _API_CALLED=true
-  fi
-fi
-
-if [ "$_API_CALLED" = false ]; then
-  # Fallback: direct API call with system prompt
-  _SYS_TMP=$(mktemp -t "pr-${PR_NUMBER}-sys.XXXXXX")
-  printf '%s' "$_STATIC_SYSTEM" > "$_SYS_TMP"
-  _call_api_system "claude-sonnet-4-6" 16384 120 "$_SYS_TMP" < "$_USER_TMP" > "$REVIEW_STRUCTURED" 2>&1 || \
-    cp "$CLAUDE_OUT" "$REVIEW_STRUCTURED"
-  rm -f "$_SYS_TMP"
-fi
+# ── Voice / structured-output pass ────────────────────────────────────────────
+# v0.7.29: was a hand-rolled curl with a duplicate _call_api_system fallback,
+# fronted by a "does the key have credits" probe that billed a real request and
+# whose result (_KEY_HAS_CREDITS) was never read by anything. Both are gone.
+_SYS_TMP=$(mktemp -t "pr-${PR_NUMBER}-sys.XXXXXX")
+printf '%s' "$_STATIC_SYSTEM" > "$_SYS_TMP"
+_call_api_system "claude-sonnet-4-6" 16384 120 "$_SYS_TMP" < "$_USER_TMP" > "$REVIEW_STRUCTURED" 2>/dev/null || true
+rm -f "$_SYS_TMP"
+# Empty output here means the voice pass failed outright; fall back to the raw
+# primary-pass findings rather than posting nothing.
+[ -s "$REVIEW_STRUCTURED" ] || cp "$CLAUDE_OUT" "$REVIEW_STRUCTURED"
 
 rm -f "$_USER_TMP"
 

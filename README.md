@@ -102,7 +102,11 @@ export REVIEW_LOGIN="your-github-username"
 |---------|---------|-------------|
 | `REVIEW_REPO_PATH` | _(required)_ | Path to your local git repo |
 | `REVIEW_LOGIN` | _(required)_ | Your GitHub username (for re-review detection) |
-| `ANTHROPIC_API_KEY` | _(optional)_ | If set, used for Haiku style pass. If unset, uses Claude Max subscription |
+| `CLAUDE_CODE_OAUTH_TOKEN` | _(required on headless runners)_ | Auth for the `claude` CLI, which is the only model backend since v0.7.29. Generate with `claude setup-token` on a desktop. Not needed where the CLI is already interactively logged in. |
+| `DIFFHOUND_OFFLINE` | `0` | Set to `1` to force model-calling validators onto their passthrough branch. The test suite sets this. |
+
+`ANTHROPIC_API_KEY` is no longer used. Every model call goes through `claude -p`
+on the Claude subscription; the metered API key was withdrawn in v0.7.29.
 
 ## How it works
 

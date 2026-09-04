@@ -25,13 +25,19 @@
 # Cost: each finding sends ~1500 input + 50 output tokens to Haiku.
 # Roughly $0.0015 per finding. ~$0.01 per review at 8 findings.
 #
-# Dependencies: ANTHROPIC_API_KEY env var, jq, curl, awk.
+# Dependencies: an authenticated `claude` CLI, jq, awk. (v0.7.29: was
+# ANTHROPIC_API_KEY + curl.)
 set -uo pipefail
 : "${DIFFHOUND_REPO:?DIFFHOUND_REPO must be set}"
 
-# Skip the verifier entirely if the API key isn't set — fall back to the
-# regex pipeline output. This keeps unit-test runs (no network) working.
-if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+# Skip the verifier entirely when there is no model backend to call — fall back
+# to the regex pipeline output. This keeps unit-test runs (no network) working.
+# v0.7.29: the gate was `-z ANTHROPIC_API_KEY`; the backend is now the claude
+# CLI, so the key no longer says anything about whether a call can be made. A
+# configured mock always wins, so fixtures exercising the verdict branches still
+# reach the mock even under DIFFHOUND_OFFLINE.
+if [ -z "${DIFFHOUND_VERIFIER_MOCK_FILE:-}" ] \
+   && { [ "${DIFFHOUND_OFFLINE:-0}" = "1" ] || ! command -v claude >/dev/null 2>&1; }; then
   cat
   exit 0
 fi
@@ -64,7 +70,12 @@ fi
 # Verifier model — Haiku is fast and accurate enough for "compare claim
 # to code" decisions. Override via DIFFHOUND_VERIFIER_MODEL for testing.
 MODEL="${DIFFHOUND_VERIFIER_MODEL:-claude-haiku-4-5-20251001}"
-MAX_OUTPUT_TOKENS=120
+# v0.7.29: was 120. Under the claude CLI, exceeding the output cap is a hard
+# error with NO content returned, where the raw API returned a clipped but
+# still-parseable body. An empty response here hits the "infra failure" branch
+# below, which answers TRUE and keeps every finding — so a cap set too low
+# silently switches false-positive filtering off. 1024 is the CLI floor.
+MAX_OUTPUT_TOKENS=1024
 TIMEOUT_SECS=30
 
 # Verify only BLOCKING and SHOULD-FIX. NIT / OPEN_QUESTION findings aren't
@@ -197,31 +208,40 @@ _verify_one() {
     return
   fi
 
-  # Call Haiku
-  local req_file resp
-  req_file=$(mktemp -t "verify-req.XXXXXX")
-  jq -n --arg model "$MODEL" \
-        --argjson max_tokens "$MAX_OUTPUT_TOKENS" \
-        --arg user "$prompt" \
-    '{model: $model, max_tokens: $max_tokens,
-      messages: [{role: "user", content: $user}]}' > "$req_file"
+  # Call Haiku through the claude CLI. The neutral system prompt is required:
+  # the CLI's default agent prompt makes the model conversational, and this
+  # parser is anchored on ^VERDICT: / ^REASON: lines.
+  local sys_file resp
+  sys_file=$(mktemp -t "verify-sys.XXXXXX")
+  printf '%s\n' \
+    "You are a non-interactive verification engine inside a shell pipeline." \
+    "Answer only in the demanded VERDICT/REASON line format." \
+    "Never ask a clarifying question. Never add preamble or commentary." \
+    > "$sys_file"
 
-  resp=$(timeout "$TIMEOUT_SECS" curl -sf https://api.anthropic.com/v1/messages \
-    -H "x-api-key: ${ANTHROPIC_API_KEY}" \
-    -H "anthropic-version: 2023-06-01" \
-    -H "content-type: application/json" \
-    -d @"$req_file" 2>/dev/null || echo "")
-  rm -f "$req_file"
+  # Inline form only; see the note in lib/review.sh on why there is no probe.
+  local sys_args=( --system-prompt "$(cat "$sys_file")" )
+
+  resp=$(printf '%s' "$prompt" | env -u ANTHROPIC_API_KEY -u CLAUDECODE \
+    CLAUDE_CODE_MAX_OUTPUT_TOKENS="$MAX_OUTPUT_TOKENS" \
+    timeout "$TIMEOUT_SECS" claude \
+      -p --output-format json \
+      --model "$MODEL" \
+      "${sys_args[@]}" \
+      --allowedTools '' \
+      --strict-mcp-config --mcp-config '{"mcpServers":{}}' \
+      --setting-sources '' 2>/dev/null || echo "")
+  rm -f "$sys_file"
 
   if [ -z "$resp" ]; then
-    # API error → fall back to TRUE (don't drop on infra failure)
+    # Backend error → fall back to TRUE (don't drop on infra failure)
     echo "TRUE"
     return
   fi
 
   local verdict reason
   local body
-  body=$(printf '%s' "$resp" | jq -r '.content[0].text // empty' 2>/dev/null)
+  body=$(printf '%s' "$resp" | jq -r 'if (.is_error // false) then empty else (.result // empty) end' 2>/dev/null)
   verdict=$(printf '%s' "$body" | grep -E '^VERDICT:' | head -1 | sed 's/^VERDICT:[[:space:]]*//')
   reason=$(printf '%s' "$body" | grep -E '^REASON:' | head -1 | sed 's/^REASON:[[:space:]]*//')
 

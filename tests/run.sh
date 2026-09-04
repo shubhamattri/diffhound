@@ -53,7 +53,11 @@ for vdir in "$FIXTURES"/*/; do
 
     # Optional: prior-findings file for round-diff / dedup-helper legacy path,
     # and prior-keys.txt for dedup-helper v0.5.6+ exact-tuple path.
-    _env_args=(DIFFHOUND_REPO="$repo")
+    # DIFFHOUND_OFFLINE keeps model-calling validators on their passthrough
+    # branch. v0.7.29: unsetting ANTHROPIC_API_KEY no longer achieves this,
+    # because the backend is the claude CLI and that binary is installed on
+    # every dev machine. Without this the suite makes real network calls.
+    _env_args=(DIFFHOUND_REPO="$repo" DIFFHOUND_OFFLINE=1)
     [ -f "$case_dir/prior.txt" ] && _env_args+=(DIFFHOUND_PRIOR_FINDINGS="$case_dir/prior.txt")
     [ -f "$case_dir/prior-keys.txt" ] && _env_args+=(DIFFHOUND_PRIOR_KEYS="$case_dir/prior-keys.txt")
     # Unset ANTHROPIC_API_KEY so verifier-stage fixtures take the offline
