@@ -225,17 +225,36 @@ fi
 # without verifier, voice rewrite, or RAG — degraded findings posted to
 # real PRs. Set DIFFHOUND_ALLOW_DEGRADED_AUTO_POST=1 to bypass (e.g.,
 # emergency dry-runs that intentionally want raw Claude output).
-if [ "$AUTO_POST" = true ] \
-   && { ! command -v claude >/dev/null 2>&1 || [ "${DIFFHOUND_OFFLINE:-0}" = "1" ]; } \
-   && [ "${DIFFHOUND_ALLOW_DEGRADED_AUTO_POST:-0}" != "1" ]; then
-  echo "FATAL: --auto-post requires a working claude CLI. Without it the verifier" >&2
-  echo "       stage, voice rewrite, and Voice RAG all silently no-op, meaning" >&2
-  echo "       degraded findings would be posted to a real PR." >&2
-  echo "       Install the Claude Code CLI and authenticate it (on a headless" >&2
-  echo "       runner: run 'claude setup-token' on a desktop and export" >&2
-  echo "       CLAUDE_CODE_OAUTH_TOKEN in ~/.profile), or pass" >&2
-  echo "       DIFFHOUND_ALLOW_DEGRADED_AUTO_POST=1 if you know what you're doing." >&2
-  exit 2
+# v0.7.30 (BX-3010): this guard must prove the backend ANSWERS, not merely that
+# it is configured. The v0.7.28 version tested `-z ANTHROPIC_API_KEY`, so when
+# the key was revoked on 2026-09-03 the still-present-but-dead value passed the
+# check, every model call returned empty, and diffhound posted content-free
+# APPROVE reviews onto live monorepo PRs (#7627: two reviews with body length 0,
+# one of them an APPROVED on a merge gate). A presence check cannot distinguish
+# "configured" from "working", and the failure is silent and merge-permissive.
+# Costs one cheap Haiku call per auto-post run. Worth it.
+if [ "$AUTO_POST" = true ] && [ "${DIFFHOUND_ALLOW_DEGRADED_AUTO_POST:-0}" != "1" ]; then
+  _backend_ok=false
+  _probe=""
+  if [ "${DIFFHOUND_OFFLINE:-0}" != "1" ] && command -v claude >/dev/null 2>&1; then
+    _probe=$(printf 'Reply with exactly: OK' | env -u ANTHROPIC_API_KEY -u CLAUDECODE \
+      $_TIMEOUT_CMD 90 claude -p --output-format json --model claude-haiku-4-5-20251001 \
+      --allowedTools '' --strict-mcp-config --mcp-config '{"mcpServers":{}}' \
+      --setting-sources '' 2>/dev/null || echo "")
+    printf '%s' "$_probe" | jq -e '(.is_error // false) == false and ((.result // "") | length > 0)' \
+      >/dev/null 2>&1 && _backend_ok=true
+  fi
+  if [ "$_backend_ok" != true ]; then
+    echo "FATAL: --auto-post requires a claude CLI that actually authenticates." >&2
+    echo "       The backend did not answer a test call, so the verifier, voice" >&2
+    echo "       rewrite and RAG would all silently no-op and this run would post" >&2
+    echo "       an empty APPROVE to a real PR. Refusing." >&2
+    printf '%s' "$_probe" | jq -r '.result // empty' 2>/dev/null | head -2 >&2
+    echo "       On a headless runner: run 'claude setup-token' on a desktop and" >&2
+    echo "       export CLAUDE_CODE_OAUTH_TOKEN in ~/.profile." >&2
+    echo "       DIFFHOUND_ALLOW_DEGRADED_AUTO_POST=1 bypasses this deliberately." >&2
+    exit 2
+  fi
 fi
 
 
@@ -5080,6 +5099,26 @@ COMMENTJSON
   ]
 }
 JSONEND
+
+  # v0.7.30 (BX-3010): last line of defence. NEVER post a review whose body is
+  # empty. On 2026-09-04, with a dead API key, every model call returned nothing
+  # and diffhound posted APPROVED reviews with body length 0 onto live monorepo
+  # PRs — a merge gate rubber-stamping changes it had not read. Whatever the
+  # upstream cause (revoked credential, rate limit, timeout, parser change), an
+  # empty body means the pipeline produced no review, and posting nothing as an
+  # approval is the single worst thing this tool can do. Fail the job loudly
+  # instead; a red check is recoverable, a false APPROVE is not.
+  # A genuine clean review still carries a scorecard and runs to a few thousand
+  # chars, so this threshold cannot block real output.
+  _summary_chars=$(tr -d '[:space:]' < "$REVIEW_SUMMARY" 2>/dev/null | wc -c | tr -d ' ')
+  if [ "${_summary_chars:-0}" -lt 200 ]; then
+    spinner_fail "Review body is empty (${_summary_chars} chars) — refusing to post"
+    echo "FATAL: the model pipeline produced no review body, so there is nothing" >&2
+    echo "       to post. Posting an empty APPROVE on a merge gate is never" >&2
+    echo "       correct. Check backend auth and the voice-rewrite stage." >&2
+    echo "       Summary file: $REVIEW_SUMMARY" >&2
+    exit 3
+  fi
 
   # Post review + inline comments (with fallback)
   post_review "$REPO_OWNER" "$REPO_NAME" "$PR_NUMBER" \
