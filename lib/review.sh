@@ -5,6 +5,14 @@ export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
 
 # Source .profile for env vars (ANTHROPIC_API_KEY etc.) — needed for non-interactive SSH
 [ -f "$HOME/.profile" ] && . "$HOME/.profile" 2>/dev/null || true
+
+# v0.7.34 (BX-3010): ~/.profile on the runner also exports CLAUDE_CODE_OAUTH_TOKEN,
+# which is Shubham's PERSONAL Claude subscription. v0.7.29-v0.7.30 ran the entire
+# pipeline on it. Nothing here reads it any more, and this unset makes sure nothing
+# ever can — including a future change that reintroduces a `claude` CLI call, which
+# would otherwise bill him personally and silently. Interactive use of the CLI on
+# that box is unaffected; this only applies to diffhound's own process.
+unset CLAUDE_CODE_OAUTH_TOKEN 2>/dev/null || true
 # Multi-model pipeline: Opus (review) + Sonnet (structured/verify) + Haiku (triage/merge) + → Codex+Gemini (peer review) → Haiku (voice rewrite)
 # https://github.com/shubhamattri/diffhound
 
@@ -3397,10 +3405,35 @@ PEER_COVERAGE=""
 _RUN_PEER_REVIEW=false
 _PEER_MODE="fresh"  # "fresh" = aggressive gap-hunt, "rereview" = incremental-only + softened
 
-if [ "$FAST_MODE" = "true" ]; then
-  echo "  Fast mode — peer review skipped" >&2
+# v0.7.34 (BX-3010): peer review now runs on EVERY review.
+#
+# It used to be skipped for `--fast` and for small-delta re-reviews. Both skips
+# were sized for a world where the peer slot cost Shubham's personal quota. It
+# now costs one scoped Sonnet-5 call plus one Gemini call against diffhound's own
+# funded key, which is cents.
+#
+# The skips were also load-bearing in the wrong direction. Peer coverage is what
+# stops a single model's confident false positive from reaching a human: the
+# v0.7.9 verdict gate caps REQUEST_CHANGES at COMMENT when coverage is 0, and
+# v0.7.11 exists because single-model re-reviews FLIP-FLOP run to run. So the
+# reviews that skipped peer review were exactly the ones most exposed to the
+# failure mode peer review was introduced to fix. Real example, monorepo #7655
+# on 2026-09-15: three BLOCKERs posted to a live PR with zero cross-check,
+# because a shallow re-review skipped the peer pass.
+#
+# Small deltas and fast mode use "rereview" mode, which scopes the peer prompt to
+# the incremental diff, so the cost tracks the size of the change.
+# DIFFHOUND_SKIP_PEER=1 is the deliberate escape hatch.
+if [ "${DIFFHOUND_SKIP_PEER:-0}" = "1" ]; then
+  echo "  DIFFHOUND_SKIP_PEER=1 — peer review skipped (explicit opt-out)" >&2
+elif [ "$FAST_MODE" = "true" ]; then
+  _RUN_PEER_REVIEW=true
+  _PEER_MODE="rereview"
+  echo "  Fast mode — running scoped peer review on incremental diff" >&2
 elif [ "$IS_REREVIEW" = "true" ] && [ "$REREVIEW_DEPTH" = "shallow" ]; then
-  echo "  Re-review (small delta) — peer review skipped" >&2
+  _RUN_PEER_REVIEW=true
+  _PEER_MODE="rereview"
+  echo "  Re-review (small delta) — running scoped peer review on incremental diff" >&2
 elif [ "$IS_REREVIEW" = "true" ] && [ "$REREVIEW_DEPTH" = "full" ]; then
   _RUN_PEER_REVIEW=true
   _PEER_MODE="rereview"
@@ -3533,6 +3566,7 @@ PEER_EOF
   # 14 KB (under the observed cliff with buffer) with a brief note appended
   # so Gemini knows context was clipped and won't hallucinate "I see only
   # part of the diff" as a finding.
+  _PEER_TIMEOUT=240
   _GEMINI_PROMPT_FILE=$(mktemp -t "pr-${PR_NUMBER}-gemini-prompt.XXXXXX")
   if [ "$(wc -c < "$PEER_PROMPT_FILE" 2>/dev/null || echo 0)" -gt 14000 ]; then
     head -c 14000 "$PEER_PROMPT_FILE" > "$_GEMINI_PROMPT_FILE"
@@ -3552,11 +3586,32 @@ PEER_EOF
   _GEMINI_ERR="${GEMINI_OUT}.err"
   _GEMINI_EXIT="${GEMINI_OUT}.exit"
   rm -f "$_GEMINI_ERR" "$_GEMINI_EXIT"
-  ( if gemini -o text < "$_GEMINI_PROMPT_FILE" > "$GEMINI_OUT" 2>"$_GEMINI_ERR"; then
+
+  # v0.7.34: gemini gets its OWN `timeout` rather than relying on the watchdog.
+  # Verified experimentally: the watchdog's `kill $GEMINI_PID` signals the
+  # SUBSHELL, so the `|| marker` fallback never runs, the output file is left
+  # EMPTY, and the gemini child is ORPHANED and keeps burning CPU on a VM shared
+  # with Temporal, Kafka and four runners. Self-terminating exits 124 cleanly,
+  # writes the marker, and reaps the child. The watchdog stays as a backstop.
+  _GEMINI_TIMEOUT=$(( _PEER_TIMEOUT - 20 ))
+  _gemini_once() {
+    timeout "$_GEMINI_TIMEOUT" gemini -o text \
+      < "$_GEMINI_PROMPT_FILE" > "$GEMINI_OUT" 2>"$_GEMINI_ERR"
+  }
+  # One retry, but ONLY for a fast failure. Exit 124 means it used the whole
+  # budget, so a second attempt would just burn it again and blow the watchdog.
+  # This covers the one failure seen on 2026-09-15 that left a 19-byte marker
+  # and no evidence: a transient non-zero exit that a retry would have absorbed.
+  ( if _gemini_once; then
       :
     else
-      printf '%s' "$?" > "$_GEMINI_EXIT"
-      echo "GEMINI_UNAVAILABLE" > "$GEMINI_OUT"
+      _g_ec=$?
+      if [ "$_g_ec" -ne 124 ] && _gemini_once; then
+        echo "  note: gemini failed (exit ${_g_ec}) then succeeded on retry" >&2
+      else
+        printf '%s' "$_g_ec" > "$_GEMINI_EXIT"
+        echo "GEMINI_UNAVAILABLE" > "$GEMINI_OUT"
+      fi
     fi ) &
   GEMINI_PID=$!
 
@@ -3567,13 +3622,15 @@ PEER_EOF
   # The watchdog kills both peers if either hangs past the deadline.
   #
   # v0.7.33 measurement, 4 consecutive real runs on this VM: 89s, 113s, 134s,
-  # 138s. So 240s is ~1.7x the worst observed — thin but not yet proven to fire,
-  # and no watchdog kill has actually been seen in the logs. Left alone rather
-  # than raised on a hunch. NOTE for whoever does raise it: `kill $GEMINI_PID`
-  # signals the SUBSHELL, so the `|| echo MARKER` fallback never runs and the
-  # output file is left EMPTY (verified), which is why the empty branch of
-  # _validate_peer_output warns. It also orphans the gemini child process.
-  _PEER_TIMEOUT=240
+  # 138s. 240s is ~1.7x the worst observed.
+  #
+  # v0.7.34: this watchdog is now a BACKSTOP for the Sonnet peer only — gemini
+  # self-terminates at _GEMINI_TIMEOUT above. That matters because `kill` here
+  # signals the SUBSHELL, so the `|| marker` fallback never runs, the output file
+  # is left EMPTY and the child is ORPHANED (both verified experimentally). The
+  # empty branch of _validate_peer_output warns precisely because this path
+  # exists. If you ever add another peer here, give it its own `timeout` too
+  # rather than trusting this kill.
   ( sleep "$_PEER_TIMEOUT" && kill $CODEX_PID $GEMINI_PID 2>/dev/null ) &
   _WATCHDOG_PID=$!
 
