@@ -26,6 +26,7 @@ source "${LIB_DIR}/github.sh"
 source "${LIB_DIR}/rag.sh" 2>/dev/null || true  # for _filter_rag_for_files, _trim_rag
 source "${LIB_DIR}/jira.sh" 2>/dev/null || true  # for _extract_jira_ticket, _fetch_jira_ticket
 source "${LIB_DIR}/lint.sh" 2>/dev/null || true  # for _run_static_analysis
+source "${LIB_DIR}/peer-validate.sh"  # for _validate_peer_output
 
 # ── Model backend: direct Anthropic API on diffhound's own key ───────────────
 # v0.7.31 (BX-3010): reverts the v0.7.29 `claude -p` backend. That backend
@@ -3540,9 +3541,23 @@ PEER_EOF
     cp "$PEER_PROMPT_FILE" "$_GEMINI_PROMPT_FILE"
   fi
 
-  # Run Gemini in background (prompt via stdin to avoid ARG_MAX on large diffs)
-  (gemini -o text < "$_GEMINI_PROMPT_FILE" > "$GEMINI_OUT" 2>&1 || \
-    echo "GEMINI_UNAVAILABLE" > "$GEMINI_OUT") &
+  # Run Gemini in background (prompt via stdin to avoid ARG_MAX on large diffs).
+  #
+  # v0.7.33: stderr goes to its OWN file, not 2>&1 into the answer. Two reasons.
+  # (1) Any CLI chatter on stderr used to be concatenated onto the model's reply,
+  # which could itself trip the truncation test. (2) On a non-zero exit the old
+  # form overwrote the file with the marker, destroying the error message — so a
+  # real Gemini failure was indistinguishable from any other and left nothing to
+  # debug. The exit code is recorded and reported below.
+  _GEMINI_ERR="${GEMINI_OUT}.err"
+  _GEMINI_EXIT="${GEMINI_OUT}.exit"
+  rm -f "$_GEMINI_ERR" "$_GEMINI_EXIT"
+  ( if gemini -o text < "$_GEMINI_PROMPT_FILE" > "$GEMINI_OUT" 2>"$_GEMINI_ERR"; then
+      :
+    else
+      printf '%s' "$?" > "$_GEMINI_EXIT"
+      echo "GEMINI_UNAVAILABLE" > "$GEMINI_OUT"
+    fi ) &
   GEMINI_PID=$!
 
   # Wait with 240s timeout — v0.7.7 bumped from 90s. Gemini-CLI does a chunk
@@ -3550,6 +3565,14 @@ PEER_EOF
   # can take 30-60s before the real generation starts. Codex is faster (<60s)
   # but still benefits from the buffer when nova-dev-shubham is under load.
   # The watchdog kills both peers if either hangs past the deadline.
+  #
+  # v0.7.33 measurement, 4 consecutive real runs on this VM: 89s, 113s, 134s,
+  # 138s. So 240s is ~1.7x the worst observed — thin but not yet proven to fire,
+  # and no watchdog kill has actually been seen in the logs. Left alone rather
+  # than raised on a hunch. NOTE for whoever does raise it: `kill $GEMINI_PID`
+  # signals the SUBSHELL, so the `|| echo MARKER` fallback never runs and the
+  # output file is left EMPTY (verified), which is why the empty branch of
+  # _validate_peer_output warns. It also orphans the gemini child process.
   _PEER_TIMEOUT=240
   ( sleep "$_PEER_TIMEOUT" && kill $CODEX_PID $GEMINI_PID 2>/dev/null ) &
   _WATCHDOG_PID=$!
@@ -3561,60 +3584,15 @@ PEER_EOF
   kill $_WATCHDOG_PID 2>/dev/null || true
   wait $_WATCHDOG_PID 2>/dev/null || true
 
-  # Validate peer output: empty or truncated = unusable.
-  #
-  # v0.7.5 fix (BX-3010, 2026-05-30): Two compounding bugs caused 100% of
-  # peer reviews to be silently discarded since v0.6.0 (2026-04-29):
-  #   1. Regex `[.!?)}\]"]` was malformed for GNU grep — the first `]` after
-  #      `\]` closed the character class prematurely, so the regex actually
-  #      required the literal sequence `"]` at end-of-line. Mac BSD grep
-  #      happened to accept `\]` as escape so the bug went undetected in
-  #      local dev. Audit on nova-dev-shubham (GNU grep 3.11) confirmed:
-  #      `back.` → NO MATCH with old regex, MATCH with `[]".!?)}]$`
-  #      (POSIX-safe form: `]` first inside the class).
-  #   2. Codex CLI v0.110.0 appends `mcp startup: no servers` to stdout
-  #      after the real response. This wrapper noise has no trailing
-  #      sentence-ending char, so even with the regex fixed the validator
-  #      would discard the entire output. Strip CLI metadata lines before
-  #      checking the tail.
-  #
-  # Evidence pre-fix: 38/38 monorepo reviews since 2026-05-16 said
-  # "Cross-checked by 0/2 peer models (none)". Raw codex/gemini output
-  # captured on 2026-05-30 was 23 KB + 1.7 KB of valid review content
-  # that the validator threw out.
-  _validate_peer_output() {
-    local file="$1" name="$2"
-    if [ ! -s "$file" ]; then
-      echo "${name}_UNAVAILABLE" > "$file"
-      return
-    fi
-    # Strip known CLI wrapper noise that the underlying tools emit AFTER
-    # the model's response. Patterns are conservative — only lines that
-    # clearly belong to the tool, never to the model.
-    local stripped="${file}.stripped"
-    grep -vE '^(mcp startup:|OpenAI Codex v|workdir:|model:|provider:|approval:|sandbox:|reasoning effort:|tokens used|--------$|Reading prompt from stdin)' \
-      "$file" > "$stripped" 2>/dev/null || cp "$file" "$stripped"
-    # Trim trailing blank lines so tail -c 20 doesn't land in whitespace.
-    awk 'BEGIN{blank=0} { if ($0 == "") { blank++ } else { for (i=0;i<blank;i++) print ""; blank=0; print $0 } }' \
-      "$stripped" > "${stripped}.2" && mv "${stripped}.2" "$stripped"
-    mv "$stripped" "$file"
+  # Surface WHY Gemini failed, if it did. Without this the only signal is a
+  # 19-byte marker, which is how the markdown-fence bug stayed hidden.
+  if [ -s "${_GEMINI_EXIT:-/nonexistent}" ]; then
+    echo "  warning: gemini CLI exited $(cat "$_GEMINI_EXIT") -- $(head -c 300 "${_GEMINI_ERR:-/dev/null}" 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g')" >&2
+  fi
+  rm -f "${_GEMINI_ERR:-}" "${_GEMINI_EXIT:-}"
 
-    # Truncated: file under 100 bytes or doesn't end with sentence-ending char.
-    local size
-    size=$(wc -c < "$file" | tr -d ' ')
-    if [ "$size" -lt 100 ]; then
-      echo "  warning: ${name} output too short (${size}B) -- discarding" >&2
-      echo "${name}_UNAVAILABLE" > "$file"
-      return
-    fi
-    local last_chars
-    last_chars=$(tail -c 20 "$file" | tr -d '[:space:]')
-    # POSIX-safe character class: literal `]` must appear first inside `[]`.
-    if [ -n "$last_chars" ] && ! printf '%s' "$last_chars" | grep -qE '[]".!?)}]$'; then
-      echo "  warning: ${name} output appears truncated -- discarding" >&2
-      echo "${name}_UNAVAILABLE" > "$file"
-    fi
-  }
+  # Validate peer output (lib/peer-validate.sh — unit-tested, see its header
+  # for the measured evidence behind the markdown-fence fix).
   _validate_peer_output "$CODEX_OUT" "CODEX"
   _validate_peer_output "$GEMINI_OUT" "GEMINI"
 

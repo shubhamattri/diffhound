@@ -114,6 +114,11 @@ if [ -z "$only" ] && [ -x "$ROOT/tests/test-claim-verify-summary.sh" ]; then
   echo "=== unit: test-claim-verify-summary.sh ==="
   "$ROOT/tests/test-claim-verify-summary.sh" || _unit_fail=1
 fi
+if [ -z "$only" ] && [ -x "$ROOT/tests/test-peer-validate.sh" ]; then
+  echo ""
+  echo "=== unit: test-peer-validate.sh ==="
+  "$ROOT/tests/test-peer-validate.sh" || _unit_fail=1
+fi
 if [ -z "$only" ] && [ -x "$ROOT/tests/test-derive-score.sh" ]; then
   echo
   echo "=== unit: test-derive-score.sh ==="
