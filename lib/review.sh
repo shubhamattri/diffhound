@@ -27,86 +27,102 @@ source "${LIB_DIR}/rag.sh" 2>/dev/null || true  # for _filter_rag_for_files, _tr
 source "${LIB_DIR}/jira.sh" 2>/dev/null || true  # for _extract_jira_ticket, _fetch_jira_ticket
 source "${LIB_DIR}/lint.sh" 2>/dev/null || true  # for _run_static_analysis
 
-# ── Model backend: Claude Code CLI on the Max subscription ───────────────────
-# v0.7.29 (BX-3010): ANTHROPIC_API_KEY was withdrawn for cost cutting, so every
-# model call now goes through `claude -p` instead of curl to api.anthropic.com.
-#
-# Three of the CLI flags are load-bearing, not cosmetic:
-#   --setting-sources ''   the CLI otherwise reads the CLAUDE.md of its cwd, and
-#                          our cwd is the checked-out PR. Without this a PR author
-#                          edits CLAUDE.md on their own branch and steers their
-#                          own review. Proven, not theoretical.
-#   --strict-mcp-config    with an empty --mcp-config, drops MCP tool definitions
-#                          that otherwise cost ~30k input tokens on every call.
-#   --allowedTools ''      every diffhound pass is single-shot with context
-#                          pre-inlined, so tools are pure overhead.
-#
-# Two behaviours differ from the raw API and both fail silently if ignored:
-#   1. Exceeding max output tokens is an ERROR here, not a truncation. The API
-#      returned a clipped-but-parseable body; the CLI returns is_error with no
-#      content. Hence _CLI_MIN_TOKENS.
-#   2. The default Claude Code system prompt makes the model conversational, so
-#      a bare user message gets "I need more context" instead of the demanded
-#      JSON. Callers with no system prompt of their own get _NEUTRAL_SYSTEM.
-_CLI_MIN_TOKENS=1024
-
-# System prompts go in as an inline --system-prompt argument, never a file.
-# --system-prompt-file exists on current builds but `claude --help` renders it
-# as "--system-prompt[-file]", so any grep-the-help probe reports it missing and
-# silently picks inline anyway. Inline is supported on every build we run, and
-# the largest system prompt here is ~7 KB against an ARG_MAX of 1-2 MB, so the
-# file form buys nothing. Do not reintroduce a capability probe for this.
-
-_NEUTRAL_SYSTEM_FILE=""
-_neutral_system_file() {
-  if [ -z "$_NEUTRAL_SYSTEM_FILE" ] || [ ! -f "$_NEUTRAL_SYSTEM_FILE" ]; then
-    _NEUTRAL_SYSTEM_FILE=$(mktemp -t "dh-neutral-sys.XXXXXX")
-    printf '%s\n' \
-      "You are a non-interactive code-review engine inside a shell pipeline." \
-      "Follow the output format demanded by the user message exactly." \
-      "Never ask a clarifying question. Never add preamble, commentary or sign-off." \
-      "If the input is insufficient, emit the demanded format with empty contents." \
-      > "$_NEUTRAL_SYSTEM_FILE"
-  fi
-  printf '%s' "$_NEUTRAL_SYSTEM_FILE"
-}
-
-# _claude_cli MODEL MAX_TOKENS TIMEOUT [SYSTEM_FILE] < prompt
-_claude_cli() {
-  local model="$1"
-  local max_tokens="${2:-4096}"
-  local timeout_secs="${3:-120}"
-  local system_file="${4:-}"
-
-  [ "$max_tokens" -lt "$_CLI_MIN_TOKENS" ] 2>/dev/null && max_tokens="$_CLI_MIN_TOKENS"
-  [ -n "$system_file" ] && [ -f "$system_file" ] || system_file=$(_neutral_system_file)
-
-  local _sys_args=( --system-prompt "$(cat "$system_file")" )
-
-  local _raw
-  _raw=$(env -u ANTHROPIC_API_KEY -u CLAUDECODE \
-         CLAUDE_CODE_MAX_OUTPUT_TOKENS="$max_tokens" \
-         $_TIMEOUT_CMD "$timeout_secs" claude \
-           -p --output-format json \
-           --model "$model" \
-           "${_sys_args[@]}" \
-           --allowedTools '' \
-           --strict-mcp-config --mcp-config '{"mcpServers":{}}' \
-           --setting-sources '' 2>/dev/null || echo "")
-
-  printf '%s' "$_raw" \
-    | jq -r 'if (.is_error // false) then empty else (.result // empty) end' 2>/dev/null || true
-}
+# ── Model backend: direct Anthropic API on diffhound's own key ───────────────
+# v0.7.31 (BX-3010): reverts the v0.7.29 `claude -p` backend. That backend
+# authenticated with CLAUDE_CODE_OAUTH_TOKEN, i.e. Shubham's PERSONAL Claude
+# subscription, and every call deliberately scrubbed ANTHROPIC_API_KEY so the
+# subscription was the only credential it could use. Diffhound now has a funded
+# key of its own, so every model call goes back to api.anthropic.com with
+# x-api-key. Two reasons this is a revert and not a new design:
+#   1. Provability. With the CLI, which credential paid is a precedence question
+#      between an env key, an OAuth token and ~/.claude.json. With x-api-key the
+#      billed account is the header, and nothing can silently fall back to a
+#      personal subscription.
+#   2. Prompt caching. The cache_control breakpoint below is worth ~90% off the
+#      repeated system prefix and the CLI path had no equivalent.
+# Do NOT reintroduce a `claude` CLI call anywhere in this pipeline — it bills
+# the wrong account and does it silently. _api_backend_ok is the loud gate.
+_ANTHROPIC_API_URL="${ANTHROPIC_API_URL:-https://api.anthropic.com/v1/messages}"
 
 # Usage: printf '%s' "$prompt" | _call_api MODEL [MAX_TOKENS] [TIMEOUT_SECS]
 #        _call_api MODEL [MAX_TOKENS] [TIMEOUT_SECS] < prompt_file
 _call_api() {
-  _claude_cli "$1" "${2:-4096}" "${3:-120}"
+  local model="$1"
+  local max_tokens="${2:-4096}"
+  local timeout_secs="${3:-120}"
+
+  local _api_pf _api_jf
+  _api_pf=$(mktemp -t "api-prompt.XXXXXX")
+  _api_jf=$(mktemp -t "api-json.XXXXXX")
+  cat > "$_api_pf"
+
+  jq -n --arg model "$model" \
+        --argjson max_tokens "$max_tokens" \
+        --rawfile user "$_api_pf" \
+    '{model: $model, max_tokens: $max_tokens,
+      messages: [{role: "user", content: $user}]}' > "$_api_jf"
+  rm -f "$_api_pf"
+
+  local _api_r
+  _api_r=$($_TIMEOUT_CMD "$timeout_secs" curl -sf "$_ANTHROPIC_API_URL" \
+    -H "x-api-key: ${ANTHROPIC_API_KEY}" \
+    -H "anthropic-version: 2023-06-01" \
+    -H "anthropic-beta: prompt-caching-2024-07-31" \
+    -H "content-type: application/json" \
+    -d @"$_api_jf" 2>/dev/null || echo "")
+  rm -f "$_api_jf"
+
+  printf '%s' "$_api_r" | jq -r '.content[0].text // empty' 2>/dev/null || true
 }
 
 # _call_api_system MODEL MAX_TOKENS TIMEOUT SYSTEM_FILE < user_prompt
 _call_api_system() {
-  _claude_cli "$1" "${2:-4096}" "${3:-120}" "$4"
+  local model="$1"
+  local max_tokens="${2:-4096}"
+  local timeout_secs="${3:-120}"
+  local system_file="$4"
+
+  local _api_pf _api_jf
+  _api_pf=$(mktemp -t "api-prompt.XXXXXX")
+  _api_jf=$(mktemp -t "api-json.XXXXXX")
+  cat > "$_api_pf"
+
+  jq -n --arg model "$model" \
+        --argjson max_tokens "$max_tokens" \
+        --rawfile system "$system_file" \
+        --rawfile user "$_api_pf" \
+    '{model: $model, max_tokens: $max_tokens,
+      system: [{type: "text", text: $system, cache_control: {type: "ephemeral"}}],
+      messages: [{role: "user", content: $user}]}' > "$_api_jf"
+  rm -f "$_api_pf"
+
+  local _api_r
+  _api_r=$($_TIMEOUT_CMD "$timeout_secs" curl -sf "$_ANTHROPIC_API_URL" \
+    -H "x-api-key: ${ANTHROPIC_API_KEY}" \
+    -H "anthropic-version: 2023-06-01" \
+    -H "anthropic-beta: prompt-caching-2024-07-31" \
+    -H "content-type: application/json" \
+    -d @"$_api_jf" 2>/dev/null || echo "")
+  rm -f "$_api_jf"
+
+  printf '%s' "$_api_r" | jq -r '.content[0].text // empty' 2>/dev/null || true
+}
+
+# Proves the backend ANSWERS, not merely that a key is present. v0.7.30 exists
+# because a revoked-but-still-exported key passed a `-z` presence check and
+# diffhound posted content-free APPROVEs onto live monorepo PRs. Keep it a real
+# call. Echoes the model's reply on stdout so callers can show the failure.
+_api_backend_ok() {
+  [ -n "${ANTHROPIC_API_KEY:-}" ] || return 1
+  local _r
+  _r=$($_TIMEOUT_CMD 60 curl -s "$_ANTHROPIC_API_URL" \
+    -H "x-api-key: ${ANTHROPIC_API_KEY}" \
+    -H "anthropic-version: 2023-06-01" \
+    -H "content-type: application/json" \
+    -d '{"model":"claude-haiku-4-5-20251001","max_tokens":16,
+         "messages":[{"role":"user","content":"Reply with exactly: OK"}]}' 2>/dev/null || echo "")
+  printf '%s' "$_r" | jq -r '.error.message // empty' 2>/dev/null
+  printf '%s' "$_r" | jq -e '(.content[0].text // "") | length > 0' >/dev/null 2>&1
 }
 
 # ── Verify dependencies ─────────────────────────────────────
@@ -134,15 +150,12 @@ _health_check() {
   # silently no-op — half the safety net is invisible. Verifier
   # offline-passthrough is intentional for fixture tests; this warning makes
   # sure a misconfigured prod run can't go unnoticed.
-  # v0.7.29: the backend is the claude CLI, so an authenticated CLI is what
-  # matters. A present-but-unauthenticated binary is the failure mode to catch,
-  # hence a real call rather than `command -v`.
-  if ! printf 'ok' | env -u ANTHROPIC_API_KEY -u CLAUDECODE $_TIMEOUT_CMD 60 claude \
-       -p --model claude-haiku-4-5-20251001 --allowedTools '' \
-       --strict-mcp-config --mcp-config '{"mcpServers":{}}' \
-       --setting-sources '' >/dev/null 2>&1; then
-    echo "  ⚠️  claude CLI is not usable — verifier, voice rewrite, RAG will all silently degrade" >&2
-    echo "  ⚠️  On a headless runner: run 'claude setup-token' on a desktop, then export CLAUDE_CODE_OAUTH_TOKEN in ~/.profile." >&2
+  # v0.7.31: the backend is diffhound's own ANTHROPIC_API_KEY. A present but
+  # revoked key is the failure mode to catch, hence a real call rather than a
+  # presence test.
+  if [ "${DIFFHOUND_OFFLINE:-0}" != "1" ] && ! _api_backend_ok >/dev/null; then
+    echo "  ⚠️  ANTHROPIC_API_KEY did not answer — verifier, voice rewrite, RAG will all silently degrade" >&2
+    echo "  ⚠️  On the runner: export a working ANTHROPIC_API_KEY in ~/.profile (diffhound's key, not a personal one)." >&2
   fi
   return $errors
 }
@@ -236,22 +249,16 @@ fi
 if [ "$AUTO_POST" = true ] && [ "${DIFFHOUND_ALLOW_DEGRADED_AUTO_POST:-0}" != "1" ]; then
   _backend_ok=false
   _probe=""
-  if [ "${DIFFHOUND_OFFLINE:-0}" != "1" ] && command -v claude >/dev/null 2>&1; then
-    _probe=$(printf 'Reply with exactly: OK' | env -u ANTHROPIC_API_KEY -u CLAUDECODE \
-      $_TIMEOUT_CMD 90 claude -p --output-format json --model claude-haiku-4-5-20251001 \
-      --allowedTools '' --strict-mcp-config --mcp-config '{"mcpServers":{}}' \
-      --setting-sources '' 2>/dev/null || echo "")
-    printf '%s' "$_probe" | jq -e '(.is_error // false) == false and ((.result // "") | length > 0)' \
-      >/dev/null 2>&1 && _backend_ok=true
+  if [ "${DIFFHOUND_OFFLINE:-0}" != "1" ]; then
+    _probe=$(_api_backend_ok) && _backend_ok=true
   fi
   if [ "$_backend_ok" != true ]; then
-    echo "FATAL: --auto-post requires a claude CLI that actually authenticates." >&2
+    echo "FATAL: --auto-post requires an ANTHROPIC_API_KEY that actually answers." >&2
     echo "       The backend did not answer a test call, so the verifier, voice" >&2
     echo "       rewrite and RAG would all silently no-op and this run would post" >&2
     echo "       an empty APPROVE to a real PR. Refusing." >&2
-    printf '%s' "$_probe" | jq -r '.result // empty' 2>/dev/null | head -2 >&2
-    echo "       On a headless runner: run 'claude setup-token' on a desktop and" >&2
-    echo "       export CLAUDE_CODE_OAUTH_TOKEN in ~/.profile." >&2
+    [ -n "$_probe" ] && echo "       API said: $_probe" >&2
+    echo "       On the runner: export diffhound's own ANTHROPIC_API_KEY in ~/.profile." >&2
     echo "       DIFFHOUND_ALLOW_DEGRADED_AUTO_POST=1 bypasses this deliberately." >&2
     exit 2
   fi

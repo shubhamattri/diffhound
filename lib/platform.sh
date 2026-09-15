@@ -18,7 +18,7 @@ _check_deps() {
 
   command -v gh >/dev/null 2>&1 || missing+=("gh (GitHub CLI)")
   command -v jq >/dev/null 2>&1 || missing+=("jq")
-  command -v claude >/dev/null 2>&1 || missing+=("claude (Claude Code CLI)")
+  command -v curl >/dev/null 2>&1 || missing+=("curl")
   command -v "$_TIMEOUT_CMD" >/dev/null 2>&1 || missing+=("$_TIMEOUT_CMD")
 
   if [ ${#missing[@]} -gt 0 ]; then
