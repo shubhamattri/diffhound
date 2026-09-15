@@ -2212,7 +2212,11 @@ if [ "$IS_REREVIEW" = true ]; then
     REREVIEW_DEPTH="full"
     echo "  ↻ Large re-review delta (${_INCR_BYTES}B, ${_INCR_LINES} lines) — running full peer review" >&2
   else
-    echo "  ↻ Small re-review delta (${_INCR_BYTES}B, ${_INCR_LINES} lines) — skipping peer review" >&2
+    # v0.7.36: this used to say "skipping peer review". Since v0.7.34 peer review
+    # ALWAYS runs; a small delta only selects the scoped prompt. A log line that
+    # contradicts the code is how the 1/2-coverage bug stayed invisible — do not
+    # let this drift again.
+    echo "  ↻ Small re-review delta (${_INCR_BYTES}B, ${_INCR_LINES} lines) — peer review scoped to it" >&2
   fi
 fi
 # --force-full overrides all re-review depth decisions
