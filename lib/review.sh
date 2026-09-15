@@ -44,12 +44,28 @@ source "${LIB_DIR}/lint.sh" 2>/dev/null || true  # for _run_static_analysis
 # the wrong account and does it silently. _api_backend_ok is the loud gate.
 _ANTHROPIC_API_URL="${ANTHROPIC_API_URL:-https://api.anthropic.com/v1/messages}"
 
-# Usage: printf '%s' "$prompt" | _call_api MODEL [MAX_TOKENS] [TIMEOUT_SECS]
-#        _call_api MODEL [MAX_TOKENS] [TIMEOUT_SECS] < prompt_file
+# v0.7.32: thinking models put a `thinking` block FIRST in content, so the old
+# `.content[0].text` read null and every Opus call returned an empty string —
+# the exact silent-empty failure mode v0.7.30 exists to prevent. Always select
+# the text blocks by type, never by position. Proven on claude-opus-5:
+#   block_types=thinking,text   content[0].text=null
+_TEXT_BLOCKS='[.content[] | select(.type == "text") | .text] | join("")'
+
+# Effort + adaptive thinking are sent ONLY when a caller asks for an effort
+# level. Haiku 4.5 rejects `output_config.effort`, so the cheap layers must keep
+# omitting it; Opus 5 / Sonnet 5 think by default either way.
+_output_cfg() {
+  [ -z "${1:-}" ] && { printf '{}'; return; }
+  jq -nc --arg e "$1" '{thinking: {type: "adaptive"}, output_config: {effort: $e}}'
+}
+
+# Usage: printf '%s' "$prompt" | _call_api MODEL [MAX_TOKENS] [TIMEOUT_SECS] [EFFORT]
+#        _call_api MODEL [MAX_TOKENS] [TIMEOUT_SECS] [EFFORT] < prompt_file
 _call_api() {
   local model="$1"
   local max_tokens="${2:-4096}"
   local timeout_secs="${3:-120}"
+  local effort="${4:-}"
 
   local _api_pf _api_jf
   _api_pf=$(mktemp -t "api-prompt.XXXXXX")
@@ -58,9 +74,10 @@ _call_api() {
 
   jq -n --arg model "$model" \
         --argjson max_tokens "$max_tokens" \
+        --argjson extra "$(_output_cfg "$effort")" \
         --rawfile user "$_api_pf" \
     '{model: $model, max_tokens: $max_tokens,
-      messages: [{role: "user", content: $user}]}' > "$_api_jf"
+      messages: [{role: "user", content: $user}]} + $extra' > "$_api_jf"
   rm -f "$_api_pf"
 
   local _api_r
@@ -72,15 +89,16 @@ _call_api() {
     -d @"$_api_jf" 2>/dev/null || echo "")
   rm -f "$_api_jf"
 
-  printf '%s' "$_api_r" | jq -r '.content[0].text // empty' 2>/dev/null || true
+  printf '%s' "$_api_r" | jq -r "$_TEXT_BLOCKS" 2>/dev/null || true
 }
 
-# _call_api_system MODEL MAX_TOKENS TIMEOUT SYSTEM_FILE < user_prompt
+# _call_api_system MODEL MAX_TOKENS TIMEOUT SYSTEM_FILE [EFFORT] < user_prompt
 _call_api_system() {
   local model="$1"
   local max_tokens="${2:-4096}"
   local timeout_secs="${3:-120}"
   local system_file="$4"
+  local effort="${5:-}"
 
   local _api_pf _api_jf
   _api_pf=$(mktemp -t "api-prompt.XXXXXX")
@@ -89,11 +107,12 @@ _call_api_system() {
 
   jq -n --arg model "$model" \
         --argjson max_tokens "$max_tokens" \
+        --argjson extra "$(_output_cfg "$effort")" \
         --rawfile system "$system_file" \
         --rawfile user "$_api_pf" \
     '{model: $model, max_tokens: $max_tokens,
       system: [{type: "text", text: $system, cache_control: {type: "ephemeral"}}],
-      messages: [{role: "user", content: $user}]}' > "$_api_jf"
+      messages: [{role: "user", content: $user}]} + $extra' > "$_api_jf"
   rm -f "$_api_pf"
 
   local _api_r
@@ -105,7 +124,7 @@ _call_api_system() {
     -d @"$_api_jf" 2>/dev/null || echo "")
   rm -f "$_api_jf"
 
-  printf '%s' "$_api_r" | jq -r '.content[0].text // empty' 2>/dev/null || true
+  printf '%s' "$_api_r" | jq -r "$_TEXT_BLOCKS" 2>/dev/null || true
 }
 
 # Proves the backend ANSWERS, not merely that a key is present. v0.7.30 exists
@@ -122,7 +141,7 @@ _api_backend_ok() {
     -d '{"model":"claude-haiku-4-5-20251001","max_tokens":16,
          "messages":[{"role":"user","content":"Reply with exactly: OK"}]}' 2>/dev/null || echo "")
   printf '%s' "$_r" | jq -r '.error.message // empty' 2>/dev/null
-  printf '%s' "$_r" | jq -e '(.content[0].text // "") | length > 0' >/dev/null 2>&1
+  printf '%s' "$_r" | jq -e "($_TEXT_BLOCKS) | length > 0" >/dev/null 2>&1
 }
 
 # ── Verify dependencies ─────────────────────────────────────
@@ -1776,9 +1795,9 @@ _review_chunks_parallel() {
       fi
     } > "$chunk_prompt"
 
-    # Launch API call in background (Opus 4.6 for thorough code review)
+    # Launch API call in background (Opus 5 for thorough code review)
     (
-      _call_api "claude-opus-4-6" 16384 480 < "$chunk_prompt" > "$chunk_out" 2>&1 || \
+      _call_api "claude-opus-5" 32000 600 high < "$chunk_prompt" > "$chunk_out" 2>&1 || \
         echo "CHUNK_${i}_FAILED" > "$chunk_out"
     ) &
     pids+=($!)
@@ -3080,14 +3099,17 @@ cat "$_CONTEXT_FILE" >> "$PROMPT_FILE"
 rm -f "$_CONTEXT_FILE"
 
 # Non-agentic pass: no tools needed, all context is inline
-# Scale timeout with prompt size: base 180s + 1s per 300 chars, capped at 480s
+# Scale timeout with prompt size: base 180s + 1s per 300 chars, capped at 900s
+# v0.7.32: cap was 480s. Opus 5 thinks before answering, so the same prompt takes
+# longer wall-clock than Opus 4.6 did. A cap that fires mid-generation costs a
+# full retry, which is far more expensive than waiting.
 # Non-agentic is faster than agentic but large prompts (50KB+) still need 3-5 min
 _PROMPT_BYTES=$(wc -c < "$PROMPT_FILE" 2>/dev/null || echo "0")
 _CLAUDE_TIMEOUT=$(( 180 + _PROMPT_BYTES / 300 ))
-[ "$_CLAUDE_TIMEOUT" -gt 480 ] && _CLAUDE_TIMEOUT=480
+[ "$_CLAUDE_TIMEOUT" -gt 900 ] && _CLAUDE_TIMEOUT=900
 [ "$_CLAUDE_TIMEOUT" -lt 180 ] && _CLAUDE_TIMEOUT=180
 echo "  [debug] prompt=${_PROMPT_BYTES}B, timeout=${_CLAUDE_TIMEOUT}s" >&2
-if ! _call_api "claude-opus-4-6" 16384 "$_CLAUDE_TIMEOUT" < "$PROMPT_FILE" > "$CLAUDE_OUT" 2>"${CLAUDE_OUT}.stderr"; then
+if ! _call_api "claude-opus-5" 32000 "$_CLAUDE_TIMEOUT" high < "$PROMPT_FILE" > "$CLAUDE_OUT" 2>"${CLAUDE_OUT}.stderr"; then
   echo "  [debug] claude failed — out=$(wc -c < "$CLAUDE_OUT" 2>/dev/null)B stderr=$(cat "${CLAUDE_OUT}.stderr" 2>/dev/null | head -3)" >&2
   # Check if partial output is usable (timeout may kill mid-write but JSON is complete)
   _partial_json=$(_extract_json "$CLAUDE_OUT" 2>/dev/null || true)
@@ -3096,7 +3118,7 @@ if ! _call_api "claude-opus-4-6" 16384 "$_CLAUDE_TIMEOUT" < "$PROMPT_FILE" > "$C
     spinner_fail "Analysis timed out but output is usable — continuing"
   else
     spinner_fail "Primary pass failed — retrying"
-    if ! _call_api "claude-opus-4-6" 16384 360 < "$PROMPT_FILE" > "$CLAUDE_OUT" 2>&1; then
+    if ! _call_api "claude-opus-5" 32000 480 high < "$PROMPT_FILE" > "$CLAUDE_OUT" 2>&1; then
       _partial_json=$(_extract_json "$CLAUDE_OUT" 2>/dev/null || true)
       if [ -z "$_partial_json" ] || ! echo "$_partial_json" | jq -e '.findings' >/dev/null 2>&1; then
         spinner_fail "Analysis failed"
@@ -3480,12 +3502,12 @@ PEER_EOF
   # Claude shares blind spots with the primary, so it's framed to REFUTE (assume
   # a false positive exists) to extract independent signal. CODEX_* var names are
   # kept as internal plumbing; user-facing labels name the model actually used.
-  # v0.7.29: downshifted Opus 4.8 -> Sonnet 4.6. The backend moved from the
-  # metered API to the Claude subscription, so this call now spends Shubham's
-  # own quota. The peer's job is refuting over-confident claims, which Sonnet
-  # does adequately, and it is the cheapest slot to give up. The PRIMARY pass
-  # stays on Opus 4.6 deliberately: changing the backend and the primary model
-  # in one release would make any quality regression unattributable.
+  # v0.7.29 downshifted Opus 4.8 -> Sonnet 4.6 because the backend had moved to
+  # Shubham's personal subscription and this was the cheapest slot to give up.
+  # v0.7.32 moves it to Sonnet 5, which is both newer and CHEAPER per token than
+  # Sonnet 4.6 ($2/$10 vs $3/$15 per MTok), so quality and cost both improve.
+  # Effort is `medium`: the peer's job is refuting over-confident claims against
+  # a diff already in the prompt, not open-ended analysis.
   _CLAUDE_PEER_PROMPT=$(mktemp -t "pr-${PR_NUMBER}-claudepeer.XXXXXX")
   {
     echo "You are an ADVERSARIAL second reviewer. The PRIMARY review (also Claude) is below."
@@ -3498,7 +3520,7 @@ PEER_EOF
     echo ""
     cat "$PEER_PROMPT_FILE"
   } > "$_CLAUDE_PEER_PROMPT"
-  ( _call_api "claude-sonnet-4-6" 2048 120 < "$_CLAUDE_PEER_PROMPT" > "$CODEX_OUT" 2>&1; \
+  ( _call_api "claude-sonnet-5" 8192 240 medium < "$_CLAUDE_PEER_PROMPT" > "$CODEX_OUT" 2>&1; \
     [ -s "$CODEX_OUT" ] || echo "CODEX_UNAVAILABLE" > "$CODEX_OUT" ) &
   CODEX_PID=$!
 
@@ -3603,7 +3625,7 @@ PEER_EOF
   _PEER_COUNT=0
   _PEER_NAMES=""
   if [ -n "$CODEX_CONTENT" ] && [ "$CODEX_CONTENT" != "CODEX_UNAVAILABLE" ]; then
-    _PEER_COUNT=$((_PEER_COUNT + 1)); _PEER_NAMES="Claude-Sonnet-4.6"
+    _PEER_COUNT=$((_PEER_COUNT + 1)); _PEER_NAMES="Claude-Sonnet-5"
   fi
   if [ -n "$GEMINI_CONTENT" ] && [ "$GEMINI_CONTENT" != "GEMINI_UNAVAILABLE" ]; then
     _PEER_COUNT=$((_PEER_COUNT + 1)); _PEER_NAMES="${_PEER_NAMES:+$_PEER_NAMES + }Gemini"
@@ -3713,7 +3735,7 @@ Evidence: \(.value.evidence // "none")
 
       # Cross-verification pass. v0.7.29: single backend, no duplicate curl.
       _verify_resp=""
-      _verify_resp=$(_call_api "claude-sonnet-4-6" 2048 60 < "$VERIFY_PROMPT" 2>/dev/null || true)
+      _verify_resp=$(_call_api "claude-sonnet-5" 8192 180 medium < "$VERIFY_PROMPT" 2>/dev/null || true)
 
       # Parse verification results and filter findings
       if [ -n "$_verify_resp" ]; then
@@ -4515,7 +4537,7 @@ REREVIEW_BLOCK
 # whose result (_KEY_HAS_CREDITS) was never read by anything. Both are gone.
 _SYS_TMP=$(mktemp -t "pr-${PR_NUMBER}-sys.XXXXXX")
 printf '%s' "$_STATIC_SYSTEM" > "$_SYS_TMP"
-_call_api_system "claude-sonnet-4-6" 16384 120 "$_SYS_TMP" < "$_USER_TMP" > "$REVIEW_STRUCTURED" 2>/dev/null || true
+_call_api_system "claude-sonnet-5" 32000 300 "$_SYS_TMP" medium < "$_USER_TMP" > "$REVIEW_STRUCTURED" 2>/dev/null || true
 rm -f "$_SYS_TMP"
 # Empty output here means the voice pass failed outright; fall back to the raw
 # primary-pass findings rather than posting nothing.

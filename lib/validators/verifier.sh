@@ -236,7 +236,9 @@ Never ask a clarifying question. Never add preamble or commentary." \
 
   local verdict reason
   local body
-  body=$(printf '%s' "$resp" | jq -r '.content[0].text // empty' 2>/dev/null)
+  # Select text blocks by type, not position: DIFFHOUND_VERIFIER_MODEL can be
+  # pointed at a thinking model, which emits a `thinking` block at content[0].
+  body=$(printf '%s' "$resp" | jq -r '[.content[] | select(.type == "text") | .text] | join("")' 2>/dev/null)
   verdict=$(printf '%s' "$body" | grep -E '^VERDICT:' | head -1 | sed 's/^VERDICT:[[:space:]]*//')
   reason=$(printf '%s' "$body" | grep -E '^REASON:' | head -1 | sed 's/^REASON:[[:space:]]*//')
 
