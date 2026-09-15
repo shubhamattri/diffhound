@@ -228,6 +228,17 @@ Never ask a clarifying question. Never add preamble or commentary." \
     -d @"$req_file" 2>/dev/null || echo "")
   rm -f "$req_file"
 
+  # v0.7.35: bill into the run ledger. One call per BLOCKING/SHOULD-FIX finding,
+  # so on a noisy PR this stage is not negligible and needs to be visible.
+  if [ -n "${DIFFHOUND_USAGE_LOG:-}" ] && [ -n "$resp" ]; then
+    printf '%s' "$resp" | jq -r --arg m "$MODEL" \
+      '[$m, "verifier",
+        (.usage.input_tokens // 0), (.usage.output_tokens // 0),
+        (.usage.cache_creation_input_tokens // 0), (.usage.cache_read_input_tokens // 0),
+        (.usage.output_tokens_details.thinking_tokens // 0)] | @tsv' \
+      2>/dev/null >> "$DIFFHOUND_USAGE_LOG" || true
+  fi
+
   if [ -z "$resp" ]; then
     # Backend error → fall back to TRUE (don't drop on infra failure)
     echo "TRUE"

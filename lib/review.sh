@@ -35,6 +35,7 @@ source "${LIB_DIR}/rag.sh" 2>/dev/null || true  # for _filter_rag_for_files, _tr
 source "${LIB_DIR}/jira.sh" 2>/dev/null || true  # for _extract_jira_ticket, _fetch_jira_ticket
 source "${LIB_DIR}/lint.sh" 2>/dev/null || true  # for _run_static_analysis
 source "${LIB_DIR}/peer-validate.sh"  # for _validate_peer_output
+source "${LIB_DIR}/cost.sh"           # for _cost_record / _cost_summary
 
 # ── Model backend: direct Anthropic API on diffhound's own key ───────────────
 # v0.7.31 (BX-3010): reverts the v0.7.29 `claude -p` backend. That backend
@@ -98,6 +99,7 @@ _call_api() {
     -d @"$_api_jf" 2>/dev/null || echo "")
   rm -f "$_api_jf"
 
+  printf '%s' "$_api_r" | _cost_record "$model" "${DIFFHOUND_STAGE:-other}"
   printf '%s' "$_api_r" | jq -r "$_TEXT_BLOCKS" 2>/dev/null || true
 }
 
@@ -133,6 +135,7 @@ _call_api_system() {
     -d @"$_api_jf" 2>/dev/null || echo "")
   rm -f "$_api_jf"
 
+  printf '%s' "$_api_r" | _cost_record "$model" "${DIFFHOUND_STAGE:-other}"
   printf '%s' "$_api_r" | jq -r "$_TEXT_BLOCKS" 2>/dev/null || true
 }
 
@@ -897,6 +900,7 @@ RESPOND_RULES_END
     # Call Claude Haiku (fast + cheap). v0.7.29: the duplicate hand-rolled curl
     # that used to front this call is gone; _call_api is the only backend now.
     local ai_reply=""
+    DIFFHOUND_STAGE="dev-reply"
     ai_reply=$(printf '%s' "$prompt" | _call_api "claude-haiku-4-5-20251001" 256 30 || true)
 
     [ -z "$ai_reply" ] && continue
@@ -1015,6 +1019,7 @@ LESSON_RULES_END
     rm -f "$_lesson_prompt_file"
 
     local lesson=""
+    DIFFHOUND_STAGE="lesson"
     lesson=$(printf '%s' "$lesson_prompt" | _call_api "claude-haiku-4-5-20251001" 256 30 | head -1 || true)
 
     [ -z "$lesson" ] && continue
@@ -1159,6 +1164,10 @@ PROMPT_FILE=$(mktemp -t "pr-${PR_NUMBER}-prompt.XXXXXX")
 CLAUDE_OUT=$(mktemp -t "pr-${PR_NUMBER}-claude.XXXXXX")
 CODEX_OUT=$(mktemp -t "pr-${PR_NUMBER}-codex.XXXXXX")
 GEMINI_OUT=$(mktemp -t "pr-${PR_NUMBER}-gemini.XXXXXX")
+# v0.7.35: per-run token accounting. Exported so validators that make their own
+# API calls (verifier.sh) bill into the same ledger.
+DIFFHOUND_USAGE_LOG=$(mktemp -t "pr-${PR_NUMBER}-usage.XXXXXX")
+export DIFFHOUND_USAGE_LOG
 SYNTH_PROMPT=$(mktemp -t "pr-${PR_NUMBER}-synth-prompt.XXXXXX")
 REVIEW_STRUCTURED=$(mktemp -t "pr-${PR_NUMBER}-structured.XXXXXX")
 REVIEW_SUMMARY=$(mktemp -t "pr-${PR_NUMBER}-summary.XXXXXX")
@@ -1168,7 +1177,7 @@ cleanup() {
   local exit_code=$?
   [ -n "${_spinner_pid:-}" ] && kill "$_spinner_pid" 2>/dev/null && wait "$_spinner_pid" 2>/dev/null || true
   _spinner_pid=""
-  rm -f "${DIFF_FILE:-}" "${PROMPT_FILE:-}" "${CLAUDE_OUT:-}" "${CODEX_OUT:-}" "${GEMINI_OUT:-}" \
+  rm -f "${DIFF_FILE:-}" "${PROMPT_FILE:-}" "${CLAUDE_OUT:-}" "${CODEX_OUT:-}" "${GEMINI_OUT:-}" "${DIFFHOUND_USAGE_LOG:-}" \
         "${PEER_PROMPT_FILE:-}" "${_GEMINI_PROMPT_FILE:-}" "${SYNTH_PROMPT:-}" "${REVIEW_STRUCTURED:-}" "${REVIEW_SUMMARY:-}" \
         "${REVIEW_JSON:-}" "${REVIEW_STRUCTURED:-}.comments" "${REVIEW_STRUCTURED:-}.new_comments" \
         "${REVIEW_STRUCTURED:-}.replies" "${SYNTH_FINDINGS:-}" "${STYLE_PROMPT:-}" \
@@ -1360,6 +1369,7 @@ path/to/file.ts	CRITICAL	migration with schema change
 path/to/test.ts	LOW	test file"
 
   local triage_result=""
+  DIFFHOUND_STAGE="triage"
   triage_result=$(printf '%s' "$triage_prompt" | _call_api "claude-haiku-4-5-20251001" 2048 30 || true)
 
   if [ -n "$triage_result" ]; then
@@ -1434,6 +1444,7 @@ Output this exact structure:
 Be concise. This header is prepended to each review chunk for context."
 
   local summary_result
+  DIFFHOUND_STAGE="pr-summary"
   summary_result=$(printf '%s' "$summary_prompt" | _call_api "claude-haiku-4-5-20251001" 2048 30 || true)
 
   if [ -n "$summary_result" ]; then
@@ -1806,6 +1817,7 @@ _review_chunks_parallel() {
 
     # Launch API call in background (Opus 5 for thorough code review)
     (
+      DIFFHOUND_STAGE="primary-review"
       _call_api "claude-opus-5" 32000 600 high < "$chunk_prompt" > "$chunk_out" 2>&1 || \
         echo "CHUNK_${i}_FAILED" > "$chunk_out"
     ) &
@@ -1894,6 +1906,7 @@ Checklist: [verification steps]
 ### SCORECARD_END"
 
   local merge_result=""
+  DIFFHOUND_STAGE="chunk-merge"
   merge_result=$(printf '%s' "$merge_prompt" | _call_api "claude-haiku-4-5-20251001" 4096 60 || true)
 
   if [ -n "$merge_result" ]; then
@@ -3118,6 +3131,7 @@ _CLAUDE_TIMEOUT=$(( 180 + _PROMPT_BYTES / 300 ))
 [ "$_CLAUDE_TIMEOUT" -gt 900 ] && _CLAUDE_TIMEOUT=900
 [ "$_CLAUDE_TIMEOUT" -lt 180 ] && _CLAUDE_TIMEOUT=180
 echo "  [debug] prompt=${_PROMPT_BYTES}B, timeout=${_CLAUDE_TIMEOUT}s" >&2
+DIFFHOUND_STAGE="primary-review"
 if ! _call_api "claude-opus-5" 32000 "$_CLAUDE_TIMEOUT" high < "$PROMPT_FILE" > "$CLAUDE_OUT" 2>"${CLAUDE_OUT}.stderr"; then
   echo "  [debug] claude failed — out=$(wc -c < "$CLAUDE_OUT" 2>/dev/null)B stderr=$(cat "${CLAUDE_OUT}.stderr" 2>/dev/null | head -3)" >&2
   # Check if partial output is usable (timeout may kill mid-write but JSON is complete)
@@ -3554,6 +3568,7 @@ PEER_EOF
     echo ""
     cat "$PEER_PROMPT_FILE"
   } > "$_CLAUDE_PEER_PROMPT"
+  DIFFHOUND_STAGE="peer-review"
   ( _call_api "claude-sonnet-5" 8192 240 medium < "$_CLAUDE_PEER_PROMPT" > "$CODEX_OUT" 2>&1; \
     [ -s "$CODEX_OUT" ] || echo "CODEX_UNAVAILABLE" > "$CODEX_OUT" ) &
   CODEX_PID=$!
@@ -3608,12 +3623,14 @@ PEER_EOF
       _g_ec=$?
       if [ "$_g_ec" -ne 124 ] && _gemini_once; then
         echo "  note: gemini failed (exit ${_g_ec}) then succeeded on retry" >&2
+        echo "2" > "${GEMINI_OUT}.calls"
       else
         printf '%s' "$_g_ec" > "$_GEMINI_EXIT"
         echo "GEMINI_UNAVAILABLE" > "$GEMINI_OUT"
       fi
     fi ) &
   GEMINI_PID=$!
+  echo "1" > "${GEMINI_OUT}.calls"
 
   # Wait with 240s timeout — v0.7.7 bumped from 90s. Gemini-CLI does a chunk
   # of pre-flight setup on first call (auth refresh, model handshake) that
@@ -3770,6 +3787,7 @@ Evidence: \(.value.evidence // "none")
 
       # Cross-verification pass. v0.7.29: single backend, no duplicate curl.
       _verify_resp=""
+      DIFFHOUND_STAGE="cross-verify"
       _verify_resp=$(_call_api "claude-sonnet-5" 8192 180 medium < "$VERIFY_PROMPT" 2>/dev/null || true)
 
       # Parse verification results and filter findings
@@ -4572,6 +4590,7 @@ REREVIEW_BLOCK
 # whose result (_KEY_HAS_CREDITS) was never read by anything. Both are gone.
 _SYS_TMP=$(mktemp -t "pr-${PR_NUMBER}-sys.XXXXXX")
 printf '%s' "$_STATIC_SYSTEM" > "$_SYS_TMP"
+DIFFHOUND_STAGE="voice-rewrite"
 _call_api_system "claude-sonnet-5" 32000 300 "$_SYS_TMP" medium < "$_USER_TMP" > "$REVIEW_STRUCTURED" 2>/dev/null || true
 rm -f "$_SYS_TMP"
 # Empty output here means the voice pass failed outright; fall back to the raw
@@ -5274,6 +5293,22 @@ else
 fi
 
 # ============================================================
+# v0.7.35 (BX-3010): COST REPORT
+# ============================================================
+# Printed on EVERY run, posted or dry. Token counts come from each response's
+# own `usage` block, so they are measured, not estimated; only the USD rates are
+# local (lib/cost.sh). Set DIFFHOUND_NO_COST=1 to silence.
+if [ "${DIFFHOUND_NO_COST:-0}" != "1" ]; then
+  _GEMINI_CALLS=$(cat "${GEMINI_OUT}.calls" 2>/dev/null || echo 0)
+  echo ""
+  echo "──────────────────────────────────────────"
+  echo "  Cost — PR #${PR_NUMBER}$([ "${_RUN_PEER_REVIEW:-false}" = true ] && echo " (peer review ON)" || echo " (peer review OFF)")"
+  echo "──────────────────────────────────────────"
+  _cost_summary "$_GEMINI_CALLS"
+  echo "──────────────────────────────────────────"
+fi
+
+# ============================================================
 # v0.7.6 (BX-3010): RUN LOG ARCHIVE
 # ============================================================
 # Pre-fix: only 2 /tmp/pr-*-summary.* files survived after 7 days. Every
@@ -5297,6 +5332,8 @@ if [ "${DIFFHOUND_DISABLE_RUN_ARCHIVE:-0}" != "1" ]; then
     [ -f "${CLAUDE_OUT:-}" ]                        && cp "${CLAUDE_OUT}"                        "$_LOG_DIR/claude-raw-findings.txt" 2>/dev/null
     [ -f "${CODEX_OUT:-}" ]                         && cp "${CODEX_OUT}"                         "$_LOG_DIR/codex-output.txt" 2>/dev/null
     [ -f "${GEMINI_OUT:-}" ]                        && cp "${GEMINI_OUT}"                        "$_LOG_DIR/gemini-output.txt" 2>/dev/null
+    [ -f "${DIFFHOUND_USAGE_LOG:-}" ]               && cp "${DIFFHOUND_USAGE_LOG}"               "$_LOG_DIR/usage.tsv" 2>/dev/null
+    [ -f "${DIFFHOUND_USAGE_LOG:-}" ]               && _cost_summary "${_GEMINI_CALLS:-0}"       > "$_LOG_DIR/cost.txt" 2>/dev/null
     [ -f "${PEER_PROMPT_FILE:-}" ]                  && cp "${PEER_PROMPT_FILE}"                  "$_LOG_DIR/peer-prompt.txt" 2>/dev/null
     [ -f "${PROMPT_FILE:-}" ]                       && cp "${PROMPT_FILE}"                       "$_LOG_DIR/main-prompt.txt" 2>/dev/null
     [ -f "${_USER_TMP:-}" ]                         && cp "${_USER_TMP}"                         "$_LOG_DIR/voice-prompt.txt" 2>/dev/null
