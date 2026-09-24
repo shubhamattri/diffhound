@@ -36,6 +36,7 @@ source "${LIB_DIR}/jira.sh" 2>/dev/null || true  # for _extract_jira_ticket, _fe
 source "${LIB_DIR}/lint.sh" 2>/dev/null || true  # for _run_static_analysis
 source "${LIB_DIR}/peer-validate.sh"  # for _validate_peer_output
 source "${LIB_DIR}/cost.sh"           # for _cost_record / _cost_summary
+source "${LIB_DIR}/design.sh"         # for run_design_check (advisory UX review of UI PRs)
 
 # ── Model backend: direct Anthropic API on diffhound's own key ───────────────
 # v0.7.31 (BX-3010): reverts the v0.7.29 `claude -p` backend. That backend
@@ -201,6 +202,7 @@ REPO_ARG=""
 FORCE_MONOLITHIC=false
 FORCE_FULL=false
 IS_SYNCHRONIZE=false
+DESIGN_ONLY=false
 
 for _arg in "${@:2}"; do
   case "$_arg" in
@@ -210,6 +212,7 @@ for _arg in "${@:2}"; do
     --force-monolithic)   FORCE_MONOLITHIC=true ;;
     --force-full)         FORCE_FULL=true ;;
     --synchronize)        IS_SYNCHRONIZE=true ;;
+    --design-only)        DESIGN_ONLY=true ;;
     --repo=*)             REPO_ARG="${_arg#--repo=}" ;;
     --repo)               ;; # value captured by next iteration hack below
   esac
@@ -1214,6 +1217,38 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Advisory design check, run in a child process under a hard time cap so it can
+# never eat the review's CI budget or change its exit status.
+DESIGN_DIFF_FILE=""
+_run_design_check_capped() {
+  local mode="$1" diff_file="$2"
+  [ "${DIFFHOUND_DESIGN:-1}" = "0" ] && return 0
+  [ -s "$diff_file" ] || return 0
+  _TIMEOUT_CMD="$_TIMEOUT_CMD" _ANTHROPIC_API_URL="${_ANTHROPIC_API_URL:-}" ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
+  DIFFHOUND_USAGE_LOG="${DIFFHOUND_USAGE_LOG:-}" \
+    $_TIMEOUT_CMD "${DIFFHOUND_DESIGN_TIMEOUT:-240}" bash -c '
+      source "$DIFFHOUND_ROOT/lib/cost.sh" 2>/dev/null || true
+      source "$DIFFHOUND_ROOT/lib/design.sh"
+      run_design_check "$@"' _ \
+      "$REPO_OWNER" "$REPO_NAME" "$PR_NUMBER" "$PR_AUTHOR" "$REVIEWER_LOGIN" \
+      "$diff_file" "$mode" "$PR_TITLE" "$PR_BODY" "$JIRA_CONTEXT" \
+    || echo "  Design check: stopped (timeout or error), review unaffected" >&2
+  return 0
+}
+
+# --design-only: run just the advisory design check without a code review.
+# Posts only with --auto-post. Never exits non-zero, so the EXIT trap cannot
+# post a "review failed" comment for it.
+if [ "$DESIGN_ONLY" = true ]; then
+  if ! $_TIMEOUT_CMD 300 gh pr diff "$PR_NUMBER" > "$DIFF_FILE" 2>/dev/null; then
+    echo "  Design check: could not fetch the diff, skipped" >&2
+    exit 0
+  fi
+  _design_mode=print; [ "$AUTO_POST" = true ] && _design_mode=post
+  _run_design_check_capped "$_design_mode" "$DIFF_FILE"
+  exit 0
+fi
+
 # ============================================================
 # HYBRID LARGE DIFF STRATEGY — Functions (v2)
 # 4-tier router: SMALL (≤30KB) → MEDIUM (30-80KB) → LARGE (80-200KB) → HUGE (200KB+)
@@ -2142,6 +2177,9 @@ if ! $_TIMEOUT_CMD 300 gh pr diff "$PR_NUMBER" > "$DIFF_FILE" 2>&1; then
   exit 1
 fi
 _filter_diff_by_config "$DIFF_FILE"
+# Later steps compress DIFF_FILE in place; the design check needs the real one.
+DESIGN_DIFF_FILE=$(mktemp -t "pr-${PR_NUMBER}-design-diff.XXXXXX")
+cp "$DIFF_FILE" "$DESIGN_DIFF_FILE" 2>/dev/null || true
 DIFF_SIZE=$(wc -c < "$DIFF_FILE")
 if [ "$DIFF_SIZE" -gt 150000 ]; then
   spinner_stop "Diff fetched (large: ${DIFF_SIZE} bytes — focused review)"
@@ -5367,3 +5405,15 @@ if [ "${DIFFHOUND_DISABLE_RUN_ARCHIVE:-0}" != "1" ]; then
   # Purge logs older than 30 days. Quiet on failure.
   find "$HOME/.diffhound/logs" -mindepth 3 -maxdepth 3 -type d -mtime +30 -exec rm -rf {} + 2>/dev/null || true
 fi
+
+# Last step, after all review bookkeeping: the advisory design check. The CI
+# step allows 15 minutes; skip rather than risk a red job on a slow review.
+if [ "$AUTO_POST" = true ] && [ "${_POSTED_OK:-false}" = true ]; then
+  if [ "$SECONDS" -lt "${DIFFHOUND_DESIGN_START_BEFORE:-540}" ]; then
+    _run_design_check_capped post "${DESIGN_DIFF_FILE:-}"
+  else
+    echo "  Design check: skipped, review already took ${SECONDS}s" >&2
+  fi
+fi
+if [ -n "${DESIGN_DIFF_FILE:-}" ]; then rm -f "$DESIGN_DIFF_FILE"; fi
+exit 0
