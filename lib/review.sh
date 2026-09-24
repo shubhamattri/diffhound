@@ -36,6 +36,7 @@ source "${LIB_DIR}/jira.sh" 2>/dev/null || true  # for _extract_jira_ticket, _fe
 source "${LIB_DIR}/lint.sh" 2>/dev/null || true  # for _run_static_analysis
 source "${LIB_DIR}/peer-validate.sh"  # for _validate_peer_output
 source "${LIB_DIR}/cost.sh"           # for _cost_record / _cost_summary
+source "${LIB_DIR}/design.sh"         # for run_design_check (advisory UX review of UI PRs)
 
 # ── Model backend: direct Anthropic API on diffhound's own key ───────────────
 # v0.7.31 (BX-3010): reverts the v0.7.29 `claude -p` backend. That backend
@@ -201,6 +202,7 @@ REPO_ARG=""
 FORCE_MONOLITHIC=false
 FORCE_FULL=false
 IS_SYNCHRONIZE=false
+DESIGN_ONLY=false
 
 for _arg in "${@:2}"; do
   case "$_arg" in
@@ -210,6 +212,7 @@ for _arg in "${@:2}"; do
     --force-monolithic)   FORCE_MONOLITHIC=true ;;
     --force-full)         FORCE_FULL=true ;;
     --synchronize)        IS_SYNCHRONIZE=true ;;
+    --design-only)        DESIGN_ONLY=true ;;
     --repo=*)             REPO_ARG="${_arg#--repo=}" ;;
     --repo)               ;; # value captured by next iteration hack below
   esac
@@ -1213,6 +1216,19 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+
+# --design-only: run just the advisory design check (e.g. after the author adds
+# screenshots) without a code review. Posts only with --auto-post.
+if [ "$DESIGN_ONLY" = true ]; then
+  if ! $_TIMEOUT_CMD 300 gh pr diff "$PR_NUMBER" > "$DIFF_FILE" 2>/dev/null; then
+    echo "Error: failed to fetch diff for design check" >&2
+    exit 1
+  fi
+  _design_mode=print; [ "$AUTO_POST" = true ] && _design_mode=post
+  run_design_check "$REPO_OWNER" "$REPO_NAME" "$PR_NUMBER" "$PR_AUTHOR" "$REVIEWER_LOGIN" \
+    "$DIFF_FILE" "$_design_mode" "$PR_TITLE" "$PR_BODY" "$JIRA_CONTEXT"
+  exit 0
+fi
 
 # ============================================================
 # HYBRID LARGE DIFF STRATEGY — Functions (v2)
@@ -5222,6 +5238,13 @@ JSONEND
     else
       spinner_stop "Posted (${REVIEW_EVENT}, ${NEW_COMMENT_COUNT} inline)"
     fi
+  fi
+
+  # Advisory design check for PRs that change screens. Separate comment, never
+  # touches the score, and run_design_check swallows its own failures.
+  if [ "$_POSTED_OK" = true ]; then
+    run_design_check "$REPO_OWNER" "$REPO_NAME" "$PR_NUMBER" "$PR_AUTHOR" "$REVIEWER_LOGIN" \
+      "$DIFF_FILE" post "$PR_TITLE" "$PR_BODY" "$JIRA_CONTEXT" || true
   fi
 
   echo ""
