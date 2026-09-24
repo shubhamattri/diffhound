@@ -47,7 +47,7 @@ eq    "img: duplicates removed"        "$(printf '%s\n' "$URLS" | grep -c privat
 
 # ── Rendering ──
 JSON='{"user":"CX manager","job":"see which chats were rated badly","findings":[
- {"title":"17 bad ratings lead nowhere","severity":3,"where":"ClaroRatingCoverage.vue:22","what_happens":"The number is not clickable.","why":"Recognition over recall (the screen should hand you the next step).","fix":"Make the number open those chats."},
+ {"title":"17 bad ratings lead nowhere","severity":3,"where":"ClaroRatingCoverage.vue:22","what_happens":"The number is not clickable.","why":"Recognition over recall (the screen should hand you the next step).","fix":"Suggestion: Make the number open those chats."},
  {"title":"Colour","severity":0,"where":"x","what_happens":"y","why":"z","fix":"w"}],
  "cannot_check":["contrast"],"good":["Denominator shown beside every rate"]}'
 MD=$(_design_render "$JSON" 0)
@@ -55,7 +55,9 @@ has   "render: marker first"          "$(printf '%s' "$MD" | head -1)" "<!-- dif
 has   "render: finding title"         "$MD" "17 bad ratings lead nowhere"
 has   "render: severity label"        "$MD" "Major"
 has   "render: where"                 "$MD" "ClaroRatingCoverage.vue:22"
-has   "render: suggestion labelled"   "$MD" "Possible fix (suggestion)"
+has   "render: suggestion labelled"   "$MD" "Possible fix (suggestion):** Make the number"
+hasnt "render: no doubled suggestion" "$MD" "Suggestion: Make"
+has   "render: cannot-check as list"  "$MD" "- contrast"
 has   "render: code-only notice"      "$MD" "No screenshots"
 has   "render: cannot check"          "$MD" "contrast"
 has   "render: good"                  "$MD" "Denominator shown"

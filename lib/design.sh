@@ -118,10 +118,10 @@ _design_render() {
        "",
        (if ($f | length) == 0 then "No user-experience problems found in the changed screens." else empty end),
        ($f | to_entries[] |
-         "### \(.key + 1). \(.value.title) (\(.value.severity | sev))\n**Where:** \(.value.where)  \n**What happens:** \(.value.what_happens)  \n**Why it matters:** \(.value.why)  \n**Possible fix (suggestion):** \(.value.fix)\n"),
+         "### \(.key + 1). \(.value.title) (\(.value.severity | sev))\n**Where:** \(.value.where)  \n**What happens:** \(.value.what_happens)  \n**Why it matters:** \(.value.why)  \n**Possible fix (suggestion):** \(.value.fix | sub("^\\s*[Ss]uggestion:\\s*"; ""))\n"),
        (if ($taste | length) > 0 then "**Taste, not defects:** " + ([$taste[].title] | join("; ")) + "\n" else empty end),
-       (if ((.cannot_check // []) | length) > 0 then "**Could not check:** " + ((.cannot_check) | join("; ")) + "\n" else empty end),
-       (if ((.good // []) | length) > 0 then "**What works:** " + ((.good) | join("; ")) + "\n" else empty end),
+       (if ((.cannot_check // []) | length) > 0 then "**Could not check:**\n" + ((.cannot_check) | map("- " + .) | join("\n")) + "\n" else empty end),
+       (if ((.good // []) | length) > 0 then "**What works:**\n" + ((.good) | map("- " + .) | join("\n")) + "\n" else empty end),
        "<sub>Reply on this PR if a finding is wrong; it is advisory and never blocks merge.</sub>"
       ] | join("\n")'
 }

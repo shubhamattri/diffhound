@@ -31,6 +31,6 @@ RULES
 Return ONLY a JSON object, no prose around it:
 {"user": "who uses this screen", "job": "the one job they open it for",
  "findings": [{"title": "plain-language title", "severity": 0-4, "where": "file:line or Screenshot N",
-   "what_happens": "the user's experience", "why": "principle (half-line definition)", "fix": "suggestion"}],
+   "what_happens": "the user's experience", "why": "principle (half-line definition)", "fix": "the suggested change, without a Suggestion: prefix"}],
  "cannot_check": ["what you could not judge and why"],
  "good": ["what this change genuinely makes easier, if anything"]}
