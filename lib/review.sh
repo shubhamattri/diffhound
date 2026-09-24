@@ -70,6 +70,24 @@ _output_cfg() {
   jq -nc --arg e "$1" '{thinking: {type: "adaptive"}, output_config: {effort: $e}}'
 }
 
+# A response that spent every output token thinking has stop_reason max_tokens and
+# no text block. Returning 0 there posted content-free "merge ok" reviews (PR #347).
+# Usage: printf '%s' "$resp" | _api_text_status  -> prints text; exit 2 if truncated-empty
+_api_text_status() {
+  local _r _t
+  _r=$(cat)
+  _t=$(printf '%s' "$_r" | jq -r "$_TEXT_BLOCKS" 2>/dev/null || true)
+  printf '%s' "$_t"
+  if [ -z "${_t//[[:space:]]/}" ] && [ "$(printf '%s' "$_r" | jq -r '.stop_reason // empty' 2>/dev/null)" = "max_tokens" ]; then
+    return 2
+  fi
+  return 0
+}
+
+_lower_effort() {
+  case "${1:-}" in max|xhigh) echo high ;; high) echo medium ;; medium) echo low ;; *) echo "" ;; esac
+}
+
 # Usage: printf '%s' "$prompt" | _call_api MODEL [MAX_TOKENS] [TIMEOUT_SECS] [EFFORT]
 #        _call_api MODEL [MAX_TOKENS] [TIMEOUT_SECS] [EFFORT] < prompt_file
 _call_api() {
@@ -82,6 +100,7 @@ _call_api() {
   _api_pf=$(mktemp -t "api-prompt.XXXXXX")
   _api_jf=$(mktemp -t "api-json.XXXXXX")
   cat > "$_api_pf"
+  local _api_pf_keep; _api_pf_keep=$(mktemp -t "api-keep.XXXXXX"); cp "$_api_pf" "$_api_pf_keep"
 
   jq -n --arg model "$model" \
         --argjson max_tokens "$max_tokens" \
@@ -101,7 +120,19 @@ _call_api() {
   rm -f "$_api_jf"
 
   printf '%s' "$_api_r" | _cost_record "$model" "${DIFFHOUND_STAGE:-other}"
-  printf '%s' "$_api_r" | jq -r "$_TEXT_BLOCKS" 2>/dev/null || true
+  local _api_txt _api_rc=0
+  _api_txt=$(printf '%s' "$_api_r" | _api_text_status) || _api_rc=$?
+  if [ "$_api_rc" = 2 ]; then
+    local _lower; _lower=$(_lower_effort "$effort")
+    echo "  [diffhound] ${model} spent all ${max_tokens} output tokens thinking (stop_reason=max_tokens, no text)${_lower:+; retrying at effort ${_lower}}" >&2
+    if [ -n "$_lower" ] && [ "${_DIFFHOUND_EFFORT_RETRY:-0}" != 1 ]; then
+      _DIFFHOUND_EFFORT_RETRY=1 _call_api "$model" "$max_tokens" "$timeout_secs" "$_lower" < "$_api_pf_keep"
+      local _rc=$?; rm -f "$_api_pf_keep"; return $_rc
+    fi
+    rm -f "$_api_pf_keep"; return 1
+  fi
+  rm -f "$_api_pf_keep"
+  printf '%s' "$_api_txt"
 }
 
 # _call_api_system MODEL MAX_TOKENS TIMEOUT SYSTEM_FILE [EFFORT] < user_prompt
@@ -116,6 +147,7 @@ _call_api_system() {
   _api_pf=$(mktemp -t "api-prompt.XXXXXX")
   _api_jf=$(mktemp -t "api-json.XXXXXX")
   cat > "$_api_pf"
+  local _api_pf_keep; _api_pf_keep=$(mktemp -t "api-keep.XXXXXX"); cp "$_api_pf" "$_api_pf_keep"
 
   jq -n --arg model "$model" \
         --argjson max_tokens "$max_tokens" \
@@ -137,7 +169,19 @@ _call_api_system() {
   rm -f "$_api_jf"
 
   printf '%s' "$_api_r" | _cost_record "$model" "${DIFFHOUND_STAGE:-other}"
-  printf '%s' "$_api_r" | jq -r "$_TEXT_BLOCKS" 2>/dev/null || true
+  local _api_txt _api_rc=0
+  _api_txt=$(printf '%s' "$_api_r" | _api_text_status) || _api_rc=$?
+  if [ "$_api_rc" = 2 ]; then
+    local _lower; _lower=$(_lower_effort "$effort")
+    echo "  [diffhound] ${model} spent all ${max_tokens} output tokens thinking (stop_reason=max_tokens, no text)${_lower:+; retrying at effort ${_lower}}" >&2
+    if [ -n "$_lower" ] && [ "${_DIFFHOUND_EFFORT_RETRY:-0}" != 1 ]; then
+      _DIFFHOUND_EFFORT_RETRY=1 _call_api_system "$model" "$max_tokens" "$timeout_secs" "$system_file" "$_lower" < "$_api_pf_keep"
+      local _rc=$?; rm -f "$_api_pf_keep"; return $_rc
+    fi
+    rm -f "$_api_pf_keep"; return 1
+  fi
+  rm -f "$_api_pf_keep"
+  printf '%s' "$_api_txt"
 }
 
 # Proves the backend ANSWERS, not merely that a key is present. v0.7.30 exists
@@ -3183,7 +3227,7 @@ if ! _call_api "claude-opus-5" 32000 "$_CLAUDE_TIMEOUT" high < "$PROMPT_FILE" > 
     spinner_fail "Analysis timed out but output is usable — continuing"
   else
     spinner_fail "Primary pass failed — retrying"
-    if ! _call_api "claude-opus-5" 32000 480 high < "$PROMPT_FILE" > "$CLAUDE_OUT" 2>&1; then
+    if ! _call_api "claude-opus-5" 32000 480 medium < "$PROMPT_FILE" > "$CLAUDE_OUT" 2>&1; then
       _partial_json=$(_extract_json "$CLAUDE_OUT" 2>/dev/null || true)
       if [ -z "$_partial_json" ] || ! echo "$_partial_json" | jq -e '.findings' >/dev/null 2>&1; then
         spinner_fail "Analysis failed"
