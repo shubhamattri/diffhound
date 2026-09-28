@@ -46,8 +46,7 @@ _has_timing_safe_near() {
   [ "$start" -lt 1 ] && start=1
 
   # (a) Direct hit in the window
-  if awk -v s="$start" -v e="$end" 'NR>=s && NR<=e' "$path" \
-       | grep -qE "$TIMING_SAFE_RE"; then
+  if grep -qE "$TIMING_SAFE_RE" <<< "$(awk -v s="$start" -v e="$end" 'NR>=s && NR<=e' "$path")"; then
     return 0
   fi
 
@@ -60,8 +59,7 @@ _has_timing_safe_near() {
   while IFS='|' read -r mod fn; do
     [ -z "$mod" ] && continue
     # Is this function actually called/referenced in the flagged window?
-    if ! awk -v s="$start" -v e="$end" 'NR>=s && NR<=e' "$path" \
-         | grep -qE "\b$fn\b"; then
+    if ! grep -qE "\b$fn\b" <<< "$(awk -v s="$start" -v e="$end" 'NR>=s && NR<=e' "$path")"; then
       continue
     fi
     # Try to resolve the module to a file and scan it
@@ -118,7 +116,7 @@ while IFS= read -r line || [ -n "$line" ]; do
       ;;
     WHAT:*)
       block+="$line"$'\n'
-      if printf '%s' "$line" | grep -qiE 'timing[- ]?(attack|safe)|constant[- ]?time'; then
+      if grep -qiE 'timing[- ]?(attack|safe)|constant[- ]?time' <<< "$line"; then
         is_timing=1
       fi
       ;;

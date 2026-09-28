@@ -620,7 +620,7 @@ _learn_from_pr() {
       _r_body=$(echo "$_all_replies" | jq -r ".[$_ri].body")
       local _r_prefix="${_r_body:0:80}"
       local _is_bot=false
-      if [ -f "$_posted_cache" ] && jq -r '.comments[]' "$_posted_cache" 2>/dev/null | grep -qF "$_r_prefix" 2>/dev/null; then
+      if [ -f "$_posted_cache" ] && grep -qF "$_r_prefix" <<< "$(jq -r '.comments[]' "$_posted_cache" 2>/dev/null)" 2>/dev/null; then
         _is_bot=true
       fi
       # Also check response cache (previous AI replies)
@@ -749,7 +749,7 @@ _auto_resolve_replied_threads() {
     # Check if dev's reply matches resolution keywords (case-insensitive, first line)
     local first_line
     first_line=$(echo "$last_body" | head -1 | tr '[:upper:]' '[:lower:]')
-    if echo "$first_line" | grep -qiE "$_resolution_re"; then
+    if grep -qiE "$_resolution_re" <<< "$first_line"; then
       threads_to_resolve+=("$cid")
     fi
   done <<< "$reviewer_ids"
@@ -869,7 +869,7 @@ _respond_to_dev_replies() {
       continue
     fi
     # Anchored-signature fallback (cold-start before bootstrap, or cache loss).
-    if printf '%s' "$last_body" | head -1 | grep -qE "^${DIFFHOUND_SIG_PREFIX}"; then
+    if grep -qE "^${DIFFHOUND_SIG_PREFIX}" <<< "${last_body%%$'\n'*}"; then
       continue
     fi
 
@@ -1042,7 +1042,7 @@ _distill_false_positives() {
         --argjson parent "$matching_cid" --arg login "$REVIEWER_LOGIN" \
         '[.[] | select(.in_reply_to_id == $parent and .user == $login)] | .[].body' 2>/dev/null || true)
 
-      if [ -n "$reviewer_concession" ] && printf '%s' "$reviewer_concession" | grep -qiE "$concession_pattern"; then
+      if [ -n "$reviewer_concession" ] && grep -qiE "$concession_pattern" <<< "$reviewer_concession"; then
         reviewer_replied_concession=true
       fi
     fi
@@ -2463,16 +2463,16 @@ _FRAMEWORK_FACTS=""
 if [ -d "$REPO_PATH" ]; then
   _REQ_FILES=$(find "$REPO_PATH" -maxdepth 2 -name 'requirements*.txt' -o -name 'pyproject.toml' -o -name 'package.json' 2>/dev/null | head -5)
   _ALL_DEPS=$(cat "$_REQ_FILES" 2>/dev/null || true)
-  if echo "$_ALL_DEPS" | grep -qi 'sqlalchemy'; then
+  if grep -qi 'sqlalchemy' <<< "$_ALL_DEPS"; then
     _FRAMEWORK_FACTS="${_FRAMEWORK_FACTS}- SQLAlchemy: create_engine() is LAZY -- does NOT connect at import time. Only connects on first query.\n"
   fi
-  if echo "$_ALL_DEPS" | grep -qi 'httpx'; then
+  if grep -qi 'httpx' <<< "$_ALL_DEPS"; then
     _FRAMEWORK_FACTS="${_FRAMEWORK_FACTS}- httpx: AsyncClient must be explicitly closed or used with async with. NOT auto-closed.\n"
   fi
-  if echo "$_ALL_DEPS" | grep -qi 'nest.asyncio\|nest_asyncio'; then
+  if grep -qi 'nest.asyncio\|nest_asyncio' <<< "$_ALL_DEPS"; then
     _FRAMEWORK_FACTS="${_FRAMEWORK_FACTS}- nest_asyncio: when applied, run_until_complete() works inside already-running loops.\n"
   fi
-  if echo "$_ALL_DEPS" | grep -qi 'pgvector\|sqlmodel'; then
+  if grep -qi 'pgvector\|sqlmodel' <<< "$_ALL_DEPS"; then
     _FRAMEWORK_FACTS="${_FRAMEWORK_FACTS}- pgvector: Vector columns need HNSW or IVFFLAT indexes for production query performance.\n"
   fi
 fi
@@ -2487,7 +2487,7 @@ if [ -f "$_ARCH_PATTERNS_FILE" ]; then
   _ARCH_CHECKLIST=$(while IFS= read -r _pline; do
     _langs=$(echo "$_pline" | jq -r '.languages[]' 2>/dev/null)
     _match=false
-    for _l in $_langs; do echo "$_LANG_FILTER" | grep -q "$_l" && _match=true; done
+    for _l in $_langs; do grep -q "$_l" <<< "$_LANG_FILTER" && _match=true; done
     if [ "$_match" = true ]; then
       _sev=$(echo "$_pline" | jq -r '.severity' 2>/dev/null)
       _pat=$(echo "$_pline" | jq -r '.pattern' 2>/dev/null)
@@ -3479,11 +3479,11 @@ SCORECARD_JSON -->"
   if [ -f "$_prev_findings_file" ] && [ -n "$_json_check" ]; then
     _categorize_finding() {
       local body="$1"
-      if echo "$body" | grep -qiE 'token|secret|auth|password|credential|security|injection|XSS|SSRF'; then echo "security"
-      elif echo "$body" | grep -qiE 'test|mock|assertion|eval|coverage|fixture'; then echo "tests"
-      elif echo "$body" | grep -qiE 'log|metric|trace|monitor|observability'; then echo "observability"
-      elif echo "$body" | grep -qiE 'N\+1|performance|latency|timeout|cache|index'; then echo "performance"
-      elif echo "$body" | grep -qiE 'migration|backward|compatibility|breaking|API'; then echo "compatibility"
+      if grep -qiE 'token|secret|auth|password|credential|security|injection|XSS|SSRF' <<< "$body"; then echo "security"
+      elif grep -qiE 'test|mock|assertion|eval|coverage|fixture' <<< "$body"; then echo "tests"
+      elif grep -qiE 'log|metric|trace|monitor|observability' <<< "$body"; then echo "observability"
+      elif grep -qiE 'N\+1|performance|latency|timeout|cache|index' <<< "$body"; then echo "performance"
+      elif grep -qiE 'migration|backward|compatibility|breaking|API' <<< "$body"; then echo "compatibility"
       else echo "readability"; fi
     }
     for _cat in security tests observability performance readability compatibility; do
@@ -4941,7 +4941,7 @@ if [ -f "$_BLOCKLIST_FILE" ] && [ -s "${REVIEW_STRUCTURED}.comments" ]; then
       _all_match=true
       while IFS= read -r _kw; do
         [ -z "$_kw" ] && continue
-        if ! echo "$_cline" | grep -qi "$_kw"; then
+        if ! grep -qi "$_kw" <<< "$_cline"; then
           _all_match=false
           break
         fi
@@ -5289,11 +5289,11 @@ if [ "$POST_REVIEW" = true ]; then
     # Extract table lines (| rows) and everything else
     _in_table=false
     while IFS= read -r _line; do
-      if echo "$_line" | grep -qE '^\| (Category|Severity)'; then
+      if grep -qE '^\| (Category|Severity)' <<< "$_line"; then
         _in_table=true
       fi
       if [ "$_in_table" = true ]; then
-        if echo "$_line" | grep -q '^|'; then
+        if grep -q '^|' <<< "$_line"; then
           echo "$_line" >> "$_table_tmp"
         else
           _in_table=false
@@ -5456,7 +5456,7 @@ JSONEND
     _sug_extracted=0
     while IFS= read -r _sline; do
       _suggestion=""
-      if echo "$_sline" | grep -qiE '(you should|change .+ to|use .+ instead|replace .+ with|add .+ to|remove .+ from)'; then
+      if grep -qiE '(you should|change .+ to|use .+ instead|replace .+ with|add .+ to|remove .+ from)' <<< "$_sline"; then
         _suggestion=$(echo "$_sline" | grep -oiE '(you should|change|use|replace|add|remove) [^.]{10,80}' | head -1)
       fi
       [ -z "$_suggestion" ] && continue
@@ -5491,7 +5491,7 @@ JSONEND
     [ -z "$_cached_pr" ] && continue
     [ "$_cached_pr" = "$PR_NUMBER" ] && continue  # skip current (just posted)
     # Only process caches older than 1 hour (give human time to review on GitHub)
-    find "$_cache_file" -mmin +60 -print 2>/dev/null | grep -q . || continue
+    [ -n "$(find "$_cache_file" -mmin +60 -print 2>/dev/null)" ] || continue
     _learn_from_pr "$_cached_pr" >/dev/null 2>&1 && _LEARNED_TOTAL=$((_LEARNED_TOTAL + 1)) || true
   done
   [ "$_LEARNED_TOTAL" -gt 0 ] && echo "  📚 Auto-learned from $_LEARNED_TOTAL previous review(s)"

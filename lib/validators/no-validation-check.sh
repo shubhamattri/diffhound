@@ -84,7 +84,7 @@ _count_tells() {
     'RegExp\s*\(' \
     '/.*[\\^$|+*?].*/.test' \
     'typeof\s+[A-Za-z_][A-Za-z0-9_]*\s*===\s*[\"'\'']('; do
-    if printf '%s' "$body" | grep -qE -- "$pat"; then
+    if grep -qE -- "$pat" <<< "$body"; then
       strong=$((strong + 1))
     fi
   done
@@ -94,7 +94,7 @@ _count_tells() {
     'throw\s+new' \
     'validate\s*\(' \
     'assert\s*\('; do
-    if printf '%s' "$body" | grep -qE -- "$pat"; then
+    if grep -qE -- "$pat" <<< "$body"; then
       weak=$((weak + 1))
     fi
   done
@@ -170,7 +170,7 @@ _check_and_emit() {
   if [ -z "$block" ]; then return; fi
 
   # Trigger phrase check (case-insensitive).
-  if ! printf '%s' "$what" | grep -qiE 'no[[:space:]]+(format[[:space:]]+)?validation|no[[:space:]]+\w+[[:space:]]+check|missing[[:space:]]+validation|no[[:space:]]+format[[:space:]]+check|without[[:space:]]+(any[[:space:]]+)?validation'; then
+  if ! grep -qiE 'no[[:space:]]+(format[[:space:]]+)?validation|no[[:space:]]+\w+[[:space:]]+check|missing[[:space:]]+validation|no[[:space:]]+format[[:space:]]+check|without[[:space:]]+(any[[:space:]]+)?validation' <<< "$what"; then
     _emit; block=""; what=""; header_prefix=""; header_file=""; return
   fi
 

@@ -162,7 +162,7 @@ _is_policy_file() {
   local full="$1"
   [ -f "$full" ] || return 1
   local rel="${full#$DIFFHOUND_REPO/}"
-  if printf '%s' "$rel" | grep -qE -- "$POLICY_PATH_RE"; then
+  if grep -qE -- "$POLICY_PATH_RE" <<< "$rel"; then
     return 0
   fi
   if grep -qE -- "$POLICY_CONTENT_RE" "$full" 2>/dev/null; then
@@ -192,13 +192,13 @@ _affected_feature_dir() {
   local rel="$1"
   local dir
   # services/api/src/<feature> case
-  if printf '%s' "$rel" | grep -qE '^services/api/src/[A-Za-z0-9_\-]+/'; then
+  if grep -qE '^services/api/src/[A-Za-z0-9_\-]+/' <<< "$rel"; then
     dir=$(printf '%s' "$rel" | sed -E 's|^(services/api/src/[A-Za-z0-9_\-]+)/.*|\1|')
     printf '%s\n' "$dir"
     return
   fi
   # services/portal/src/.../<feature-keyword>/... → twin under api
-  if printf '%s' "$rel" | grep -qE '^services/portal/src/'; then
+  if grep -qE '^services/portal/src/' <<< "$rel"; then
     # Try every path segment after "src/" as a candidate feature name and
     # see if services/api/src/<seg> exists.
     local IFS='/'
@@ -255,23 +255,23 @@ _check_and_emit() {
   if [ -z "$block" ]; then return; fi
 
   # Absence-wording exemption.
-  if printf '%s' "$what" | grep -qiE -- "$ABSENCE_WORDS"; then
+  if grep -qiE -- "$ABSENCE_WORDS" <<< "$what"; then
     _emit_block; block=""; what=""; finding_path=""; header_prefix=""; reachable_path_raw=""; return
   fi
 
   # Need at least one enforcement-firing phrase.
   local has_trigger=0
-  if printf '%s' "$what" | grep -qiE -- "$ENFORCE_WORDS_1" \
-   || printf '%s' "$what" | grep -qiE -- "$ENFORCE_WORDS_2" \
-   || printf '%s' "$what" | grep -qiE -- "$ENFORCE_WORDS_3" \
-   || printf '%s' "$what" | grep -qiE -- "$ENFORCE_WORDS_4" \
-   || printf '%s' "$what" | grep -qiE -- "$ENFORCE_WORDS_5" \
-   || printf '%s' "$what" | grep -qiE -- "$ENFORCE_WORDS_6" \
-   || printf '%s' "$what" | grep -qE  -- "$ENFORCE_WORDS_7" \
-   || printf '%s' "$what" | grep -qiE -- "$ENFORCE_WORDS_8" \
-   || printf '%s' "$what" | grep -qiE -- "$ENFORCE_WORDS_9" \
-   || printf '%s' "$what" | grep -qiE -- "$ENFORCE_WORDS_10" \
-   || printf '%s' "$what" | grep -qiE -- "$ENFORCE_WORDS_11"; then
+  if grep -qiE -- "$ENFORCE_WORDS_1" <<< "$what" \
+   || grep -qiE -- "$ENFORCE_WORDS_2" <<< "$what" \
+   || grep -qiE -- "$ENFORCE_WORDS_3" <<< "$what" \
+   || grep -qiE -- "$ENFORCE_WORDS_4" <<< "$what" \
+   || grep -qiE -- "$ENFORCE_WORDS_5" <<< "$what" \
+   || grep -qiE -- "$ENFORCE_WORDS_6" <<< "$what" \
+   || grep -qE -- "$ENFORCE_WORDS_7" <<< "$what" \
+   || grep -qiE -- "$ENFORCE_WORDS_8" <<< "$what" \
+   || grep -qiE -- "$ENFORCE_WORDS_9" <<< "$what" \
+   || grep -qiE -- "$ENFORCE_WORDS_10" <<< "$what" \
+   || grep -qiE -- "$ENFORCE_WORDS_11" <<< "$what"; then
     has_trigger=1
   fi
   if [ "$has_trigger" -eq 0 ]; then

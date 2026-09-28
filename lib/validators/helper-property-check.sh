@@ -143,8 +143,8 @@ _extract_candidates() {
     | while IFS= read -r id; do
         [ -z "$id" ] && continue
         [ "${#id}" -lt 4 ] && continue
-        if printf '%s' "$id" | grep -qE -- "$HELPER_PREFIX_RE" \
-           || printf '%s' "$id" | grep -qE -- "$HELPER_SUFFIX_RE"; then
+        if grep -qE -- "$HELPER_PREFIX_RE" <<< "$id" \
+           || grep -qE -- "$HELPER_SUFFIX_RE" <<< "$id"; then
           printf '%s\n' "$id"
         fi
       done
@@ -176,23 +176,23 @@ _check_and_emit() {
   if [ -z "$block" ]; then return; fi
 
   # Absence-wording exemption.
-  if printf '%s' "$what" | grep -qiE -- "$ABSENCE_WORDS"; then
+  if grep -qiE -- "$ABSENCE_WORDS" <<< "$what"; then
     _emit_block; _reset; return
   fi
 
   # Detect which claim families fire.
   local is_timeout_claim=0 is_cache_claim=0
-  if printf '%s' "$what" | grep -qiE -- "$TIMEOUT_WORDS_1" \
-   || printf '%s' "$what" | grep -qiE -- "$TIMEOUT_WORDS_2" \
-   || printf '%s' "$what" | grep -qiE -- "$TIMEOUT_WORDS_3" \
-   || printf '%s' "$what" | grep -qiE -- "$TIMEOUT_WORDS_4"; then
+  if grep -qiE -- "$TIMEOUT_WORDS_1" <<< "$what" \
+   || grep -qiE -- "$TIMEOUT_WORDS_2" <<< "$what" \
+   || grep -qiE -- "$TIMEOUT_WORDS_3" <<< "$what" \
+   || grep -qiE -- "$TIMEOUT_WORDS_4" <<< "$what"; then
     is_timeout_claim=1
   fi
-  if printf '%s' "$what" | grep -qiE -- "$CACHE_WORDS_1" \
-   || printf '%s' "$what" | grep -qiE -- "$CACHE_WORDS_2" \
-   || printf '%s' "$what" | grep -qiE -- "$CACHE_WORDS_3" \
-   || printf '%s' "$what" | grep -qiE -- "$CACHE_WORDS_4" \
-   || printf '%s' "$what" | grep -qiE -- "$CACHE_WORDS_5"; then
+  if grep -qiE -- "$CACHE_WORDS_1" <<< "$what" \
+   || grep -qiE -- "$CACHE_WORDS_2" <<< "$what" \
+   || grep -qiE -- "$CACHE_WORDS_3" <<< "$what" \
+   || grep -qiE -- "$CACHE_WORDS_4" <<< "$what" \
+   || grep -qiE -- "$CACHE_WORDS_5" <<< "$what"; then
     is_cache_claim=1
   fi
   if [ "$is_timeout_claim" -eq 0 ] && [ "$is_cache_claim" -eq 0 ]; then
@@ -225,12 +225,12 @@ _check_and_emit() {
     body=$(_def_body "$file" "$line" 80)
 
     if [ "$is_timeout_claim" -eq 1 ]; then
-      if printf '%s' "$body" | grep -qE -- "$TIMEOUT_PROP_RE"; then
+      if grep -qE -- "$TIMEOUT_PROP_RE" <<< "$body"; then
         rm -f "$cands_tmp"
         _drop_block "helper $id at ${file#$DIFFHOUND_REPO/}:$line sets a timeout/signal in its body"
         _reset; return
       fi
-      if printf '%s' "$id" | grep -qE -- "$TIMEOUT_NAME_RE"; then
+      if grep -qE -- "$TIMEOUT_NAME_RE" <<< "$id"; then
         rm -f "$cands_tmp"
         _drop_block "helper $id name itself signals timeout property"
         _reset; return
@@ -238,12 +238,12 @@ _check_and_emit() {
     fi
 
     if [ "$is_cache_claim" -eq 1 ]; then
-      if printf '%s' "$body" | grep -qE -- "$CACHE_PROP_RE"; then
+      if grep -qE -- "$CACHE_PROP_RE" <<< "$body"; then
         rm -f "$cands_tmp"
         _drop_block "helper $id at ${file#$DIFFHOUND_REPO/}:$line shows caching in its body"
         _reset; return
       fi
-      if printf '%s' "$id" | grep -qE -- "$CACHE_NAME_RE"; then
+      if grep -qE -- "$CACHE_NAME_RE" <<< "$id"; then
         rm -f "$cands_tmp"
         _drop_block "helper $id name itself signals caching"
         _reset; return

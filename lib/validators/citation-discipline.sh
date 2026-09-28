@@ -135,7 +135,7 @@ _check_unverifiable_toolrun() {
     "ran (a |the )?(grep|search|find)[^.]*(across|over|on)[^.]*(and got|and found)" \
     "got (zero|no|0) (hits|matches|results) (when|after) (i|searching|grep)" \
     "(grep|search) (across|over|on) [^.]+ (returned|got|gave) (zero|no|0)"; do
-    if printf '%s' "$txt" | grep -qiE -- "$pat"; then
+    if grep -qiE -- "$pat" <<< "$txt"; then
       has_unverifiable_toolrun=1
       local snippet
       snippet=$(printf '%s' "$txt" | grep -oiE -- "$pat" | head -1 | cut -c1-80)

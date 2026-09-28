@@ -86,10 +86,10 @@ _drop_block() {
 # Match any of the 4 IDOR-wording alternatives.
 _has_idor_wording() {
   local text="$1"
-  printf '%s' "$text" | grep -qiE -- "$IDOR_WORDS_1" && return 0
-  printf '%s' "$text" | grep -qiE -- "$IDOR_WORDS_2" && return 0
-  printf '%s' "$text" | grep -qiE -- "$IDOR_WORDS_3" && return 0
-  printf '%s' "$text" | grep -qiE -- "$IDOR_WORDS_4" && return 0
+  grep -qiE -- "$IDOR_WORDS_1" <<< "$text" && return 0
+  grep -qiE -- "$IDOR_WORDS_2" <<< "$text" && return 0
+  grep -qiE -- "$IDOR_WORDS_3" <<< "$text" && return 0
+  grep -qiE -- "$IDOR_WORDS_4" <<< "$text" && return 0
   return 1
 }
 
@@ -104,7 +104,7 @@ _check_and_emit() {
 
   # Absence-wording exemption — finding might be about an auth gate that was
   # removed by THIS PR. Don't drop.
-  if printf '%s' "$what" | grep -qiE -- "$ABSENCE_WORDS"; then
+  if grep -qiE -- "$ABSENCE_WORDS" <<< "$what"; then
     _emit_block; block=""; what=""; header_prefix=""; finding_path=""; return
   fi
 

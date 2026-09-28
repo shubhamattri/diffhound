@@ -36,8 +36,8 @@ _emit() {
 
   if [ -n "$header_file" ] && [ -n "$header_line" ] \
      && [ "$header_sev" != "OPEN_QUESTION" ] \
-     && printf '%s' "$block" | grep -qiE "$CONCURRENCY_KW_RE" \
-     && ! printf '%s' "$block" | grep -qiE "$MULTIPROCESS_RE"; then
+     && grep -qiE "$CONCURRENCY_KW_RE" <<< "$block" \
+     && ! grep -qiE "$MULTIPROCESS_RE" <<< "$block"; then
     local path="$DIFFHOUND_REPO/$header_file"
     if [ -f "$path" ]; then
       if _is_inside_transaction "$path" "$header_line"; then
@@ -120,8 +120,7 @@ _has_safe_primitive_near() {
   local start=$((anchor - WINDOW))
   local end=$((anchor + WINDOW))
   [ "$start" -lt 1 ] && start=1
-  awk -v s="$start" -v e="$end" 'NR>=s && NR<=e' "$path" \
-    | grep -qiE "$SAFE_PRIMITIVES_RE"
+  grep -qiE "$SAFE_PRIMITIVES_RE" <<< "$(awk -v s="$start" -v e="$end" 'NR>=s && NR<=e' "$path")"
 }
 
 while IFS= read -r line || [ -n "$line" ]; do

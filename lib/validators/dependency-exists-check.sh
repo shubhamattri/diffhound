@@ -36,7 +36,7 @@ block=""
 _flush() {
   [ -z "$block" ] && return 0
   # Only consider blocks that actually assert absence.
-  if printf '%s' "$block" | grep -qiE "$ABSENCE_RE"; then
+  if grep -qiE "$ABSENCE_RE" <<< "$block"; then
     # Backticked identifiers that look like npm package names (incl. @scope/name).
     local tok present=""
     while IFS= read -r tok; do

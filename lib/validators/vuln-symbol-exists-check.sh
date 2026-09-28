@@ -32,7 +32,7 @@ _defined_anywhere() {
 block=""
 _flush() {
   [ -z "$block" ] && return 0
-  if printf '%s' "$block" | grep -qiE "$VULN_RE"; then
+  if grep -qiE "$VULN_RE" <<< "$block"; then
     # Subject = a backticked symbol sitting just before the vuln wording.
     local subj
     subj=$(printf '%s' "$block" \

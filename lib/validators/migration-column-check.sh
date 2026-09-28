@@ -66,7 +66,7 @@ _check_and_emit() {
   # appear in the rollback (down()) and other context, not as a live
   # definition. Don't drop. Mirrors ref-exists.sh's ABSENCE_WORDS exemption.
   local ABSENCE_WORDS='deleted|removed|dropped|drops the|drop the|after .* drops|removes the|no longer (defined|present|exists)|was renamed|has been (deleted|removed|renamed|dropped)'
-  if printf '%s' "$what" | grep -qiE -- "$ABSENCE_WORDS"; then
+  if grep -qiE -- "$ABSENCE_WORDS" <<< "$what"; then
     _emit_block; block=""; what=""; header_prefix=""; return
   fi
 

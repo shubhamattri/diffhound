@@ -62,13 +62,13 @@ _check_symbol_present() {
 
   # Skip well-known framework names — they're "always present" and trying
   # to ground them produces noise.
-  if printf '%s' "$s" | grep -qE -- "$SKIPLIST"; then
+  if grep -qE -- "$SKIPLIST" <<< "$s"; then
     return 0
   fi
 
   local primary="$DIFFHOUND_REPO/$header_file"
   if [ -f "$primary" ]; then
-    if grep -v -E '^[[:space:]]*(#|//|\*)' "$primary" | grep -Fq -- "$s"; then
+    if grep -Fq -- "$s" <<< "$(grep -v -E '^[[:space:]]*(#|//|\*)' "$primary")"; then
       return 0
     fi
     # Sibling-dir search — same comment-stripping as primary, applied to
@@ -82,7 +82,7 @@ _check_symbol_present() {
       local sibfile
       while IFS= read -r -d '' sibfile; do
         [ "$sibfile" = "$primary" ] && continue
-        if grep -v -E '^[[:space:]]*(#|//|\*)' "$sibfile" 2>/dev/null | grep -Fq -- "$s"; then
+        if grep -Fq -- "$s" <<< "$(grep -v -E '^[[:space:]]*(#|//|\*)' "$sibfile" 2>/dev/null)"; then
           return 0
         fi
       done < <(find "$sibdir" -maxdepth 1 -type f \
@@ -98,7 +98,7 @@ _check_symbol_present() {
 # a repo-wide grep because the definition usually lives in a different file.
 _symbol_defined_anywhere() {
   local s="$1"
-  printf '%s' "$s" | grep -qE -- "$SKIPLIST" && return 1
+  grep -qE -- "$SKIPLIST" <<< "$s" && return 1
   grep -rqE "(export[[:space:]]+(const|default|function|class)|const|let|var|function|class|def)[[:space:]]+${s}([[:space:]]|=|\(|:|<)|^[[:space:]]*${s}[[:space:]]*[:=]" \
     "$DIFFHOUND_REPO" \
     --include='*.ts' --include='*.tsx' --include='*.js' --include='*.jsx' --include='*.vue' --include='*.py' \
@@ -119,7 +119,7 @@ _classify_and_flush() {
   # ("doesn't exist anywhere", "the only exports are…") but the symbol IS
   # defined somewhere in the repo, it's a hallucination. Runs BEFORE the
   # deletion-absence exemption below (deletion claims use different wording).
-  if printf '%s' "$what_line" | grep -qiE "$FALSE_ABSENCE_WORDS"; then
+  if grep -qiE "$FALSE_ABSENCE_WORDS" <<< "$what_line"; then
     local fa_sym fa_present=""
     for fa_sym in $all_syms; do
       [ -z "$fa_sym" ] && continue
@@ -136,14 +136,14 @@ _classify_and_flush() {
   # Gemini-mitigation: if absence-wording is present, this is a finding
   # ABOUT something being missing. Symbol-not-found is the finding, not a
   # hallucination. Skip the drop logic entirely.
-  if printf '%s' "$what_line" | grep -qiE "$ABSENCE_WORDS"; then
+  if grep -qiE "$ABSENCE_WORDS" <<< "$what_line"; then
     printf '%s' "$block"
     block=""; what_line=""; header_file=""; sym=""; all_syms=""
     return
   fi
 
   local has_existence_wording=0
-  if printf '%s' "$what_line" | grep -qiE "$EXISTENCE_WORDS"; then
+  if grep -qiE "$EXISTENCE_WORDS" <<< "$what_line"; then
     has_existence_wording=1
   fi
 

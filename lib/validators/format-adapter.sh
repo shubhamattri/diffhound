@@ -26,9 +26,9 @@ _extract_inline_json() {
   # Pull the JSON inside a ```json ... ``` fence, or return whole body if it
   # looks like JSON, else empty.
   local body="$1"
-  if printf '%s' "$body" | grep -q '^```json'; then
+  if grep -q '^```json' <<< "$body"; then
     printf '%s' "$body" | awk '/^```json/{f=1; next} /^```/{f=0} f'
-  elif printf '%s' "$body" | head -1 | grep -qE '^[[:space:]]*\{'; then
+  elif grep -qE '^[[:space:]]*\{' <<< "${body%%$'\n'*}"; then
     printf '%s' "$body"
   fi
 }
@@ -39,7 +39,9 @@ _json=$(_extract_inline_json "$INPUT")
 # EVIDENCE is not the review's output format (#7642: a quoted {"findings": []}
 # replaced 27 FINDING blocks with an empty JSON document).
 _has_finding_blocks=false
-printf '%s' "$INPUT" | grep -qE '^[[:space:]]*FINDING:' && _has_finding_blocks=true
+# Here-strings, not pipes: with pipefail, `printf "$INPUT" | grep -q` fails
+# when grep exits before printf finishes writing a large input.
+grep -qE '^[[:space:]]*FINDING:' <<< "$INPUT" && _has_finding_blocks=true
 
 if [ "$_has_finding_blocks" = false ] && [ -n "$_json" ] && printf '%s' "$_json" | jq -e '.findings' >/dev/null 2>&1; then
   # JSON path: extract findings → FINDING: blocks → validators → re-merge
@@ -108,7 +110,7 @@ if [ "$_has_finding_blocks" = false ] && [ -n "$_json" ] && printf '%s' "$_json"
   ')
 
   # Re-emit in the original format (fenced vs raw)
-  if printf '%s' "$INPUT" | grep -q '^```json'; then
+  if grep -q '^```json' <<< "$INPUT"; then
     printf '```json\n%s\n```\n' "$_new_json"
   else
     printf '%s\n' "$_new_json"
@@ -121,7 +123,7 @@ fi
 # wrapped in ### FINDINGS_START / ### FINDINGS_END markers.
 # Normalize whitespace-prefixed keywords to column 0 before piping so validators
 # can match the ^FINDING: / ^WHAT: / ^EVIDENCE: anchors they expect.
-if printf '%s' "$INPUT" | grep -qE '^\s*FINDING:|^### FINDINGS_START'; then
+if grep -qE '^\s*FINDING:|^### FINDINGS_START' <<< "$INPUT"; then
   printf '%s' "$INPUT" \
     | sed -E 's/^[[:space:]]+(FINDING:|WHAT:|EVIDENCE:|IMPACT:|OPTIONS:|UNVERIFIABLE:)/\1/' \
     | "$VALIDATORS_RUN"
