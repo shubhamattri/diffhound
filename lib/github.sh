@@ -271,19 +271,19 @@ index_voice_comments() {
     [ "${#comment_text}" -lt 50 ] && continue
 
     local cat subcat
-    if echo "$comment_text" | grep -qi "token\|secret\|auth\|password\|credential\|security"; then
+    if grep -qi "token\|secret\|auth\|password\|credential\|security" <<< "$comment_text"; then
       cat="security"; subcat="auto-detected"
-    elif echo "$comment_text" | grep -qi "prod\|null.*column\|wrong.*column\|meta->"; then
+    elif grep -qi "prod\|null.*column\|wrong.*column\|meta->" <<< "$comment_text"; then
       cat="data-bug"; subcat="auto-detected"
-    elif echo "$comment_text" | grep -qi "sibling\|same.*file\|same.*pattern\|lateral"; then
+    elif grep -qi "sibling\|same.*file\|same.*pattern\|lateral" <<< "$comment_text"; then
       cat="pattern-propagation"; subcat="auto-detected"
-    elif echo "$comment_text" | grep -qi "consist\|also has\|same pattern"; then
+    elif grep -qi "consist\|also has\|same pattern" <<< "$comment_text"; then
       cat="consistency"; subcat="auto-detected"
-    elif echo "$comment_text" | grep -qi "assuming.*intentional\|intent\|comment.*why"; then
+    elif grep -qi "assuming.*intentional\|intent\|comment.*why" <<< "$comment_text"; then
       cat="intent-check"; subcat="auto-detected"
-    elif echo "$comment_text" | grep -qi "test\|mock\|coverage"; then
+    elif grep -qi "test\|mock\|coverage" <<< "$comment_text"; then
       cat="test-gap"; subcat="auto-detected"
-    elif echo "$comment_text" | grep -qi "nit\|ignore\|actually.*fine"; then
+    elif grep -qi "nit\|ignore\|actually.*fine" <<< "$comment_text"; then
       cat="nit"; subcat="auto-detected"
     else
       cat="general"; subcat="auto-detected"
