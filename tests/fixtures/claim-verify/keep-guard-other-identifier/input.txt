@@ -1,0 +1,3 @@
+FINDING: services/api/src/processors/zohoCrmProductWebhook.ts:11:SHOULD-FIX
+WHAT: unguarded `payload.productId`/`productStage` in the catch path can throw a TypeError inside reportFailureToSlack and replace the real error.
+UNVERIFIABLE: no
