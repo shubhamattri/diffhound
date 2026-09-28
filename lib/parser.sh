@@ -212,7 +212,7 @@ _rereview_verdict_capped() {
 _api_empty_is_failure() { [ -n "${1//[[:space:]]/}" ]; }
 
 # Chunk indices (space-separated) whose review output is missing, empty, a
-# failure marker, or has no FINDINGS block. A chunk that reviewed its files and
+# failure marker, cut off at max_tokens, or has no FINDINGS block. A chunk that reviewed its files and
 # found nothing still emits an empty FINDINGS block, so a missing block means
 # the files were not reviewed.  Args: $1 chunk dir  $2 count
 _chunk_coverage_gaps() {
@@ -220,12 +220,18 @@ _chunk_coverage_gaps() {
   for ((i=0; i<count; i++)); do
     [ -s "${dir}/chunk-${i}.diff" ] || continue
     if [ ! -s "${dir}/chunk-${i}.out" ] \
+       || [ "$(cat "${dir}/chunk-${i}.stop" 2>/dev/null)" = "max_tokens" ] \
        || grep -qE '^CHUNK_[0-9]+_FAILED' "${dir}/chunk-${i}.out" \
        || ! _normalize_finding_markup < "${dir}/chunk-${i}.out" | grep -qE 'FINDINGS_START|^FINDING: '; then
       out="${out:+$out }$i"
     fi
   done
   printf '%s' "$out"
+}
+
+# Banner for a review some of whose files were not reviewed.  Args: $1 files
+_coverage_banner() {
+  echo "> ⚠️ **Incomplete review.** These files got no complete review this run (the model returned nothing usable, or was cut off): ${1:-unknown}. Findings below cover the other files only; this is not a clean bill for the files listed."
 }
 
 # Why this review must not be posted, or nothing if it may be.

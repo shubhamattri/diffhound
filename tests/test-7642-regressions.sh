@@ -21,11 +21,11 @@ eq() { # name, got, want
   else FAIL=$((FAIL+1)); FAILED+=("$1"); echo "FAIL $1 — got [$2] want [$3]"; fi
 }
 has() { # name, haystack, needle
-  if printf '%s' "$2" | grep -qF -- "$3"; then PASS=$((PASS+1)); echo "ok   $1"
+  if grep -qF -- "$3" <<< "$2"; then PASS=$((PASS+1)); echo "ok   $1"
   else FAIL=$((FAIL+1)); FAILED+=("$1"); echo "FAIL $1 — missing: $3"; fi
 }
 lacks() { # name, haystack, needle
-  if printf '%s' "$2" | grep -qF -- "$3"; then FAIL=$((FAIL+1)); FAILED+=("$1"); echo "FAIL $1 — unexpected: $3"
+  if grep -qF -- "$3" <<< "$2"; then FAIL=$((FAIL+1)); FAILED+=("$1"); echo "FAIL $1 — unexpected: $3"
   else PASS=$((PASS+1)); echo "ok   $1"; fi
 }
 
@@ -240,6 +240,41 @@ has "api: _call_api_system fails on empty text" "$(sed -n '/^_call_api_system() 
 rd=$(printf 'FINDING: a.ts:1:NIT\nWHAT: new thing\n' > "$TMP/cur.txt"; printf 'FINDING: b.ts:2:BLOCKING\nWHAT: `requireEnabled` declared twice\n' > "$TMP/prior.txt"; DIFFHOUND_PRIOR_FINDINGS="$TMP/prior.txt" python3 "$ROOT/lib/validators/round-diff.py" < "$TMP/cur.txt")
 lacks "round-diff: a prior finding not repeated is not called resolved" "$rd" "RESOLVED:"
 has   "round-diff: says it is not evidence of a fix" "$rd" "NOT evidence they were fixed"
+
+# ── 11. run 36394406728 replay: chunk replies that were empty or cut off ────
+# usage.tsv: 10 chunks wrote 71-4277 output tokens, one wrote 32000 with 30836
+# thinking (cut off at max_tokens with a little text), and CLAUDE_OUT reached the
+# validators as a single newline.
+S="$TMP/stub"; mkdir -p "$S"
+printf '#!/usr/bin/env bash\nshift; exec "$@"\n' > "$S/tmo"; chmod +x "$S/tmo"
+printf '#!/usr/bin/env bash\ncat "$STUB_RESP"\n' > "$S/curl"; chmod +x "$S/curl"
+eval "$(sed -n '/^_TEXT_BLOCKS=/p;/^_output_cfg() {/,/^}/p;/^_api_text_status() {/,/^}/p;/^_lower_effort() {/,/^}/p;/^_call_api() {/,/^}/p' "$ROOT/lib/review.sh")"
+_cost_record() { cat > /dev/null; }
+call() { # response-json -> "rc|stdout|stop"
+  printf '%s' "$1" > "$S/resp.json"
+  local out rc
+  out=$(PATH="$S:$PATH" STUB_RESP="$S/resp.json" _TIMEOUT_CMD="$S/tmo" _ANTHROPIC_API_URL=x ANTHROPIC_API_KEY=x \
+        DIFFHOUND_STOP_REASON_FILE="$S/stop" _call_api claude-opus-5 32000 600 "" < /dev/null 2>/dev/null); rc=$?
+  printf '%s|%s|%s' "$rc" "$out" "$(cat "$S/stop" 2>/dev/null)"
+}
+eq "replay: thinking-only end_turn reply is a failed call, not an empty review" \
+  "$(call '{"stop_reason":"end_turn","content":[{"type":"thinking","thinking":"x"}]}')" "1||end_turn"
+eq "replay: whitespace-only text is a failed call" \
+  "$(call '{"stop_reason":"end_turn","content":[{"type":"text","text":"\n\n"}]}')" "1||end_turn"
+eq "replay: cut-off reply with text returns the text and records max_tokens" \
+  "$(call '{"stop_reason":"max_tokens","content":[{"type":"thinking","thinking":"x"},{"type":"text","text":"### FINDINGS_START\nFINDING: a.ts:1:NIT"}]}')" \
+  "0|### FINDINGS_START
+FINDING: a.ts:1:NIT|max_tokens"
+R="$TMP/replay"; mkdir -p "$R"
+for i in 0 1 2; do printf 'diff --git a/f%s b/f%s\n+x\n' $i $i > "$R/chunk-$i.diff"; done
+printf '### FINDINGS_START\nFINDING: f0.ts:1:SHOULD-FIX\nWHAT: real\n' > "$R/chunk-0.out"; echo max_tokens > "$R/chunk-0.stop"
+echo "CHUNK_1_FAILED" > "$R/chunk-1.out"
+printf '### FINDINGS_START\n### FINDINGS_END\n' > "$R/chunk-2.out"; echo end_turn > "$R/chunk-2.stop"
+eq "coverage: a cut-off chunk is a gap even with a findings block" "$(_chunk_coverage_gaps "$R" 3)" "0 1"
+has "retry: a cut-off chunk retries at lower effort" "$(sed -n '/_CHUNK_GAPS=\$(_chunk_coverage_gaps/,/_retry_pids+=/p' "$ROOT/lib/review.sh")" '_geffort=$(_lower_effort high)'
+lacks "chunk stderr no longer lands in the review text" "$(sed -n '/^_review_chunks_parallel() {/,/^}/p' "$ROOT/lib/review.sh")" 'chunk_out" 2>&1'
+has "banner: unreviewed files are named on any verdict" "$(_coverage_banner "a.ts b.ts")" "a.ts b.ts"
+has "banner: wired before the gate" "$(sed -n '/REVIEW_EVENT=\$(parse_verdict/,/_posting_gate_reason/p' "$ROOT/lib/review.sh")" "_coverage_banner"
 
 echo
 echo "PASS=$PASS FAIL=$FAIL"
