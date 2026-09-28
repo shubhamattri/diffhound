@@ -189,9 +189,15 @@ _extract_implicit_claims() {
       named=$(grep -oE '[A-Za-z0-9_@./-]+\.(tsx?|jsx?|vue|py|cjs|mjs)\b' <<< "$what" | grep '/' | sort -u | tr '\n' ',')
       scope="file=${cited}${named:+,${named%,}}"
     fi
+    # Only symbols the absence phrase is ABOUT: the subject right before it in
+    # the same clause ("`X` and `Y` don't exist anywhere"). Symbols elsewhere on
+    # the line are not claimed absent: "fails with \"relation does not exist\"
+    # under the restricted `searchPath` ... (`CLARO_CLAIM_REGISTRATION_ENABLED`)"
+    # dropped a true finding on #7642 run 36450368674.
     while IFS= read -r sym; do
       [ -n "$sym" ] && claims="${claims:+$claims; }symbol_defined:${sym}:${scope}:false"
-    done < <(printf '%s' "$what" | grep -iE "$absence_re" | grep -oE '`@?[A-Za-z_][A-Za-z0-9_]{2,}`|[A-Z][A-Z0-9_]{3,}' | tr -d '`' | sort -u)
+    done < <(printf '%s' "$what" | grep -oiE "(\`@?[A-Za-z_][A-Za-z0-9_]{2,}\`|\b[A-Z][A-Z0-9_]{3,}\b)[^.;:\"'()]{0,60}(${absence_re})" \
+               | grep -oE '^`@?[A-Za-z_][A-Za-z0-9_]{2,}`|^[A-Z][A-Z0-9_]{3,}|`@?[A-Za-z_][A-Za-z0-9_]{2,}`' | tr -d '`' | sort -u)
   fi
 
   # symbol_defined (phantom vuln): "`X` is unscoped/resolver" -> claim X exists

@@ -1,0 +1,11 @@
+FINDING: services/api/src/claims/claro/queries.integration.spec.ts:18:OPEN_QUESTION
+WHAT: Now that `...jest.requireActual(...)` keeps the *real* `getOrgPropertyRowByNameAndOrgId`, confirm it does not need a table this spec never creates.
+EVIDENCE: `+  ...jest.requireActual("../../orgProperty/handler"),` (18) keeps the real row resolver, while `beforeAll` creates only `users`, `benefits`, `org_benefits`, `user_benefits`, `dependents`, `dependent_benefits` (51-92) and the mocked knex is pinned to `searchPath: [schema]` (12), i.e. the test schema only — `public` is not on the search path. Per the manifest, `employerGate.ts` calls `getOrgPropertyRowByNameAndOrgId("FEATURE_FLAGS", orgId, orgEntityId, transaction)`, and the author's own earlier reply states "the Claro queries do call employerGate".
+IMPACT: If that resolver issues a query against an org-properties table, it would fail with "relation does not exist" under the restricted `searchPath`; if instead it returns nothing and the gate defaults open, the employer feature-flag gate is effectively un-tested in the suite that is CI-gated by `scripts/verify-claro-integration.cjs`. Either way the flag behaviour asserted elsewhere (`CLARO_CLAIM_REGISTRATION_ENABLED`) is not the same gate.
+OPTIONS: 
+1. Confirm the suite passes against Postgres with the row resolver real (author states it does) and add the org-properties table + a disabled-flag case so the employer gate is actually asserted.
+2. Keep the row resolver mocked explicitly (returning the flag row) rather than relying on requireActual, so the gate's behaviour is deterministic.
+DIFF_LINE: `+  ...jest.requireActual("../../orgProperty/handler"),` at queries.integration.spec.ts:18
+REACHABLE_PATH: `claroClaimPreparation` → preparation → `requireClaimEmployerEnabled` (employerGate.ts, per manifest) → `getOrgPropertyRowByNameAndOrgId`, executed against the mocked knex from line 9 whose `searchPath` contains only the freshly created test schema.
+REJECTED_ALTERNATIVE: N/A — coordination question, not a code proposal.
+UNVERIFIABLE: yes (employerGate.ts / orgProperty handler internals are not in this chunk)
