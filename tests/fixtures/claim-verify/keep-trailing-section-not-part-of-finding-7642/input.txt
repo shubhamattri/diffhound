@@ -1,0 +1,35 @@
+FINDING: services/api/src/claims/tests/dispatchPreparedClaimEffects.unit.spec.ts:49:NIT
+WHAT: "covers every document type the flow can auto-attach" hardcodes the four doc types instead of deriving them from the exported `EXTRACTABLE_DOC_TYPES`.
+EVIDENCE: `+    it("covers every document type the flow can auto-attach", async () => {` with `+      const types = [ClaimDocument.PAN_PRIMARY, ClaimDocument.CANCELLED_CHEQUE, ClaimDocument.AADHAAR_PRIMARY, ClaimDocument.AADHAAR_PATIENT];`
+IMPACT: `EXTRACTABLE_DOC_TYPES` is exported from `services/api/src/claims/autoAttachedDocs.ts` (per manifest). If a fifth extractable type is added there, this test keeps passing while no longer covering "every" type — the name silently becomes false.
+OPTIONS: 
+1. `import { EXTRACTABLE_DOC_TYPES } from "../autoAttachedDocs";` and drive the `types` array from it.
+2. Keep the literal list but add `expect(types).toEqual(EXTRACTABLE_DOC_TYPES)` so drift fails loudly.
+DIFF_LINE: `+      const types = [`
+REACHABLE_PATH: Manifest entry `services/api/src/claims/autoAttachedDocs.ts → export const EXTRACTABLE_DOC_TYPES: ClaimDocument[]`; the same PR adds `extractableAutoAttachedDocs(prepared)` which the SUT consumes.
+REJECTED_ALTERNATIVE: N/A — trivial fix.
+UNVERIFIABLE: no
+### FINDINGS_END
+
+### CROSS_FILE_NOTES
+- **Not in this chunk, asserted against heavily:** `prepareClaim` (`claims/claro/preparation.ts`), `ClaimCommands`/`ClaimPreview` (`claims/claro/commands.ts`), `ClaimOutbox` (`claims/claro/outbox.ts`), `prepareEcardEmail` (`eCards/claro/preparation.ts`), `prepareClaroEcardEmail`/`confirmClaroEcardEmail`/`claroEcardEmailCommand` (`eCards/claro/mutations.ts`), `prepareReviewedEcard`/`confirmReviewedEcard`/`ecardEmailStatus` (`eCards/claro/service.ts`), `NovaNotification` (`notifications/NotificationEngine.ts`), `registerProcessors` (`processors/slack.ts`), `ClaimsHandler.dispatchPreparedClaimEffects` (`claims/handler.ts`), `ClaimFilesHandler.smartExtractAndStore` (`claims/claimFiles/handler.ts`), `INACTIVE_MEMBER_STATUSES` (`claims/claro/access.ts`), `EXTRACTABLE_DOC_TYPES` (`claims/autoAttachedDocs.ts`). All confirmed present via VERIFIED EVIDENCE / manifest — no "missing symbol" findings raised.
+- `claims/claro/preparation.unit.spec.ts` asserts **exact `missingFields` ordering** and **exact user-facing error strings** ("Enter a valid date on or before today", "Discharge cannot precede admission", "Enter a valid 10-digit Indian mobile number", …). Any copy change in `preparation.ts` (another chunk) breaks this spec. Flagging for the merger only as coupling, not a defect.
+- `rejection.integration.spec.ts` `beforeEach` deletes `claro_claim_outbox` while deliberately **not** applying `20260909101000_claro_outbox_delivery`. That is only safe if migration `20260909100000_claro_claim_commands` creates the `claro_claim_outbox` table (the inline comment claims 101000 "only adds outbox delivery columns"). Migrations are in another chunk (CRITICAL risk tier) — the migration reviewer should confirm table ownership, otherwise this suite fails on `relation does not exist`. UNVERIFIABLE from here.
+- `rejection.integration.spec.ts` "refuses a rollback that would discard rejected-command history" depends on the `whereNull("resource_id")` guard inside `20260909102000_claro_rejected_commands.down()` (visible in the manifest). Behaviour verification belongs to the migrations chunk.
+- `queue.integration.spec.ts` encodes outbox timing constants as literals (`+61000` for the pending recheck, `+600001` for `QUEUED_RECHECK_MS = 600000` per the `outbox.ts` RAG excerpt). If the outbox chunk changes either constant these tests silently change meaning — worth the outbox reviewer keeping the constants exported/shared.
+- `slack.unit.spec.ts` new block asserts `strictDelivery` rethrow + dedup-key release semantics implemented in `processors/slack.ts` and consumed by `processors/claroClaims.ts` — both in other chunks; the retry/dedup contract should be verified there.
+- `eCards/claro/mutations.unit.spec.ts` asserts `result.errors).toBeUndefined()` while `confirmReviewedEcard` is a bare `jest.fn()` returning `undefined`; this only holds if the mutation's output type is nullable. Confirm against `eCards/claro/mutations.ts` (other chunk) — if the field is non-null this test would be asserting a shape the schema cannot produce.
+
+### REQUIREMENT_COVERAGE
+TICKET: BX-4050
+ADDRESSED:
+- AC1 (eligible policies/patients only): `preparation.unit.spec.ts` — "returns missing fields and eligible choices…", "excludes expired and unsupported policies", "rejects a foreign patient or policy and does not expose patients for it" (`result.patients).toEqual([])`).
+- AC2 (validate, normalize, field errors, missing requirements, revision): the 9-row `it.each` table asserting `fieldErrors` + `revision` change, "honors the 30-day flag and updates validation revision when facts change", "uses the treatment date for day care…" (`normalized.dod`).
+- AC3 (document rules match existing settings): "applies Form A and CKYC requirements…", "returns no required documents when the mandatory-docs flag is off", "mirrors the Form A and previous-document flags in capabilities".
+- AC4 (no claim/ticket/notification on preparation): `expect(result.capabilities.canExecute).toBe(false)` and "keeps outstanding documents separate from registration".
+- "City labeled optional but marked required": "makes city optional…" asserts `fieldErrors).toEqual({})` and `readyForReview).toBe(true)` with no `city` supplied.
+- Preserved flags: `MANDATORY_CLAIM_DOCS_FLOW`, `ENABLE_CLAIM_FORM_A_GENERATION`, `DISALLOW_CLAIMS_PAST_30D`, `ENABLE_AUTO_ATTACHING_PREVIOUS_CLAIM_DOCS` all exercised in this spec.
+MISSING:
+- AC2's "returns normalized values" is only verified for `dod` on the daycare path. No assertion that `contact`, `estimatedClaimAmount`, or the optional `city`/`hospital`/`diagnosis` free-text fields survive normalization unchanged (or are trimmed/coerced as intended). A regression that drops an optional fact from `normalized` would pass this suite.
+- AC4 is asserted only via the `canExecute: false` capability flag; nothing in this chunk asserts that `prepareClaim` performs no writes (it appears pure, so this is low risk — the durable "no claim created" guarantee is covered in `commands.integration.spec.ts`, another chunk).
+NOTES: Coverage of AC1/AC3 is strong. The two gaps above are NIT-grade test-coverage observations, not defects in the shipped behaviour.

@@ -55,7 +55,7 @@ _flush() {
     block=""; return 0
   fi
   explicit=$(printf '%s\n' "$block" | grep -m1 '^CLAIMS:' | sed 's/^CLAIMS:[[:space:]]*//')
-  if [ -n "$explicit" ]; then claims="$explicit"; else claims=$(_extract_implicit_claims "$block" "$rel"); fi
+  if [ -n "$explicit" ]; then claims="$explicit"; else claims=$(_extract_implicit_claims "$(printf '%s\n' "$block" | sed '/^### /,$d')" "$rel"); fi
 
   if [ -n "$claims" ]; then
     local worst="TRUE" c v IFS_save="$IFS"
