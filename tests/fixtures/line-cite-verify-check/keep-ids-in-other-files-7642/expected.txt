@@ -1,0 +1,11 @@
+FINDING: services/api/migrations/20260924100000_claro_outbox_portal_intents.ts:5:SHOULD-FIX
+WHAT: Making `command_id` nullable silently removes the `unique(["command_id","kind"])` dedup guarantee for exactly the rows this migration exists for, because Postgres treats NULLs as distinct in unique indexes.
+EVIDENCE: `+  await db.schema.alterTable("claro_claim_outbox", (table) => table.uuid("command_id").nullable().alter());` against `+    t.unique(["command_id", "kind"]);` in 20260909100000.
+IMPACT: Two portal intents with `command_id = NULL, kind = 'claim.ticket'` both insert successfully, and the outbox will execute both — producing duplicate Zoho tickets / duplicate member notifications, which is the exact failure the at-most-once design in `execute()`/`reconcileUnknown` exists to prevent. Command-backed rows keep dedup; portal rows do not.
+OPTIONS: 
+1. Add a partial unique index for the portal shape in this migration, e.g. `CREATE UNIQUE INDEX ... ON claro_claim_outbox (<portal key from payload/claim id>, kind) WHERE command_id IS NULL` — requires a stored column for the portal key rather than a jsonb expression.
+2. Introduce the non-null `correlation_id` column from finding 1 and move the unique constraint to `(correlation_id, kind)`, keeping one dedup rule for both producers.
+DIFF_LINE: `+  await db.schema.alterTable("claro_claim_outbox", (table) => table.uuid("command_id").nullable().alter());` at services/api/migrations/20260924100000_claro_outbox_portal_intents.ts:5
+REACHABLE_PATH: `commands.ts:register` relies on the same unique constraint for its own dedup (the 23505 mapping at commands.ts:250-254 names `claro_claim_commands_*` and falls back to "Conflicting follow-up identity" for outbox duplicates), i.e. the codebase treats this constraint as the dedup mechanism. Portal inserts with NULL `command_id` bypass it. The portal insert site is in `portalOutbox.ts` (not in this chunk), so I cannot confirm whether it does its own pre-insert existence check.
+REJECTED_ALTERNATIVE: Keeping `command_id` NOT NULL and synthesising a fake command row per portal claim is worse — it pollutes `claro_claim_commands` (and its receipt/`updateProgress` bookkeeping) with rows that have no preview and no client command id, breaking the `preview_id` FK and the actor-scoped unique index.
+UNVERIFIABLE: yes

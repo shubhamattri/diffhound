@@ -1,0 +1,8 @@
+FINDING: services/api/src/eCards/claro/service.ts:122:NIT
+WHAT: `deliverEcardEmail` logs with `logger.error(message, contextObject)` while every other file in this PR (`ECardNotification.ts`, `followups.ts`) uses the `logger.event(...).data(...).error(...)` builder.
+EVIDENCE: `+    logger.error(publishing ? "Claro e-card command outcome unknown" : "Claro e-card failed before publication", { commandId, errorType, errorMessage });` vs `+      logger.event("API:NOTIFICATION").data({ phase, userId, ... }).error(...)` in ECardNotification.ts.
+IMPACT: If `common/logger` is pino-based the call signature is `(obj, msg)`, so `commandId`/`errorType` would be dropped from the structured record and this failure path becomes un-queryable — exactly the path ops needs to reconcile `unknown` commands.
+OPTIONS: 
+1. Use the same builder: `logger.event("API:CLARO_ECARD").data({ commandId, errorType, errorMessage }).error(...)`.
+2. Leave as-is if `common/logger` is winston-style `(msg, meta)`.
+UNVERIFIABLE: yes — `services/api/src/common/logger` is not in this chunk.

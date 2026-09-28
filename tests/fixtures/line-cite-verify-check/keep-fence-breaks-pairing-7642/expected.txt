@@ -1,0 +1,4 @@
+FINDING: src/outbox.ts:3:NIT
+WHAT: the ``` fence quoted in the comment breaks nothing, but `leaseRow` is reassigned inside the loop.
+EVIDENCE: outbox.ts:3
+UNVERIFIABLE: no
