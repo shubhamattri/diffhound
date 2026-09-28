@@ -1,0 +1,4 @@
+FINDING: services/api/jest.config.js:4:SHOULD-FIX
+WHAT: the unit config has no `coverageThreshold`, so a drop in coverage on the new Claro files never fails CI.
+EVIDENCE: jest.config.js sets collectCoverageFrom but no threshold block
+UNVERIFIABLE: no

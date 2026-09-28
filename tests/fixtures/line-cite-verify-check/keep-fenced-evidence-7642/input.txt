@@ -1,0 +1,8 @@
+FINDING: services/api/src/claims/handler.ts:110:NIT
+WHAT: Errors thrown by the new `inTransaction` callback that happen to be objection `ValidationError`s are rewritten into claim-save messages, hiding the callback's own failure reason.
+EVIDENCE: `+            await inTransaction(trx, inserted);` sits inside the same `try` as the persist step, and the catch maps any `ValidationError` to either `` `${startCase(invalidProperties[0])} is Invalid!` `` or `+        throw new CustomError("This claim could not be saved. Please check the details and try again.");`.
+IMPACT: A command-intent validation failure surfaces to the member as a claim-field error (or a generic save failure). Low likelihood: Claro command rows are written through raw knex, whose pg errors are not objection `ValidationError`s and are rethrown untouched. The inline comment explicitly acknowledges this widened blast radius, so the behavior is deliberate — noting it only so the trade-off stays visible.
+OPTIONS: 
+1. Narrow the `try` to `prepareClaimCreation` + `persistPreparedClaim`, letting callback errors propagate verbatim.
+2. Keep as-is and have the callback wrap its own failures in a `CustomError` before throwing.
+UNVERIFIABLE: no

@@ -1,0 +1,4 @@
+FINDING: services/api/src/claims/claro/queries.integration.spec.ts:1:NIT
+WHAT: this `integration` suite and the one in services/api/src/claro/actionEntitlements.integration.spec.ts seed different statuses.
+EVIDENCE: queries.integration.spec.ts:1
+UNVERIFIABLE: no

@@ -1,0 +1,8 @@
+FINDING: services/api/src/claims/claro/outbox.ts:180:NIT
+WHAT: `reconcileUnknown` performs up to 100 sequential external evidence lookups inside a job that repeats every 15 s, ahead of `publish` in the same tick.
+EVIDENCE: `+      .limit(100);` then `+        const result = await evidence(event);` inside the `for` loop; the dispatch tick calls `recoverInterrupted` → `reconcileUnknown(existingFollowupEvidence)` → `publish` sequentially (claroClaims.ts:63-65).
+IMPACT: `existingFollowupEvidence` (followups.ts, other chunk) performs a Zoho search per event, so a backlog of uncertain rows delays `publish` for the whole tick and starves new follow-ups. The 60 s `available_at` rotation in the `finally` block bounds steady-state churn, so this is a throughput concern rather than a stall.
+OPTIONS: 
+1. Lower the reconcile batch (e.g. 20) so a tick stays bounded, or reconcile after `publish` so new work is never starved.
+2. Move reconciliation to its own repeatable job with a slower cadence.
+UNVERIFIABLE: yes

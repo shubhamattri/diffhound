@@ -1,0 +1,8 @@
+FINDING: services/api/src/claro/actionEntitlements.integration.spec.ts:56:NIT
+WHAT: `afterAll` calls `dropSchema` then `destroy` without try/finally, so a `dropSchema` failure skips `db.destroy()` and leaves an open knex pool (hanging jest worker) — the sibling spec in this same PR gets this right.
+EVIDENCE: `+  afterAll(async () => {` / `+    await db.schema.dropSchema(namespace, true);` / `+    await db.destroy();` — compare `commands.integration.spec.ts` `afterAll`, which wraps the assertions in `try { … } finally { await db.schema.dropSchema(schema, true); await db.destroy(); }` with the comment "so the real failure is the assertion rather than a jest worker hanging on an open knex pool."
+IMPACT: A teardown error (e.g. lingering session on the schema) turns into a hung CI worker instead of a clear failure.
+OPTIONS: 
+1. Wrap in `try { await db.schema.dropSchema(namespace, true); } finally { await db.destroy(); }`.
+2. Leave as is — teardown failures are rare and the worker eventually times out.
+UNVERIFIABLE: no

@@ -1,0 +1,4 @@
+FINDING: services/api/src/claro/actionEntitlements.integration.spec.ts:88:NIT
+WHAT: `afterAll` calls `dropSchema` then `destroy` without try/finally, so a `dropSchema` failure skips `db.destroy()` and leaves an open knex pool.
+EVIDENCE: the teardown block
+UNVERIFIABLE: no
