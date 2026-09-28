@@ -209,6 +209,38 @@ _within_time_budget 100 720 && r=run || r=defer; eq "budget: early run does book
 _within_time_budget 860 720 && r=run || r=defer; eq "budget: 14m run defers bookkeeping" "$r" "defer"
 has "budget: the auto-learn loop checks the budget" "$(sed -n '/Auto-learn from ALL previous PR caches/,/Auto-learned from/p' "$ROOT/lib/review.sh")" "_within_time_budget"
 
+# ── 10. v0.7.41 run 36394406728: an empty review must not post as a pass ─────
+G="$TMP/gaps"; mkdir -p "$G"
+for i in 0 1 2 3; do printf 'diff --git a/f%s b/f%s\n+x\n' $i $i > "$G/chunk-$i.diff"; done
+printf '### CHUNK_FILES\nf0\n### FINDINGS_START\n### FINDINGS_END\n' > "$G/chunk-0.out"   # reviewed, nothing found
+printf 'the code looks fine overall, nothing stands out\n' > "$G/chunk-1.out"             # prose, no findings block
+: > "$G/chunk-2.out"                                                                     # empty text
+printf '**FINDING:** f3.ts:1:NIT\nWHAT: x\n' > "$G/chunk-3.out"                          # decorated finding
+eq "coverage: prose-only and empty chunks are gaps" "$(_chunk_coverage_gaps "$G" 4)" "1 2"
+echo "CHUNK_0_FAILED" > "$G/chunk-0.out"
+eq "coverage: failure marker is a gap" "$(_chunk_coverage_gaps "$G" 4)" "0 1 2"
+_api_empty_is_failure "" && r=ok || r=fail;          eq "api: empty text is a failed call"   "$r" "fail"
+_api_empty_is_failure $'  \n ' && r=ok || r=fail;    eq "api: whitespace text is a failed call" "$r" "fail"
+_api_empty_is_failure "x" && r=ok || r=fail;         eq "api: text is a success"             "$r" "ok"
+eq "gate: APPROVE with unreviewed chunks refused" \
+  "$(_posting_gate_reason APPROVE 0 0 "1 2" false true HUGE)" "APPROVE while chunk(s) 1 2 produced no review"
+has "gate: APPROVE when validators never ran (the #7642 shape) refused" \
+  "$(_posting_gate_reason APPROVE 0 0 "" false false HUGE)" "validators never ran"
+has "gate: APPROVE when validators failed refused" \
+  "$(_posting_gate_reason APPROVE 0 0 "" true false HUGE)" "validator pipeline failed"
+has "gate: validated findings but 0 comments refused, any verdict" \
+  "$(_posting_gate_reason COMMENT 5 0 "" false true HUGE)" "findings were lost"
+eq "gate: clean APPROVE with full coverage allowed" "$(_posting_gate_reason APPROVE 0 0 "" false true HUGE)" ""
+eq "gate: APPROVE after validators dropped every finding allowed" "$(_posting_gate_reason APPROVE 0 0 "" false true HUGE)" ""
+eq "gate: findings posted allowed" "$(_posting_gate_reason REQUEST_CHANGES 4 4 "" false true HUGE)" ""
+eq "gate: small tier JSON path, validators optional" "$(_posting_gate_reason APPROVE 0 0 "" false false SMALL)" ""
+has "gate: wired before posting" "$(sed -n '/REVIEW_EVENT=\$(parse_verdict/,/exit 1/p' "$ROOT/lib/review.sh")" "_posting_gate_reason"
+has "api: _call_api fails on empty text" "$(sed -n '/^_call_api() {/,/^}/p' "$ROOT/lib/review.sh")" "_api_empty_is_failure"
+has "api: _call_api_system fails on empty text" "$(sed -n '/^_call_api_system() {/,/^}/p' "$ROOT/lib/review.sh")" "_api_empty_is_failure"
+rd=$(printf 'FINDING: a.ts:1:NIT\nWHAT: new thing\n' > "$TMP/cur.txt"; printf 'FINDING: b.ts:2:BLOCKING\nWHAT: `requireEnabled` declared twice\n' > "$TMP/prior.txt"; DIFFHOUND_PRIOR_FINDINGS="$TMP/prior.txt" python3 "$ROOT/lib/validators/round-diff.py" < "$TMP/cur.txt")
+lacks "round-diff: a prior finding not repeated is not called resolved" "$rd" "RESOLVED:"
+has   "round-diff: says it is not evidence of a fix" "$rd" "NOT evidence they were fixed"
+
 echo
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ] || { printf '  failed: %s\n' "${FAILED[@]}"; exit 1; }

@@ -134,6 +134,10 @@ _call_api() {
     rm -f "$_api_pf_keep"; return 1
   fi
   rm -f "$_api_pf_keep"
+  # No text at all (empty body, network failure, content-free reply) is a
+  # failed call. Returning 0 here let a chunk review write an empty file that
+  # every later stage read as "nothing found".
+  _api_empty_is_failure "$_api_txt" || return 1
   printf '%s' "$_api_txt"
 }
 
@@ -185,6 +189,10 @@ _call_api_system() {
     rm -f "$_api_pf_keep"; return 1
   fi
   rm -f "$_api_pf_keep"
+  # No text at all (empty body, network failure, content-free reply) is a
+  # failed call. Returning 0 here let a chunk review write an empty file that
+  # every later stage read as "nothing found".
+  _api_empty_is_failure "$_api_txt" || return 1
   printf '%s' "$_api_txt"
 }
 
@@ -1218,6 +1226,23 @@ REVIEW_STRUCTURED=$(mktemp -t "pr-${PR_NUMBER}-structured.XXXXXX")
 REVIEW_SUMMARY=$(mktemp -t "pr-${PR_NUMBER}-summary.XXXXXX")
 REVIEW_JSON=$(mktemp -t "pr-${PR_NUMBER}-review.XXXXXX")
 
+# One log directory per run (memoised), used by every archive step.
+_run_log_dir() {
+  if [ -z "${_RUN_LOG_DIR:-}" ]; then
+    _RUN_LOG_DIR="$HOME/.diffhound/logs/${_CACHE_REPO_ID:-unknown-repo}/pr-${PR_NUMBER}/$(date -u +%Y%m%dT%H%M%SZ)-${HEAD_SHA:0:7}"
+  fi
+  printf '%s' "$_RUN_LOG_DIR"
+}
+_archive_chunk_outputs() {
+  [ "${DIFFHOUND_DISABLE_RUN_ARCHIVE:-0}" = "1" ] && return 0
+  local d i; d="$(_run_log_dir)/chunks"
+  mkdir -p "$d" 2>/dev/null || return 0
+  for ((i=0; i<$2; i++)); do
+    cp "$1/chunk-${i}.out" "$d/" 2>/dev/null; cp "$1/chunk-${i}.manifest" "$d/" 2>/dev/null
+  done
+  return 0
+}
+
 cleanup() {
   local exit_code=$?
   [ -n "${_spinner_pid:-}" ] && kill "$_spinner_pid" 2>/dev/null && wait "$_spinner_pid" 2>/dev/null || true
@@ -1253,7 +1278,7 @@ cleanup() {
     gh api --method POST \
       -H "Accept: application/vnd.github+json" \
       "/repos/${REPO_OWNER}/${REPO_NAME}/issues/${PR_NUMBER}/comments" \
-      -f "body=Diffhound review failed (exit code $exit_code). Check logs on the review VM." \
+      -f "body=Diffhound review failed (exit code $exit_code).${DIFFHOUND_FAIL_REASON:+ ${DIFFHOUND_FAIL_REASON}} Check logs on the review VM." \
       >/dev/null 2>&1 || true
   fi
 }
@@ -2309,7 +2334,7 @@ fi
 # Determine re-review depth based on delta size (addresses bait-and-switch scenario)
 # REREVIEW_DEPTH: "shallow" = skip peer review, "full" = run peer review with re-review prompt
 REREVIEW_DEPTH="shallow"
-if [ "$IS_REREVIEW" = true ]; then
+if [ "$IS_REREVIEW" = true ] && [ "$FORCE_FULL" != true ]; then
   _INCR_BYTES=${INCR_SIZE:-0}
   _INCR_LINES=$(wc -l < "${INCREMENTAL_DIFF_FILE:-/dev/null}" 2>/dev/null | tr -d ' ' || echo "0")
   # Large delta (>=10KB or >=200 lines) = full review depth — substantial changes deserve scrutiny
@@ -2507,6 +2532,30 @@ export _FRAMEWORK_FACTS _ARCH_CHECKLIST
   spinner_start "Reviewing ${CHUNK_COUNT} chunks in parallel (pass 1/${_TOTAL_PASSES})..."
   _review_chunks_parallel "$CHUNK_DIR" "$CHUNK_COUNT" "$PR_SUMMARY_HEADER" "$RAG_CONTEXT_FILE" "$REPO_PATH" "$_PR_MANIFEST" "$IS_REREVIEW" "${THREADS_SUMMARY_FILE:-}" "${_INCR_FILES_LIST:-}"
   spinner_stop "Parallel chunk review complete"
+
+  # A chunk whose output is empty, a failure marker, or has no FINDINGS block
+  # did not review its files. Retry those once; whatever still has no review is
+  # recorded so the review can never be posted as a clean pass.
+  _CHUNK_GAPS=$(_chunk_coverage_gaps "$CHUNK_DIR" "$CHUNK_COUNT")
+  if [ -n "$_CHUNK_GAPS" ]; then
+    echo "  ⚠ $(echo $_CHUNK_GAPS | wc -w | tr -d ' ') of ${CHUNK_COUNT} chunk review(s) produced no findings block, retrying: chunks ${_CHUNK_GAPS}" >&2
+    _retry_pids=()
+    for _gi in $_CHUNK_GAPS; do
+      ( DIFFHOUND_STAGE="primary-review-retry"
+        _call_api "claude-opus-5" 32000 600 high < "${CHUNK_DIR}/chunk-${_gi}.prompt" > "${CHUNK_DIR}/chunk-${_gi}.out" 2>/dev/null \
+          || echo "CHUNK_${_gi}_FAILED" > "${CHUNK_DIR}/chunk-${_gi}.out" ) &
+      _retry_pids+=($!)
+    done
+    for _gp in "${_retry_pids[@]}"; do wait "$_gp" 2>/dev/null || true; done
+    _CHUNK_GAPS=$(_chunk_coverage_gaps "$CHUNK_DIR" "$CHUNK_COUNT")
+  fi
+  if [ -n "$_CHUNK_GAPS" ]; then
+    _CHUNK_GAP_FILES=$(for _gi in $_CHUNK_GAPS; do cut -f1 "${CHUNK_DIR}/chunk-${_gi}.manifest" 2>/dev/null; done | tr '\n' ' ')
+    echo "  ✖ REVIEW INCOMPLETE: chunks ${_CHUNK_GAPS} still have no review. Files not reviewed: ${_CHUNK_GAP_FILES}" >&2
+  fi
+  # Keep each chunk's raw output with the run log: it is the primary evidence
+  # of what the reviewer found, and the chunk dir is deleted on exit.
+  _archive_chunk_outputs "$CHUNK_DIR" "$CHUNK_COUNT"
 
   spinner_start "Merging findings from ${CHUNK_COUNT} chunks..."
   _merge_chunk_findings "$CHUNK_DIR" "$CHUNK_COUNT" "$CLAUDE_OUT"
@@ -3491,8 +3540,14 @@ if [ "${DIFFHOUND_SKIP_VALIDATORS:-0}" != "1" ] \
     # Track whether all findings were dropped — voice rewrite must not hallucinate
     # COMMENT: lines from prose when 0 validated findings remain.
     _VALIDATOR_FINDING_COUNT="$_after"
+    _VALIDATORS_RAN=true
     mv "$_VALIDATED_OUT" "$CLAUDE_OUT"
   else
+    # Empty validator output means the pipeline failed, not that nothing was
+    # found. It used to fall through silently and post unvalidated text.
+    echo "  ✖ validator pipeline produced no output; last errors:" >&2
+    tail -5 "$_VALIDATOR_AUDIT" 2>/dev/null | sed 's/^/      /' >&2
+    _VALIDATORS_FAILED=true
     rm -f "$_VALIDATED_OUT"
   fi
 fi
@@ -5152,6 +5207,24 @@ if [ "$POST_REVIEW" = true ]; then
   # (before this block) and preserves the verdict word, so this still resolves.
   REVIEW_EVENT=$(parse_verdict "$REVIEW_SUMMARY" "${REVIEW_STRUCTURED}.new_comments")
 
+  # Integrity gate: never post a pass that rests on lost or missing review work.
+  _GATE_REASON=$(_posting_gate_reason "$REVIEW_EVENT" "${_VALIDATOR_FINDING_COUNT:-0}" \
+    "$(grep -c . "${REVIEW_STRUCTURED}.new_comments" 2>/dev/null || true)" \
+    "${_CHUNK_GAPS:-}" "${_VALIDATORS_FAILED:-false}" "${_VALIDATORS_RAN:-false}" "${REVIEW_TIER:-}")
+  if [ -n "$_GATE_REASON" ]; then
+    spinner_fail "Not posting: ${_GATE_REASON}"
+    echo "  ✖ Not posting this review: ${_GATE_REASON}" >&2
+    DIFFHOUND_FAIL_REASON="Not posted: ${_GATE_REASON}"
+    _d=$(_run_log_dir) && mkdir -p "$_d" 2>/dev/null && {
+      cp "$CLAUDE_OUT" "$_d/claude-raw-findings.txt" 2>/dev/null
+      cp "$REVIEW_SUMMARY" "$_d/summary-not-posted.md" 2>/dev/null
+      cp "$REVIEW_STRUCTURED" "$_d/voice-output.txt" 2>/dev/null
+      cp "${DIFFHOUND_USAGE_LOG:-/nonexistent}" "$_d/usage.tsv" 2>/dev/null
+      cp "${_VALIDATOR_AUDIT:-/nonexistent}" "$_d/validator-audit.log" 2>/dev/null
+      echo "  run log: $_d" >&2; }
+    exit 1
+  fi
+
   # Peer-coverage gate (v0.7.9): if peer review ran but produced 0 cross-check
   # models, a REQUEST_CHANGES verdict rests on a single model with nothing to
   # refute it. The Codex/Gemini peers fail open (Codex OAuth refresh_token_reused;
@@ -5448,9 +5521,7 @@ fi
 # Opt-out: DIFFHOUND_DISABLE_RUN_ARCHIVE=1.
 if [ "${DIFFHOUND_DISABLE_RUN_ARCHIVE:-0}" != "1" ]; then
   _LOG_REPO_ID="${_CACHE_REPO_ID:-unknown-repo}"
-  _LOG_TS=$(date -u +%Y%m%dT%H%M%SZ)
-  _LOG_SHA_SHORT="${HEAD_SHA:0:7}"
-  _LOG_DIR="$HOME/.diffhound/logs/${_LOG_REPO_ID}/pr-${PR_NUMBER}/${_LOG_TS}-${_LOG_SHA_SHORT}"
+  _LOG_DIR=$(_run_log_dir)
   mkdir -p "$_LOG_DIR" 2>/dev/null && {
     # Best-effort archive — every cp uses ' || true' so a missing artifact
     # never breaks the script. Validator-pipeline stderr (claim-verify audit)

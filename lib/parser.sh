@@ -208,6 +208,48 @@ _rereview_verdict_capped() {
   [ "$1" = true ] && [ "$2" != true ] && [ "$3" = "REQUEST_CHANGES" ]
 }
 
+# Exit 1 when a model call returned no text. Args: $1 text
+_api_empty_is_failure() { [ -n "${1//[[:space:]]/}" ]; }
+
+# Chunk indices (space-separated) whose review output is missing, empty, a
+# failure marker, or has no FINDINGS block. A chunk that reviewed its files and
+# found nothing still emits an empty FINDINGS block, so a missing block means
+# the files were not reviewed.  Args: $1 chunk dir  $2 count
+_chunk_coverage_gaps() {
+  local dir="$1" count="$2" i out=""
+  for ((i=0; i<count; i++)); do
+    [ -s "${dir}/chunk-${i}.diff" ] || continue
+    if [ ! -s "${dir}/chunk-${i}.out" ] \
+       || grep -qE '^CHUNK_[0-9]+_FAILED' "${dir}/chunk-${i}.out" \
+       || ! _normalize_finding_markup < "${dir}/chunk-${i}.out" | grep -qE 'FINDINGS_START|^FINDING: '; then
+      out="${out:+$out }$i"
+    fi
+  done
+  printf '%s' "$out"
+}
+
+# Why this review must not be posted, or nothing if it may be.
+#   - validated findings existed but no inline comment survives: findings were
+#     lost between the validators and posting;
+#   - an APPROVE while chunks went unreviewed or the validators failed or never
+#     ran: a pass nobody actually checked.
+# Args: $1 event  $2 validated findings  $3 inline comments  $4 chunk gaps
+#       $5 validators failed  $6 validators ran  $7 review tier
+_posting_gate_reason() {
+  local ev="$1" nval="${2:-0}" ncom="${3:-0}" gaps="$4" vfail="$5" vran="$6" tier="$7"
+  nval=$(printf '%s' "$nval" | head -1 | tr -dc '0-9'); ncom=$(printf '%s' "$ncom" | head -1 | tr -dc '0-9')
+  if [ "${nval:-0}" -gt 0 ] && [ "${ncom:-0}" -eq 0 ]; then
+    echo "${nval} validated finding(s) produced 0 inline comments; findings were lost before posting"; return 0
+  fi
+  [ "$ev" = "APPROVE" ] || return 0
+  if [ -n "$gaps" ]; then echo "APPROVE while chunk(s) ${gaps} produced no review"; return 0; fi
+  if [ "$vfail" = true ]; then echo "APPROVE while the validator pipeline failed"; return 0; fi
+  if [ "$vran" != true ] && { [ "$tier" = "LARGE" ] || [ "$tier" = "HUGE" ]; }; then
+    echo "APPROVE but the validators never ran on the findings"; return 0
+  fi
+  return 0
+}
+
 # True while elapsed seconds ($1) are under the budget ($2).
 _within_time_budget() { [ "${1:-0}" -lt "${2:-0}" ]; }
 
