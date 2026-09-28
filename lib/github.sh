@@ -8,6 +8,19 @@ _GITHUB_SH_DIR="${BASH_SOURCE[0]%/*}"
 # shellcheck source=marker-utils.sh
 . "${_GITHUB_SH_DIR}/marker-utils.sh"
 
+# Every page of a GitHub list endpoint as ONE JSON array. A bare `gh api` returns
+# only the first 30 items; on monorepo #7642 (204 inline comments, 145 reviews)
+# that froze the "last reviewed" commit at round 3 and hid every author reply
+# after it. `--paginate` alone is not enough: it prints one array per page.
+# Usage: _gh_api_all /repos/o/r/pulls/N/comments
+_gh_api_all() {
+  local ep="$1" sep='?' out
+  case "$ep" in *\?*) sep='&' ;; esac
+  out=$(gh api --paginate "${ep}${sep}per_page=100" 2>/dev/null \
+    | jq -c -s 'map(if type == "array" then . else [] end) | add // []' 2>/dev/null)
+  printf '%s\n' "${out:-[]}"
+}
+
 # Inject diffhound-id markers into review_json's comments[].body in-place.
 # The bulk-POST path embeds comments inside the review JSON; we append a marker
 # to each comment body so future rounds can extract the prior identity tuple

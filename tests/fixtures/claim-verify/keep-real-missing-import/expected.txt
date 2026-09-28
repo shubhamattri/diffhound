@@ -1,0 +1,3 @@
+FINDING: services/api/src/claims/claro/outbox.ts:4:BLOCKING
+WHAT: `randomUUID()` used without an import, lease() throws ReferenceError at runtime.
+UNVERIFIABLE: no

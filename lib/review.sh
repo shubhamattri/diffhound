@@ -120,6 +120,8 @@ _call_api() {
   rm -f "$_api_jf"
 
   printf '%s' "$_api_r" | _cost_record "$model" "${DIFFHOUND_STAGE:-other}"
+  [ -n "${DIFFHOUND_STOP_REASON_FILE:-}" ] && \
+    printf '%s' "$_api_r" | jq -r '.stop_reason // empty' > "$DIFFHOUND_STOP_REASON_FILE" 2>/dev/null
   local _api_txt _api_rc=0
   _api_txt=$(printf '%s' "$_api_r" | _api_text_status) || _api_rc=$?
   if [ "$_api_rc" = 2 ]; then
@@ -169,6 +171,8 @@ _call_api_system() {
   rm -f "$_api_jf"
 
   printf '%s' "$_api_r" | _cost_record "$model" "${DIFFHOUND_STAGE:-other}"
+  [ -n "${DIFFHOUND_STOP_REASON_FILE:-}" ] && \
+    printf '%s' "$_api_r" | jq -r '.stop_reason // empty' > "$DIFFHOUND_STOP_REASON_FILE" 2>/dev/null
   local _api_txt _api_rc=0
   _api_txt=$(printf '%s' "$_api_r" | _api_text_status) || _api_rc=$?
   if [ "$_api_rc" = 2 ]; then
@@ -522,9 +526,8 @@ _learn_from_pr() {
 
   # Fetch current reviewer comments on this PR from GitHub
   local current_comments
-  current_comments=$(gh api \
-    "/repos/${repo_owner}/${repo_name}/pulls/${pr}/comments" \
-    --jq "[.[] | select(.user.login == \"${REVIEWER_LOGIN}\") | {id,path,line,body,updated_at}]" \
+  current_comments=$(_gh_api_all "/repos/${repo_owner}/${repo_name}/pulls/${pr}/comments" \
+    | jq "[.[] | select(.user.login == \"${REVIEWER_LOGIN}\") | {id,path,line,body,updated_at}]" \
     2>/dev/null || echo "[]")
 
   local posted_lines
@@ -575,10 +578,8 @@ _learn_from_pr() {
   local replied=0
   # Fetch ALL comments on this PR (includes threads)
   local all_comments
-  all_comments=$(gh api \
-    "/repos/${repo_owner}/${repo_name}/pulls/${pr}/comments" \
-    --paginate \
-    --jq "[.[] | {id, user: .user.login, body, in_reply_to_id, path, line}]" \
+  all_comments=$(_gh_api_all "/repos/${repo_owner}/${repo_name}/pulls/${pr}/comments" \
+    | jq -c "[.[] | {id, user: .user.login, body, in_reply_to_id, path, line}]" \
     2>/dev/null || echo "[]")
 
   # Find reviewer comments that received replies
@@ -990,11 +991,8 @@ _distill_false_positives() {
 
   # Fetch all PR comments for thread context
   local all_comments
-  all_comments=$(gh api \
-    -H "Accept: application/vnd.github+json" \
-    "/repos/${repo_owner}/${repo_name}/pulls/${pr}/comments" \
-    --paginate \
-    --jq "[.[] | {id, user: .user.login, body, in_reply_to_id}]" \
+  all_comments=$(_gh_api_all "/repos/${repo_owner}/${repo_name}/pulls/${pr}/comments" \
+    | jq -c "[.[] | {id, user: .user.login, body, in_reply_to_id}]" \
     2>/dev/null || echo "[]")
 
   # Concession phrases that indicate Diffhound acknowledged a false positive
@@ -1755,16 +1753,7 @@ _review_chunks_parallel() {
         # Filter threads to only this chunk's files
         local _chunk_threads="${chunk_dir}/chunk-${i}.threads"
         if [ -n "$threads_file" ] && [ -s "$threads_file" ]; then
-          local _chunk_files_pattern=""
-          while IFS=$'\t' read -r _cf _cp; do
-            [ -n "$_chunk_files_pattern" ] && _chunk_files_pattern+="|"
-            _chunk_files_pattern+="$_cf"
-          done < "$chunk_manifest"
-          if [ -n "$_chunk_files_pattern" ]; then
-            grep -E "$_chunk_files_pattern" "$threads_file" > "$_chunk_threads" 2>/dev/null || true
-          else
-            : > "$_chunk_threads"
-          fi
+          _filter_threads_for_files "$threads_file" "$chunk_manifest" > "$_chunk_threads" 2>/dev/null || : > "$_chunk_threads"
         else
           : > "$_chunk_threads"
         fi
@@ -1984,18 +1973,13 @@ OpenQuestions: [file:line list or NONE — coordination/process concerns; do NOT
 Checklist: [verification steps]
 ### SCORECARD_END"
 
-  local merge_result=""
+  local merge_result="" _merge_stop
+  _merge_stop=$(mktemp -t "chunk-merge-stop.XXXXXX")
   DIFFHOUND_STAGE="chunk-merge"
-  merge_result=$(printf '%s' "$merge_prompt" | _call_api "claude-haiku-4-5-20251001" 4096 60 || true)
-
-  if [ -n "$merge_result" ]; then
-    printf '%s\n' "$merge_result" > "$output_file"
-  else
-    # Fallback: concatenate all chunk outputs
-    for ((i=0; i<chunk_count; i++)); do
-      [ -s "${chunk_dir}/chunk-${i}.out" ] && cat "${chunk_dir}/chunk-${i}.out"
-    done > "$output_file"
-  fi
+  merge_result=$(printf '%s' "$merge_prompt" \
+    | DIFFHOUND_STOP_REASON_FILE="$_merge_stop" _call_api "claude-haiku-4-5-20251001" 8192 120 || true)
+  _select_merge_output "$merge_result" "$(cat "$_merge_stop" 2>/dev/null)" "$chunk_dir" "$chunk_count" > "$output_file"
+  rm -f "$_merge_stop"
 }
 
 # ============================================================
@@ -2009,14 +1993,14 @@ IS_REREVIEW=false
 LAST_REVIEWED_SHA=""
 
 # Fetch all inline comments (with thread structure)
-gh api "/repos/${REPO_OWNER}/${REPO_NAME}/pulls/${PR_NUMBER}/comments" \
-  --jq '[.[] | {id, path, line, body, user: .user.login, in_reply_to_id, created_at}]' \
+_gh_api_all "/repos/${REPO_OWNER}/${REPO_NAME}/pulls/${PR_NUMBER}/comments" \
+  | jq '[.[] | {id, path, line, body, user: .user.login, in_reply_to_id, created_at}]' \
   > "$EXISTING_COMMENTS_FILE" 2>/dev/null || echo "[]" > "$EXISTING_COMMENTS_FILE"
 
 # Fetch review-level comments (summary bodies + commit_id for incremental diff)
 EXISTING_REVIEWS_FILE=$(mktemp -t "pr-${PR_NUMBER}-reviews.XXXXXX")
-gh api "/repos/${REPO_OWNER}/${REPO_NAME}/pulls/${PR_NUMBER}/reviews" \
-  --jq '[.[] | {id, state, body, user: .user.login, submitted_at, commit_id}]' \
+_gh_api_all "/repos/${REPO_OWNER}/${REPO_NAME}/pulls/${PR_NUMBER}/reviews" \
+  | jq '[.[] | {id, state, body, user: .user.login, submitted_at, commit_id}]' \
   > "$EXISTING_REVIEWS_FILE" 2>/dev/null || echo "[]" > "$EXISTING_REVIEWS_FILE"
 
 # Reconstruct prior FINDING: blocks from our existing inline PR comments.
@@ -3454,7 +3438,10 @@ if [ "${DIFFHOUND_SKIP_VALIDATORS:-0}" != "1" ] \
         fi
       fi
       # FINDING: format — bare (MEDIUM/SMALL) or indented (LARGE-tier Haiku merge)
-      grep -cE '^\s*FINDING:' "$f" 2>/dev/null || echo 0
+      # `grep -c || echo 0` printed "0\n0" on no match, which never equals "0",
+      # so the zero-findings guard on the voice pass could not fire.
+      n=$(grep -cE '^[[:space:]]*FINDING:' "$f" 2>/dev/null || true)
+      echo "${n:-0}"
     }
     _before=$(_count_findings "$CLAUDE_OUT")
     _after=$(_count_findings "$_VALIDATED_OUT")
@@ -4583,9 +4570,10 @@ fi
   # Do NOT cat the full CLAUDE_OUT — the LLM would hallucinate COMMENT: lines
   # from the prose text with invalid line numbers, producing comments that GitHub
   # rejects. With 0 validated findings there is nothing to post inline.
-  if [ "${_VALIDATOR_FINDING_COUNT:-1}" = "0" ] && [ -z "${_RUN_PEER_REVIEW:-}" ]; then
+  if _voice_has_no_findings "${_VALIDATOR_FINDING_COUNT:-1}" "${_MERGED_FINDINGS_FILE:-}"; then
     echo "(all findings were dropped by validators — 0 inline comments to post)"
     echo "DO NOT produce any COMMENT: lines. Produce only the ### SUMMARY_START block."
+    _scorecard_only "$CLAUDE_OUT"
   else
     cat "$CLAUDE_OUT"
   fi
@@ -4959,6 +4947,9 @@ if [ "$IS_REREVIEW" = true ] && [ -f "$EXISTING_COMMENTS_FILE" ]; then
     fi
   fi
 fi
+
+# Last check before posting: inline claims about declarations/imports must hold at head.
+_claim_verify_comments "${REVIEW_STRUCTURED}.comments" "${REPO_PATH:-${DIFFHOUND_REPO:-$(pwd)}}"
 
 declare -a _ALL_COMMENTS=()
 while IFS= read -r _line; do

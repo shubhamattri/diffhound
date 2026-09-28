@@ -309,7 +309,8 @@ $_TIMEOUT_CMD 15 bash -c '
   echo "## 6. PAST REVIEW COMMENTS (what has been flagged in these files before)"
   echo ""
   if [ -n "'"$PR_NUMBER"'" ] && command -v gh &>/dev/null; then
-    gh api "/repos/'"${REPO_OWNER}"'/'"${REPO_NAME}"'/pulls/'"${PR_NUMBER}"'/comments?per_page=100" 2>/dev/null | \
+    gh api --paginate "/repos/'"${REPO_OWNER}"'/'"${REPO_NAME}"'/pulls/'"${PR_NUMBER}"'/comments?per_page=100" 2>/dev/null | \
+      jq -s "add // []" 2>/dev/null | \
       jq -r --arg login "'"$REVIEWER_LOGIN"'" \
       "group_by(.path) | .[] | select(.[0].user.login == \$login) | \"### Past comments on \(.[0].path):\", (.[] | \"  [\(.created_at[0:10])] \(.body[0:200])\"), \"\"" \
       2>/dev/null || true

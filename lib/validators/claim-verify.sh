@@ -42,7 +42,13 @@ source "$(dirname "${BASH_SOURCE[0]}")/../claim-checkers.sh"
 block=""
 _flush() {
   [ -z "$block" ] && return 0
-  local claims explicit
+  local claims explicit rel decl
+  rel=$(printf '%s\n' "$block" | sed -n '1s/^FINDING:[[:space:]]*//p' | sed -E 's/:[^:]*:[^:]*$//')
+  decl=$(_check_decl_text "$rel" "$(printf '%s\n' "$block" | sed '1d')")
+  if [ "$decl" = "FALSE" ]; then
+    printf '[claim-verify: DROP — declaration/import claim is false at head: %s]\n' "$rel" >&2
+    block=""; return 0
+  fi
   explicit=$(printf '%s\n' "$block" | grep -m1 '^CLAIMS:' | sed 's/^CLAIMS:[[:space:]]*//')
   if [ -n "$explicit" ]; then claims="$explicit"; else claims=$(_extract_implicit_claims "$block"); fi
 
