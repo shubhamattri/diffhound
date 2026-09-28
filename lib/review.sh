@@ -1239,6 +1239,7 @@ _archive_chunk_outputs() {
   mkdir -p "$d" 2>/dev/null || return 0
   for ((i=0; i<$2; i++)); do
     cp "$1/chunk-${i}.out" "$d/" 2>/dev/null; cp "$1/chunk-${i}.manifest" "$d/" 2>/dev/null
+    cp "$1/chunk-${i}.stop" "$d/" 2>/dev/null; cp "$1/chunk-${i}.err" "$d/" 2>/dev/null
   done
   return 0
 }
@@ -1915,7 +1916,10 @@ _review_chunks_parallel() {
     # Launch API call in background (Opus 5 for thorough code review)
     (
       DIFFHOUND_STAGE="primary-review"
-      _call_api "claude-opus-5" 32000 600 high < "$chunk_prompt" > "$chunk_out" 2>&1 || \
+      # stop_reason per chunk: a reply cut off at max_tokens is incomplete even
+      # when it has some text. stderr stays out of the review text.
+      DIFFHOUND_STOP_REASON_FILE="${chunk_dir}/chunk-${i}.stop" \
+        _call_api "claude-opus-5" 32000 600 high < "$chunk_prompt" > "$chunk_out" 2>"${chunk_dir}/chunk-${i}.err" || \
         echo "CHUNK_${i}_FAILED" > "$chunk_out"
     ) &
     pids+=($!)
@@ -2541,8 +2545,13 @@ export _FRAMEWORK_FACTS _ARCH_CHECKLIST
     echo "  ⚠ $(echo $_CHUNK_GAPS | wc -w | tr -d ' ') of ${CHUNK_COUNT} chunk review(s) produced no findings block, retrying: chunks ${_CHUNK_GAPS}" >&2
     _retry_pids=()
     for _gi in $_CHUNK_GAPS; do
+      # A reply cut off at max_tokens spent the budget thinking; retry it at the
+      # next lower effort (the v0.7.39 rule) so the answer fits. Others retry as-is.
+      _geffort=high
+      [ "$(cat "${CHUNK_DIR}/chunk-${_gi}.stop" 2>/dev/null)" = "max_tokens" ] && _geffort=$(_lower_effort high)
       ( DIFFHOUND_STAGE="primary-review-retry"
-        _call_api "claude-opus-5" 32000 600 high < "${CHUNK_DIR}/chunk-${_gi}.prompt" > "${CHUNK_DIR}/chunk-${_gi}.out" 2>/dev/null \
+        DIFFHOUND_STOP_REASON_FILE="${CHUNK_DIR}/chunk-${_gi}.stop" \
+          _call_api "claude-opus-5" 32000 600 "$_geffort" < "${CHUNK_DIR}/chunk-${_gi}.prompt" > "${CHUNK_DIR}/chunk-${_gi}.out" 2>>"${CHUNK_DIR}/chunk-${_gi}.err" \
           || echo "CHUNK_${_gi}_FAILED" > "${CHUNK_DIR}/chunk-${_gi}.out" ) &
       _retry_pids+=($!)
     done
@@ -2551,7 +2560,7 @@ export _FRAMEWORK_FACTS _ARCH_CHECKLIST
   fi
   if [ -n "$_CHUNK_GAPS" ]; then
     _CHUNK_GAP_FILES=$(for _gi in $_CHUNK_GAPS; do cut -f1 "${CHUNK_DIR}/chunk-${_gi}.manifest" 2>/dev/null; done | tr '\n' ' ')
-    echo "  ✖ REVIEW INCOMPLETE: chunks ${_CHUNK_GAPS} still have no review. Files not reviewed: ${_CHUNK_GAP_FILES}" >&2
+    echo "  ✖ REVIEW INCOMPLETE: chunks ${_CHUNK_GAPS} still have no complete review. Files not reviewed: ${_CHUNK_GAP_FILES}" >&2
   fi
   # Keep each chunk's raw output with the run log: it is the primary evidence
   # of what the reviewer found, and the chunk dir is deleted on exit.
@@ -5206,6 +5215,12 @@ if [ "$POST_REVIEW" = true ]; then
   # Parse verdict (3-method fallback). The scorecard was already derived above
   # (before this block) and preserves the verdict word, so this still resolves.
   REVIEW_EVENT=$(parse_verdict "$REVIEW_SUMMARY" "${REVIEW_STRUCTURED}.new_comments")
+
+  # Whatever the verdict, a review with unreviewed files says so at the top.
+  if [ -n "${_CHUNK_GAPS:-}" ]; then
+    _gap_tmp=$(mktemp -t "pr-${PR_NUMBER}-gaps.XXXXXX")
+    { _coverage_banner "${_CHUNK_GAP_FILES:-}"; echo ""; cat "$REVIEW_SUMMARY"; } > "$_gap_tmp" && mv "$_gap_tmp" "$REVIEW_SUMMARY"
+  fi
 
   # Integrity gate: never post a pass that rests on lost or missing review work.
   _GATE_REASON=$(_posting_gate_reason "$REVIEW_EVENT" "${_VALIDATOR_FINDING_COUNT:-0}" \
