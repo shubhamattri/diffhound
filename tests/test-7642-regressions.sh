@@ -12,6 +12,9 @@ source "$ROOT/lib/parser.sh"
 # shellcheck disable=SC1091
 source "$ROOT/lib/github.sh"
 
+# review.sh runs with IFS=$'\n\t' (line 23); test its helpers under the same IFS.
+# v0.7.41-v0.7.43 passed with the default IFS and broke on the VM.
+IFS=$'\n\t'
 PASS=0; FAIL=0; FAILED=()
 TMP=$(mktemp -d -t diffhound-7642.XXXXXX)
 trap 'rm -rf "$TMP"' EXIT
@@ -275,6 +278,45 @@ has "retry: a cut-off chunk retries at lower effort" "$(sed -n '/_CHUNK_GAPS=\$(
 lacks "chunk stderr no longer lands in the review text" "$(sed -n '/^_review_chunks_parallel() {/,/^}/p' "$ROOT/lib/review.sh")" 'chunk_out" 2>&1'
 has "banner: unreviewed files are named on any verdict" "$(_coverage_banner "a.ts b.ts")" "a.ts b.ts"
 has "banner: wired before the gate" "$(sed -n '/REVIEW_EVENT=\$(parse_verdict/,/_posting_gate_reason/p' "$ROOT/lib/review.sh")" "_coverage_banner"
+
+# ── 12. run 36397076485 (v0.7.42): lists under IFS=$'\n\t', invented tool IO ──
+M2="$TMP/merge2"; mkdir -p "$M2"
+for i in 0 1 2 3; do printf 'FINDING: g%s.ts:1:SHOULD-FIX\nWHAT: finding %s\n' $i $i > "$M2/chunk-$i.out"; printf 'g%s.ts\tSTANDARD\n' $i > "$M2/chunk-$i.manifest"; done
+_call_api() { cat > /dev/null; return 1; }   # merge model unavailable -> raw findings per group
+DIFFHOUND_MERGE_GROUP_BYTES=80 _merge_chunk_findings "$M2" 4 "$TMP/m2.out" 2>/dev/null
+eq "IFS: multi-chunk groups keep every chunk's findings" "$(grep -c '^FINDING:' "$TMP/m2.out")" "4"
+DIFFHOUND_MERGE_GROUP_BYTES=100000 _merge_chunk_findings "$M2" 4 "$TMP/m3.out" 2>/dev/null
+eq "IFS: one multi-chunk group keeps every chunk's findings" "$(grep -c '^FINDING:' "$TMP/m3.out")" "4"
+unset -f _call_api
+lacks "IFS: retry loop does not word-split the gap list" "$(cat "$ROOT/lib/review.sh")" 'for _gi in $_CHUNK_GAPS'
+T2="$TMP/tool"; mkdir -p "$T2"
+for i in 0 1; do printf 'diff --git a/t%s b/t%s\n+x\n' $i $i > "$T2/chunk-$i.diff"; done
+cat > "$T2/chunk-0.out" <<'O'
+{"name": "bash", "input": {"command": "cd /workspace && cat services/api/src/claims/claro/access.ts"}}
+```text
+export function requireEnabled() {}
+export function requireEnabled() {}
+```
+### FINDINGS_START
+FINDING: services/api/src/claims/claro/access.ts:2:BLOCKING
+WHAT: `requireEnabled` is declared twice
+### FINDINGS_END
+O
+printf '### FINDINGS_START\nFINDING: t1.ts:1:NIT\nWHAT: real\n### FINDINGS_END\n' > "$T2/chunk-1.out"
+eq "tool IO: a reply with invented tool calls is a coverage gap" "$(_chunk_coverage_gaps "$T2" 2)" "0"
+got=$(_select_merge_output "" "" "$T2" 0 1 2>/dev/null)
+lacks "tool IO: findings built on invented file contents are not used" "$got" "requireEnabled"
+has   "tool IO: other chunks' findings are kept" "$got" "FINDING: t1.ts:1:NIT"
+lacks "prompt: chunk prompt no longer claims tools exist" "$(cat "$ROOT/lib/prompt-chunked.txt")" "access to the full codebase via Read and Bash tools"
+lacks "prompt: monolithic prompt no longer claims tools exist" "$(cat "$ROOT/lib/review.sh")" "access to the full codebase via Read and Bash tools"
+has   "prompt: chunk prompt says there are no tools" "$(cat "$ROOT/lib/prompt-chunked.txt")" "You have NO tools in this call"
+has   "prompt: chunk prompt requires the findings block, empty allowed" "$(cat "$ROOT/lib/prompt-chunked.txt")" "leave it empty if you found nothing"
+eval "$(sed -n '/^_run_log_dir() {/,/^}/p' "$ROOT/lib/review.sh")"
+_LOG_TS=20260928T000000Z; _CACHE_REPO_ID=o-r; PR_NUMBER=1; HEAD_SHA=abcdef0123; unset _RUN_LOG_DIR
+a=$(_run_log_dir); b=$(_run_log_dir)
+eq "archive: every caller gets the same run log dir" "$a" "$b"
+has "archive: _LOG_TS is set at startup (manifest used it unset under set -u)" "$(sed -n '1,600p' "$ROOT/lib/review.sh")" '_LOG_TS=$(date -u'
+has "archive: chunk prompts are archived" "$(sed -n '/^_archive_chunk_outputs() {/,/^}/p' "$ROOT/lib/review.sh")" 'chunk-${i}.prompt'
 
 echo
 echo "PASS=$PASS FAIL=$FAIL"

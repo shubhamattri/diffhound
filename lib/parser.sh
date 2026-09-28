@@ -132,7 +132,12 @@ _select_merge_output() {
   local merge="$1" stop="$2" dir="$3" raw i mn rn
   shift 3
   raw=$(for i in "$@"; do
-    [ -s "${dir}/chunk-${i}.out" ] && cat "${dir}/chunk-${i}.out"
+    [ -s "${dir}/chunk-${i}.out" ] || continue
+    if _has_invented_tool_io "${dir}/chunk-${i}.out"; then
+      echo "  ✖ chunk ${i}: reply contains invented tool calls/output; its findings rest on file contents the model made up and are not used" >&2
+      continue
+    fi
+    cat "${dir}/chunk-${i}.out"
   done | _normalize_finding_markup)
   merge=$(printf '%s' "$merge" | _normalize_finding_markup)
   mn=$(printf '%s\n' "$merge" | grep -cE '^[[:space:]]*FINDING:' || true)
@@ -222,11 +227,20 @@ _chunk_coverage_gaps() {
     if [ ! -s "${dir}/chunk-${i}.out" ] \
        || [ "$(cat "${dir}/chunk-${i}.stop" 2>/dev/null)" = "max_tokens" ] \
        || grep -qE '^CHUNK_[0-9]+_FAILED' "${dir}/chunk-${i}.out" \
+       || _has_invented_tool_io "${dir}/chunk-${i}.out" \
        || ! _normalize_finding_markup < "${dir}/chunk-${i}.out" | grep -qE 'FINDINGS_START|^FINDING: '; then
       out="${out:+$out }$i"
     fi
   done
   printf '%s' "$out"
+}
+
+# True when a chunk reply contains tool calls or tool output. The review call
+# has no tools, so any such text was written by the model, and a "file" it
+# shows is invented (#7642 run 36397076485: fake `cat` output, then findings on
+# it). Such a reply is not a review of the real code.  Args: $1 reply file
+_has_invented_tool_io() {
+  grep -qE '^[[:space:]]*\{"name": *"[A-Za-z_]+", *"input": *\{|^[[:space:]]*<(function_calls|invoke|tool_use)\b' "$1" 2>/dev/null
 }
 
 # Banner for a review some of whose files were not reviewed.  Args: $1 files
