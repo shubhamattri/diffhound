@@ -512,6 +512,7 @@ _filter_diff_by_config() {
 # Per-repo cache directory
 _CACHE_REPO_ID=$(cd "$REPO_PATH" && gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null | tr '/' '-' || basename "$REPO_PATH")
 REVIEW_CACHE_DIR="$HOME/.diffhound/cache/${_CACHE_REPO_ID}"
+_LOG_TS=$(date -u +%Y%m%dT%H%M%SZ)
 mkdir -p "$REVIEW_CACHE_DIR"
 
 # ── --learn: Feedback loop — learn from edited/deleted GitHub comments ──────
@@ -1229,7 +1230,9 @@ REVIEW_JSON=$(mktemp -t "pr-${PR_NUMBER}-review.XXXXXX")
 # One log directory per run (memoised), used by every archive step.
 _run_log_dir() {
   if [ -z "${_RUN_LOG_DIR:-}" ]; then
-    _RUN_LOG_DIR="$HOME/.diffhound/logs/${_CACHE_REPO_ID:-unknown-repo}/pr-${PR_NUMBER}/$(date -u +%Y%m%dT%H%M%SZ)-${HEAD_SHA:0:7}"
+    # Called inside $(...) too, so the name must not depend on memoisation:
+    # the timestamp is fixed once at startup (_LOG_TS).
+    _RUN_LOG_DIR="$HOME/.diffhound/logs/${_CACHE_REPO_ID:-unknown-repo}/pr-${PR_NUMBER}/${_LOG_TS:-unknown}-${HEAD_SHA:0:7}"
   fi
   printf '%s' "$_RUN_LOG_DIR"
 }
@@ -1240,6 +1243,7 @@ _archive_chunk_outputs() {
   for ((i=0; i<$2; i++)); do
     cp "$1/chunk-${i}.out" "$d/" 2>/dev/null; cp "$1/chunk-${i}.manifest" "$d/" 2>/dev/null
     cp "$1/chunk-${i}.stop" "$d/" 2>/dev/null; cp "$1/chunk-${i}.err" "$d/" 2>/dev/null
+    cp "$1/chunk-${i}.prompt" "$d/" 2>/dev/null
   done
   return 0
 }
@@ -1702,7 +1706,7 @@ _build_pr_manifest() {
   if [ "$_msize" -gt 8192 ]; then
     head -c 8192 "$output_file" > "${output_file}.tmp"
     echo "" >> "${output_file}.tmp"
-    echo "[manifest truncated — use Read/Bash tools to verify anything not listed]" >> "${output_file}.tmp"
+    echo "[manifest truncated — files not listed here may still exist; mark such claims UNVERIFIABLE]" >> "${output_file}.tmp"
     mv "${output_file}.tmp" "$output_file"
   fi
 }
@@ -1949,6 +1953,7 @@ _merge_chunk_group() {
   for i in "${idx[@]}"; do
     local chunk_out="${chunk_dir}/chunk-${i}.out"
     [ ! -s "$chunk_out" ] && continue
+    _has_invented_tool_io "$chunk_out" && continue
     all_findings+="
 ## CHUNK $((i+1)) FINDINGS (files: $(cut -f1 "${chunk_dir}/chunk-${i}.manifest" 2>/dev/null | tr '\n' ', '))
 $(cat "$chunk_out")
@@ -2028,15 +2033,15 @@ _merge_chunk_findings() {
   # No chunk produced output: there is nothing to merge, so do not ask a model to.
   [ -z "$groups" ] && { : > "$output_file"; return; }
   if [ "$(printf '%s\n' "$groups" | grep -c .)" -le 1 ]; then
-    # shellcheck disable=SC2086
-    _merge_chunk_group "$chunk_dir" "$output_file" $groups
+    local -a _one; IFS=' ' read -r -a _one <<< "$groups"
+    _merge_chunk_group "$chunk_dir" "$output_file" "${_one[@]}"
     return
   fi
   echo "  ↻ chunk merge split into $(printf '%s\n' "$groups" | grep -c .) groups to fit the merge output limit" >&2
   while IFS= read -r g; do
     [ -z "$g" ] && continue
-    # shellcheck disable=SC2086
-    ( _merge_chunk_group "$chunk_dir" "${output_file}.g${n}" $g ) &
+    local -a _grp; IFS=' ' read -r -a _grp <<< "$g"
+    ( _merge_chunk_group "$chunk_dir" "${output_file}.g${n}" "${_grp[@]}" ) &
     pids+=($!); n=$((n + 1))
   done <<< "$groups"
   for g in "${pids[@]}"; do wait "$g" 2>/dev/null || true; done
@@ -2542,9 +2547,10 @@ export _FRAMEWORK_FACTS _ARCH_CHECKLIST
   # recorded so the review can never be posted as a clean pass.
   _CHUNK_GAPS=$(_chunk_coverage_gaps "$CHUNK_DIR" "$CHUNK_COUNT")
   if [ -n "$_CHUNK_GAPS" ]; then
-    echo "  ⚠ $(echo $_CHUNK_GAPS | wc -w | tr -d ' ') of ${CHUNK_COUNT} chunk review(s) produced no findings block, retrying: chunks ${_CHUNK_GAPS}" >&2
+    echo "  ⚠ $(printf '%s\n' "$_CHUNK_GAPS" | wc -w | tr -d ' ') of ${CHUNK_COUNT} chunk review(s) produced no findings block, retrying: chunks ${_CHUNK_GAPS}" >&2
     _retry_pids=()
-    for _gi in $_CHUNK_GAPS; do
+    IFS=' ' read -r -a _gap_list <<< "$_CHUNK_GAPS"
+    for _gi in "${_gap_list[@]}"; do
       # A reply cut off at max_tokens spent the budget thinking; retry it at the
       # next lower effort (the v0.7.39 rule) so the answer fits. Others retry as-is.
       _geffort=high
@@ -2559,7 +2565,8 @@ export _FRAMEWORK_FACTS _ARCH_CHECKLIST
     _CHUNK_GAPS=$(_chunk_coverage_gaps "$CHUNK_DIR" "$CHUNK_COUNT")
   fi
   if [ -n "$_CHUNK_GAPS" ]; then
-    _CHUNK_GAP_FILES=$(for _gi in $_CHUNK_GAPS; do cut -f1 "${CHUNK_DIR}/chunk-${_gi}.manifest" 2>/dev/null; done | tr '\n' ' ')
+    IFS=' ' read -r -a _gap_list <<< "$_CHUNK_GAPS"
+    _CHUNK_GAP_FILES=$(for _gi in "${_gap_list[@]}"; do cut -f1 "${CHUNK_DIR}/chunk-${_gi}.manifest" 2>/dev/null; done | tr '\n' ' ')
     echo "  ✖ REVIEW INCOMPLETE: chunks ${_CHUNK_GAPS} still have no complete review. Files not reviewed: ${_CHUNK_GAP_FILES}" >&2
   fi
   # Keep each chunk's raw output with the run log: it is the primary evidence
@@ -2596,13 +2603,10 @@ if [ "$REVIEW_TIER" = "SMALL" ] || [ "$REVIEW_TIER" = "MEDIUM" ]; then
 cat > "$PROMPT_FILE" << 'PROMPT_EOF'
 You are performing a senior-level code review. Your job here is ENGINEERING ONLY — find bugs, risks, and issues with precision. Do NOT worry about tone, style, or how you phrase things. Just be accurate. A separate pass will handle the writing style.
 
-IMPORTANT: You have access to the full codebase via Read and Bash tools. Use them.
-- When you see a changed function — read the full file to understand context before flagging anything
-- When you see a pattern in the diff — grep sibling files to check if it exists elsewhere (lateral propagation)
-- When you need to verify a type, interface, or enum — read the relevant file
-- When you're unsure about intent — check git log for the file
-- DO NOT flag something as BLOCKING based only on a diff line — read the surrounding context first
-- Use tools actively. The diff is your starting point, not your only source.
+IMPORTANT: You have NO tools in this call. You cannot read files, run bash, grep, or see git history, and nothing will answer a tool call. Everything you can know is in this prompt: the diff, the codebase context (RAG) section and the earlier review threads.
+- Do NOT write tool calls, and do NOT write what a file or command "returned": any such output would be invented, not observed.
+- Base every finding on text that is actually in this prompt. If confirming it needs code that is not in this prompt, keep the finding and mark it UNVERIFIABLE.
+- DO NOT flag something as BLOCKING based only on a diff line — use the surrounding diff context and the codebase context first.
 
 # HARD CONSTRAINTS
 
