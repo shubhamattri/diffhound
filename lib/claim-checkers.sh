@@ -191,3 +191,13 @@ _check_decl_text() {
   command -v python3 >/dev/null 2>&1 || { echo UNVERIFIABLE; return; }
   printf '%s' "$text" | python3 "${_CLAIM_CHECKERS_DIR}/decl_facts.py" "$repo" "$rel" 2>/dev/null || echo UNVERIFIABLE
 }
+
+# "X.y is unguarded / may be undefined / can throw" at file:line. FALSE when an
+# early exit on the same identifier dominates the line (lib/guard_facts.py).
+# Prints NOCLAIM | TRUE | FALSE | UNVERIFIABLE.  Args: $1 rel path  $2 line  $3 text
+_check_guard_text() {
+  local rel="$1" ln="$2" text="$3" repo="${DIFFHOUND_REPO:-}"
+  { [ -z "$repo" ] || [ -z "$rel" ] || [ -z "$ln" ]; } && { echo NOCLAIM; return; }
+  command -v python3 >/dev/null 2>&1 || { echo UNVERIFIABLE; return; }
+  printf '%s' "$text" | python3 -B "${_CLAIM_CHECKERS_DIR}/guard_facts.py" "$repo" "$rel" "$ln" 2>/dev/null || echo UNVERIFIABLE
+}

@@ -49,6 +49,11 @@ _flush() {
     printf '[claim-verify: DROP — declaration/import claim is false at head: %s]\n' "$rel" >&2
     block=""; return 0
   fi
+  local gl; gl=$(printf '%s\n' "$block" | sed -n '1s/^FINDING:[[:space:]]*//p' | sed -E 's/^.*:([0-9]+):[^:]*$/\1/')
+  if [ "$(_check_guard_text "$rel" "$gl" "$(printf '%s\n' "$block" | sed '1d')")" = "FALSE" ]; then
+    printf '[claim-verify: DROP — a guard on the same identifier dominates %s:%s]\n' "$rel" "$gl" >&2
+    block=""; return 0
+  fi
   explicit=$(printf '%s\n' "$block" | grep -m1 '^CLAIMS:' | sed 's/^CLAIMS:[[:space:]]*//')
   if [ -n "$explicit" ]; then claims="$explicit"; else claims=$(_extract_implicit_claims "$block"); fi
 

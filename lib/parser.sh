@@ -91,6 +91,10 @@ for k in ("findings","thread_statuses"):
         local _rel; _rel=$(printf '%s' "$line" | grep -oE '[A-Za-z0-9_./-]+\.[A-Za-z0-9]+:[0-9]+' | head -1 | sed 's/:[0-9]*$//')
         [ "$(_check_decl_text "$_rel" "$line")" = "FALSE" ] && drop=1
       fi
+      if [ "$drop" = "0" ] && type _check_guard_text >/dev/null 2>&1; then
+        local _gcite; _gcite=$(printf '%s' "$line" | grep -oE '[A-Za-z0-9_./-]+\.[A-Za-z0-9]+:[0-9]+' | head -1)
+        [ -n "$_gcite" ] && [ "$(_check_guard_text "${_gcite%:*}" "${_gcite##*:}" "$line")" = "FALSE" ] && drop=1
+      fi
       if [ "$drop" = "0" ] && type _extract_implicit_claims >/dev/null 2>&1; then
         claims=$(_extract_implicit_claims "$line")
         if [ -n "$claims" ]; then
@@ -343,13 +347,16 @@ _claim_verify_comments() {
   [ -d "$repo" ] || return 0
   [ "${DIFFHOUND_CLAIM_VERIFY:-1}" = "1" ] || return 0
   type _check_decl_text >/dev/null 2>&1 || return 0
-  local DIFFHOUND_REPO="$repo" tmp line rel dropped=0
+  local DIFFHOUND_REPO="$repo" tmp line rel cln ctext dropped=0
   tmp=$(mktemp -t "diffhound-cvcom.XXXXXX")
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       COMMENT:*)
         rel=$(printf '%s' "$line" | sed -E 's/^COMMENT:[[:space:]]*([^:]+):.*/\1/')
-        if [ "$(_check_decl_text "$rel" "$(printf '%s' "${line#* — }" | tr '\037' '\n')")" = "FALSE" ]; then
+        cln=$(printf '%s' "$line" | sed -E 's/^COMMENT:[[:space:]]*[^:]+:([0-9]+).*/\1/')
+        ctext=$(printf '%s' "${line#* — }" | tr '\037' '\n')
+        if [ "$(_check_decl_text "$rel" "$ctext")" = "FALSE" ] \
+           || { type _check_guard_text >/dev/null 2>&1 && [ "$(_check_guard_text "$rel" "$cln" "$ctext")" = "FALSE" ]; }; then
           printf '[claim-verify-comments: removed false claim on %s: %s]\n' "$rel" "$(printf '%s' "$line" | cut -c1-100)" >&2
           dropped=$((dropped + 1)); continue
         fi ;;
