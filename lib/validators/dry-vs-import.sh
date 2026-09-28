@@ -38,7 +38,7 @@ while IFS= read -r line || [ -n "$line" ]; do
       ;;
     WHAT:*)
       block+="$line"$'\n'
-      if printf '%s' "$line" | grep -qiE "$DRY_WORDS"; then
+      if grep -qiE "$DRY_WORDS" <<< "$line"; then
         is_dry=1
         sym=$(printf '%s' "$line" | grep -oE '`[_a-zA-Z][_a-zA-Z0-9]*`' | head -1 | tr -d '`' || true)
       fi

@@ -124,7 +124,7 @@ extract_marker_tuple() {
 #         it already ends with a marker (idempotent).
 append_marker() {
   local filepath="$1" body="$2"
-  if printf '%s' "$body" | grep -qE '<!-- diffhound-id v1: [A-Za-z0-9+/=]+ -->'; then
+  if grep -qE '<!-- diffhound-id v1: [A-Za-z0-9+/=]+ -->' <<< "$body"; then
     # Already marked (e.g. this code ran twice). Don't double-append.
     printf '%s' "$body"
     return 0

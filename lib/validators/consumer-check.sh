@@ -127,7 +127,7 @@ while IFS= read -r line || [ -n "$line" ]; do
     WHAT:*)
       block+="$line"$'\n'
       what_line="$line"
-      if printf '%s' "$line" | grep -qiE "$TRIGGER_WORDS"; then
+      if grep -qiE "$TRIGGER_WORDS" <<< "$line"; then
         matched_trigger=1
       fi
       if [ -z "$target" ]; then
@@ -137,7 +137,7 @@ while IFS= read -r line || [ -n "$line" ]; do
     EVIDENCE:*)
       block+="$line"$'\n'
       evidence_line="$line"
-      if [ "$matched_trigger" -eq 0 ] && printf '%s' "$line" | grep -qiE "$TRIGGER_WORDS"; then
+      if [ "$matched_trigger" -eq 0 ] && grep -qiE "$TRIGGER_WORDS" <<< "$line"; then
         matched_trigger=1
       fi
       if [ -z "$target" ]; then

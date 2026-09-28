@@ -100,7 +100,7 @@ _check_usage() {
   while IFS=: read -r file ln _; do
     { [ -z "$file" ] || [ -z "$ln" ]; } && continue
     s=$((ln>3?ln-3:1)); e=$((ln+8))
-    if sed -n "${s},${e}p" "$file" 2>/dev/null | grep -qF -- "$subject"; then present=yes; break; fi
+    if grep -qF -- "$subject" <<< "$(sed -n "${s},${e}p" "$file" 2>/dev/null)"; then present=yes; break; fi
   done <<< "$hits"
   if [ "$expected" = "false" ]; then
     [ "$present" = "yes" ] && echo FALSE || echo UNVERIFIABLE
@@ -139,25 +139,25 @@ _extract_implicit_claims() {
   local sym
 
   # symbol_defined (absence): "X doesn't exist" -> claim X absent
-  if printf '%s' "$what" | grep -qiE "$absence_re"; then
+  if grep -qiE "$absence_re" <<< "$what"; then
     while IFS= read -r sym; do
       [ -n "$sym" ] && claims="${claims:+$claims; }symbol_defined:${sym}:repo:false"
     done < <(printf '%s' "$what" | grep -iE "$absence_re" | grep -oE '`@?[A-Za-z_][A-Za-z0-9_]{2,}`|[A-Z][A-Z0-9_]{3,}' | tr -d '`' | sort -u)
   fi
 
   # symbol_defined (phantom vuln): "`X` is unscoped/resolver" -> claim X exists
-  if printf '%s' "$what" | grep -qiE "$vuln_re"; then
+  if grep -qiE "$vuln_re" <<< "$what"; then
     sym=$(printf '%s' "$what" | grep -oiE "\`[A-Za-z_][A-Za-z0-9_]+\`[^.\`]{0,45}(${vuln_re})" | grep -oE "\`[A-Za-z_][A-Za-z0-9_]+\`" | head -1 | tr -d '`')
     [ -n "$sym" ] && claims="${claims:+$claims; }symbol_defined:${sym}:repo:true"
   fi
 
   # dependency_version: node_modules citation or "not in package.json"
-  if printf '%s' "$what" | grep -qoiE "$nm_re"; then
+  if grep -qoiE "$nm_re" <<< "$what"; then
     local cited; cited=$(printf '%s' "$what" | grep -oiE "$nm_re" | head -1)
     local pkg; pkg=$(printf '%s' "$cited" | sed -E 's#.*node_modules/(@[^/]+/[^/]+|[^/]+).*#\1#')
     [ -n "$pkg" ] && claims="${claims:+$claims; }dependency_version:${pkg}:nm:missing"
   fi
-  if printf '%s' "$what" | grep -qiE "$dep_absence_re"; then
+  if grep -qiE "$dep_absence_re" <<< "$what"; then
     while IFS= read -r sym; do
       [ -n "$sym" ] && claims="${claims:+$claims; }dependency_version:${sym}::missing"
     done < <(printf '%s' "$what" | grep -iE "$dep_absence_re" | grep -oE '`[a-z0-9@/_-]+`' | tr -d '`' | sort -u)

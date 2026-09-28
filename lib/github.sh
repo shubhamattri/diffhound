@@ -78,6 +78,40 @@ _inject_markers_into_review_json() {
   rm -f "$_bodies_in" "$_bodies_out"
 }
 
+# Id of a review already on the PR from $5 at commit $4 whose body equals the
+# body in review JSON $6, or nothing. A POST that errors client-side (timeout,
+# 5xx after the write) may still have created the review; on #7642 run
+# 36418822496 that happened and the fallback posted the body and 16 inline
+# comments a second time.  Args: owner repo pr head_sha login review_json
+_find_posted_review() {
+  local body
+  body=$(jq -r '.body // ""' "$6" 2>/dev/null)
+  _gh_api_all "/repos/$1/$2/pulls/$3/reviews" | jq -r --arg sha "$4" --arg login "$5" --arg body "$body" \
+    'def norm: gsub("\r"; "") | sub("\\s+$"; "");
+     [.[] | select(.commit_id == $sha and .user.login == $login and ((.body // "") | norm) == ($body | norm))] | last | .id // empty' 2>/dev/null
+}
+
+# "path<TAB>line<TAB>body" for every inline comment by $4 on the PR, for
+# skipping comments that are already there.  Args: owner repo pr login
+_existing_comment_keys() {
+  _gh_api_all "/repos/$1/$2/pulls/$3/comments" | jq -r --arg login "$4" \
+    '.[] | select(.user.login == $login) | [.path, ((.line // .original_line) | tostring), .body] | @json' 2>/dev/null
+}
+
+# Post one inline comment unless the same path/line/body is already on the PR.
+# Echoes "posted" or "skipped".  Args: owner repo pr sha path line body keys_file
+_post_inline_once() {
+  local key
+  key=$(jq -cn --arg p "$5" --arg l "$6" --arg b "$7" '[$p, $l, $b]')
+  if [ -s "$8" ] && grep -qxF -- "$key" "$8"; then echo skipped; return 0; fi
+  if gh api --method POST -H "Accept: application/vnd.github+json" \
+      "/repos/$1/$2/pulls/$3/comments" \
+      -f "body=$7" -f "commit_id=$4" -f "path=$5" -F "line=$6" > /dev/null 2>&1; then
+    printf '%s\n' "$key" >> "$8"; echo posted
+  fi
+  return 0
+}
+
 # Post a complete review with inline comments to GitHub
 # Falls back to body-only + individual comments if bulk fails
 post_review() {
@@ -94,7 +128,7 @@ post_review() {
   local new_comment_count
   new_comment_count=$(wc -l < "$new_comments_file" | tr -d ' ')
 
-  local _post_err
+  local _post_err _bulk_failed=false _existing_review="" _login="${REVIEWER_LOGIN:-}"
   _post_err=$(mktemp)
   if ! gh api \
     --method POST \
@@ -102,6 +136,17 @@ post_review() {
     -H "X-GitHub-Api-Version: 2022-11-28" \
     "/repos/${repo_owner}/${repo_name}/pulls/${pr_number}/reviews" \
     --input "$review_json" > /dev/null 2>"$_post_err"; then
+
+    _bulk_failed=true
+    echo "  review POST failed: $(head -c 300 "$_post_err" | tr '\n' ' ')" >&2
+    [ -n "$_login" ] || _login=$(gh api user --jq .login 2>/dev/null)
+    _existing_review=$(_find_posted_review "$repo_owner" "$repo_name" "$pr_number" "$head_sha" "$_login" "$review_json")
+  fi
+  if [ -n "$_existing_review" ]; then
+    # The failed POST had in fact created the review. Posting again duplicates it.
+    echo "  ...but the review exists on GitHub (id ${_existing_review}); not posting it again" >&2
+    new_comment_count=$(_gh_api_all "/repos/${repo_owner}/${repo_name}/pulls/${pr_number}/reviews/${_existing_review}/comments" | jq 'length' 2>/dev/null || echo 0)
+  elif [ "$_bulk_failed" = true ]; then
 
     # Inline comments may have invalid line numbers — retry with body-only review
     local _fallback_json
@@ -116,7 +161,8 @@ post_review() {
       --input "$_fallback_json" > /dev/null 2>&1; then
 
       # Body posted, now post inline comments individually
-      local inline_posted=0
+      local inline_posted=0 _keys
+      _keys=$(mktemp); _existing_comment_keys "$repo_owner" "$repo_name" "$pr_number" "$_login" > "$_keys"
       if [ "$new_comment_count" -gt 0 ]; then
         while IFS=: read -r filepath line rest; do
           [[ ! "$filepath" =~ ^[a-zA-Z0-9/_.-]+$ ]] && continue
@@ -126,13 +172,8 @@ post_review() {
           comment=$(strip_severity_label "$rest")
           [ -z "$(printf '%s' "$comment" | tr -d '[:space:]')" ] && continue
           comment=$(append_marker "$filepath" "$comment")
-          gh api --method POST \
-            -H "Accept: application/vnd.github+json" \
-            "/repos/${repo_owner}/${repo_name}/pulls/${pr_number}/comments" \
-            -f "body=${comment}" \
-            -f "commit_id=${head_sha}" \
-            -f "path=${filepath}" \
-            -F "line=${line}" > /dev/null 2>&1 && inline_posted=$((inline_posted + 1))
+          [ "$(_post_inline_once "$repo_owner" "$repo_name" "$pr_number" "$head_sha" "$filepath" "$line" "$comment" "$_keys")" = posted ] \
+            && inline_posted=$((inline_posted + 1))
         done < "$new_comments_file"
       fi
       new_comment_count=$inline_posted
@@ -149,7 +190,8 @@ post_review() {
           review_event="COMMENT"
           rm -f "${_fallback_json}.retry"
           # Post inline comments individually (same logic as body-only success path)
-          local inline_posted=0
+          local inline_posted=0 _keys
+          _keys=$(mktemp); _existing_comment_keys "$repo_owner" "$repo_name" "$pr_number" "$_login" > "$_keys"
           if [ "$new_comment_count" -gt 0 ]; then
             while IFS=: read -r filepath line rest; do
               [[ ! "$filepath" =~ ^[a-zA-Z0-9/_.-]+$ ]] && continue
@@ -159,7 +201,8 @@ post_review() {
               comment=$(strip_severity_label "$rest")
               [ -z "$(printf '%s' "$comment" | tr -d '[:space:]')" ] && continue
               comment=$(append_marker "$filepath" "$comment")
-              gh api --method POST                 -H "Accept: application/vnd.github+json"                 "/repos/${repo_owner}/${repo_name}/pulls/${pr_number}/comments"                 -f "body=${comment}"                 -f "commit_id=${head_sha}"                 -f "path=${filepath}"                 -F "line=${line}" > /dev/null 2>&1 && inline_posted=$((inline_posted + 1))
+              [ "$(_post_inline_once "$repo_owner" "$repo_name" "$pr_number" "$head_sha" "$filepath" "$line" "$comment" "$_keys")" = posted ] \
+                && inline_posted=$((inline_posted + 1))
             done < "$new_comments_file"
           fi
           new_comment_count=$inline_posted

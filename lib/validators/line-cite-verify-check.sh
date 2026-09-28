@@ -92,7 +92,7 @@ _check_and_emit() {
 
   # Need an absence-wording exemption check first — otherwise we'd drop
   # legitimate "X was removed from this line" findings.
-  if printf '%s' "$what" | grep -qiE -- "$ABSENCE_WORDS"; then
+  if grep -qiE -- "$ABSENCE_WORDS" <<< "$what"; then
     _emit_block; block=""; what=""; header_prefix=""; finding_path=""; finding_line=""; return
   fi
 
@@ -147,7 +147,7 @@ _check_and_emit() {
   while IFS= read -r sym; do
     [ -z "$sym" ] && continue
     # Skip generic/framework tokens.
-    if printf '%s' "$sym" | grep -qiE -- "$SKIPLIST_RE"; then
+    if grep -qiE -- "$SKIPLIST_RE" <<< "$sym"; then
       continue
     fi
     # Skip very short identifiers.
@@ -160,10 +160,10 @@ _check_and_emit() {
     local methonly="${sym##*.}"
 
     # Window check (fixed-string match — don't accidentally regex-meta the dot).
-    if printf '%s' "$window" | grep -qF -- "$sym"; then
+    if grep -qF -- "$sym" <<< "$window"; then
       continue  # found in window
     fi
-    if [ "$methonly" != "$sym" ] && printf '%s' "$window" | grep -qF -- "$methonly"; then
+    if [ "$methonly" != "$sym" ] && grep -qF -- "$methonly" <<< "$window"; then
       continue  # qualified-name mismatch but unqualified found — accept
     fi
 

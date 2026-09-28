@@ -83,15 +83,15 @@ _check_and_emit() {
 
   # Absence-wording exemption — finding might legitimately call out a guard
   # that was removed. Don't drop.
-  if printf '%s' "$what" | grep -qiE -- "$ABSENCE_WORDS"; then
+  if grep -qiE -- "$ABSENCE_WORDS" <<< "$what"; then
     _emit_block; block=""; what=""; header_prefix=""; finding_path=""; return
   fi
 
   # Need a comparison phrase. Any of the four alternatives counts.
-  if ! printf '%s' "$what" | grep -qiE -- "$CMP_WORDS" \
-     && ! printf '%s' "$what" | grep -qiE -- "$CMP_WORDS_2" \
-     && ! printf '%s' "$what" | grep -qiE -- "$CMP_WORDS_3" \
-     && ! printf '%s' "$what" | grep -qiE -- "$CMP_WORDS_4"; then
+  if ! grep -qiE -- "$CMP_WORDS" <<< "$what" \
+     && ! grep -qiE -- "$CMP_WORDS_2" <<< "$what" \
+     && ! grep -qiE -- "$CMP_WORDS_3" <<< "$what" \
+     && ! grep -qiE -- "$CMP_WORDS_4" <<< "$what"; then
     _emit_block; block=""; what=""; header_prefix=""; finding_path=""; return
   fi
 

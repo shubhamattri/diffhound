@@ -318,6 +318,63 @@ eq "archive: every caller gets the same run log dir" "$a" "$b"
 has "archive: _LOG_TS is set at startup (manifest used it unset under set -u)" "$(sed -n '1,600p' "$ROOT/lib/review.sh")" '_LOG_TS=$(date -u'
 has "archive: chunk prompts are archived" "$(sed -n '/^_archive_chunk_outputs() {/,/^}/p' "$ROOT/lib/review.sh")" 'chunk-${i}.prompt'
 
+# ── 13. run 36418822496: flaky coverage under pipefail; double posting ───────
+# `producer | grep -q` under pipefail fails when grep exits before the producer
+# finishes writing; a long complete reply was then judged "no findings block".
+BIG="$TMP/big"; mkdir -p "$BIG"; printf 'diff --git a/b b/b\n+x\n' > "$BIG/chunk-0.diff"
+{ printf '### FINDINGS_START\nFINDING: b.ts:1:NIT\nWHAT: x\n'; for i in $(seq 1 40000); do echo "EVIDENCE: long reply line $i"; done; printf '### FINDINGS_END\n'; } > "$BIG/chunk-0.out"
+flaky=0; for r in 1 2 3; do [ -z "$(_chunk_coverage_gaps "$BIG" 1)" ] || flaky=$((flaky+1)); done
+eq "pipefail: a long complete reply is never judged incomplete" "$flaky" "0"
+ADIR="$TMP/adapter"; mkdir -p "$ADIR/repo"
+{ printf 'FINDING: b.ts:1:NIT\nWHAT: `thing` could be named better\nUNVERIFIABLE: no\n'; for i in $(seq 1 20000); do echo "context line $i"; done; } > "$ADIR/in.txt"
+got=$(DIFFHOUND_REPO="$ADIR/repo" DIFFHOUND_OFFLINE=1 DIFFHOUND_VALIDATORS_RUN=cat "$ROOT/lib/validators/format-adapter.sh" < "$ADIR/in.txt" 2>/dev/null | head -1)
+eq "pipefail: format-adapter still sees FINDING blocks in a large input" "$got" "FINDING: b.ts:1:NIT"
+
+# Posting: a POST that errors after GitHub created the review must not be repeated.
+GH="$TMP/ghstub"; mkdir -p "$GH/bin"; : > "$GH/calls"
+cat > "$GH/bin/gh" <<'SH'
+#!/usr/bin/env bash
+echo "$*" >> "$GHSTATE/calls"
+case "$*" in
+  *"--method POST"*"/reviews"*)
+    if [ -f "$GHSTATE/bulk_creates" ] && jq -e '.comments | length > 0' "${@: -1}" >/dev/null; then
+      cp "${@: -1}" "$GHSTATE/created.json"; echo "HTTP 502" >&2; exit 1; fi
+    if jq -e '.comments | length > 0' "${@: -1}" >/dev/null; then echo "HTTP 422 line" >&2; exit 1; fi
+    exit 0 ;;
+  *"--method POST"*"/comments"*) exit 0 ;;
+  *"/reviews/77/comments"*) echo '[{"id":1},{"id":2}]' ;;
+  *"/reviews"*)
+    if [ -f "$GHSTATE/created.json" ]; then
+      jq -c '[{id: 77, commit_id: .commit_id, user: {login: "bot"}, body: (.body + "\n")}]' "$GHSTATE/created.json"
+    else echo '[]'; fi ;;
+  *"/comments"*) cat "$GHSTATE/existing.json" 2>/dev/null || echo '[]' ;;
+  *) echo '[]' ;;
+esac
+SH
+chmod +x "$GH/bin/gh"
+printf 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -0,0 +1,3 @@\n+a\n+b\n+c\n' > "$GH/diff"
+printf 'src/a.ts:1:BLOCKING — first\nsrc/a.ts:2:NIT — second\n' > "$GH/new"
+mkrev() { jq -n '{commit_id: "sha1", event: "COMMENT", body: "## Scorecard 71/100", comments: [{path: "src/a.ts", line: 1, body: "first"}, {path: "src/a.ts", line: 2, body: "second"}]}' > "$GH/review.json"; }
+spinner_fail() { :; }
+mkrev; touch "$GH/bulk_creates"
+( export GHSTATE="$GH" PATH="$GH/bin:$PATH" REVIEWER_LOGIN=bot
+  post_review o r 1 sha1 COMMENT "$GH/summary" "$GH/review.json" "$GH/new" "$GH/diff" 2>/dev/null
+  echo "$_POSTED_OK $_FINAL_COMMENT_COUNT" > "$GH/result" )
+eq "post: review created despite a POST error is not posted again" "$(grep -c -- '--method POST' "$GH/calls")" "1"
+eq "post: counted as posted with its inline comments" "$(cat "$GH/result")" "true 2"
+rm -f "$GH/bulk_creates" "$GH/created.json"; : > "$GH/calls"
+mkrev; : > "$GH/calls"
+( export GHSTATE="$GH" PATH="$GH/bin:$PATH" REVIEWER_LOGIN=bot
+  post_review o r 1 sha1 COMMENT "$GH/summary" "$GH/review.json" "$GH/new" "$GH/diff" >/dev/null 2>&1 )
+first_body=$(grep -- '--method POST' "$GH/calls" | grep '/comments' | head -1)
+eq "post: real bulk failure still falls back (failed bulk + body + each comment once)" "$(grep -c -- '--method POST' "$GH/calls")" "4"
+bodyA=$(append_marker src/a.ts "first")
+jq -n --arg b "$bodyA" '[{user: {login: "bot"}, path: "src/a.ts", line: 1, body: $b}]' > "$GH/existing.json"; : > "$GH/calls"
+mkrev; : > "$GH/calls"
+( export GHSTATE="$GH" PATH="$GH/bin:$PATH" REVIEWER_LOGIN=bot
+  post_review o r 1 sha1 COMMENT "$GH/summary" "$GH/review.json" "$GH/new" "$GH/diff" >/dev/null 2>&1 )
+eq "post: a comment already on the PR is not posted again in the fallback" "$(grep -- '--method POST' "$GH/calls" | grep -c '/comments')" "1"
+
 echo
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ] || { printf '  failed: %s\n' "${FAILED[@]}"; exit 1; }

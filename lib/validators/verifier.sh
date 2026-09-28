@@ -271,7 +271,7 @@ _emit_block_if_kept() {
   [ -z "$block" ] && return
 
   # Only verify BLOCKING / SHOULD-FIX findings. NITs pass through.
-  if ! printf '%s' "$header_severity" | grep -qE -- "$VERIFY_SEVERITIES"; then
+  if ! grep -qE -- "$VERIFY_SEVERITIES" <<< "$header_severity"; then
     printf '%s' "$block"
     return
   fi

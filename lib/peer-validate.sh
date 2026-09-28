@@ -82,7 +82,7 @@ _validate_peer_output() {
   local last_chars
   last_chars=$(tail -c 20 "$file" | tr -d '[:space:]')
   # POSIX-safe character class: literal `]` must appear first inside `[]`.
-  if [ -n "$last_chars" ] && ! printf '%s' "$last_chars" | grep -qE '[]".!?)}]$'; then
+  if [ -n "$last_chars" ] && ! grep -qE '[]".!?)}]$' <<< "$last_chars"; then
     echo "  warning: ${name} output appears truncated -- discarding" >&2
     echo "${name}_UNAVAILABLE" > "$file"
   fi

@@ -82,11 +82,11 @@ for k in ("findings","thread_statuses"):
       "### Blockers"*|"### Should-Fix"*) insec=1 ;;
       "## "*|"### "*) insec="" ;;
     esac
-    if [ -n "$insec" ] && printf '%s' "$line" | grep -qE '^- '; then
+    if [ -n "$insec" ] && grep -qE '^- ' <<< "$line"; then
       drop=0
       bl=$(printf '%s' "$line" | grep -oE '[A-Za-z0-9_./-]+\.(vue|ts|tsx|js|jsx|py):[0-9]+' | head -1)
       [ -n "$bl" ] && bl=$(basename "$bl")
-      if [ -n "$bl" ] && printf '%s' "$fpset" | grep -qF " $bl "; then drop=1; fi
+      if [ -n "$bl" ] && grep -qF " $bl " <<< "$fpset"; then drop=1; fi
       if [ "$drop" = "0" ] && type _check_decl_text >/dev/null 2>&1; then
         local _rel; _rel=$(printf '%s' "$line" | grep -oE '[A-Za-z0-9_./-]+\.[A-Za-z0-9]+:[0-9]+' | head -1 | sed 's/:[0-9]*$//')
         [ "$(_check_decl_text "$_rel" "$line")" = "FALSE" ] && drop=1
@@ -217,7 +217,9 @@ _rereview_verdict_capped() {
 _api_empty_is_failure() { [ -n "${1//[[:space:]]/}" ]; }
 
 # Chunk indices (space-separated) whose review output is missing, empty, a
-# failure marker, cut off at max_tokens, or has no FINDINGS block. A chunk that reviewed its files and
+# failure marker, cut off at max_tokens, or has no FINDINGS block. (No
+# `producer | grep -q`: under set -o pipefail the producer's SIGPIPE when grep
+# exits early made complete chunks look incomplete at random, #7642 run 5.) A chunk that reviewed its files and
 # found nothing still emits an empty FINDINGS block, so a missing block means
 # the files were not reviewed.  Args: $1 chunk dir  $2 count
 _chunk_coverage_gaps() {
@@ -228,7 +230,7 @@ _chunk_coverage_gaps() {
        || [ "$(cat "${dir}/chunk-${i}.stop" 2>/dev/null)" = "max_tokens" ] \
        || grep -qE '^CHUNK_[0-9]+_FAILED' "${dir}/chunk-${i}.out" \
        || _has_invented_tool_io "${dir}/chunk-${i}.out" \
-       || ! _normalize_finding_markup < "${dir}/chunk-${i}.out" | grep -qE 'FINDINGS_START|^FINDING: '; then
+       || ! grep -qE 'FINDINGS_START|^FINDING: ' <<< "$(_normalize_finding_markup < "${dir}/chunk-${i}.out")"; then
       out="${out:+$out }$i"
     fi
   done
@@ -548,7 +550,7 @@ parse_summary() {
           _rest=$(echo "$_sline" | sed 's/^[^:]*: //')
           _score=$(echo "$_rest" | grep -oE '^[0-9]+/[0-9]+' || true)
           _reason=$(echo "$_rest" | sed 's/^[0-9]*\/[0-9]* *[—–-]* *//')
-          if echo "$_cat" | grep -qi "total"; then
+          if grep -qi "total" <<< "$_cat"; then
             echo "| **${_cat}** | **${_score}** | ${_reason} |"
           elif [ -n "$_score" ]; then
             echo "| ${_cat} | ${_score} | ${_reason} |"

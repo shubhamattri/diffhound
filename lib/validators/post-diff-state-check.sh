@@ -165,7 +165,7 @@ _extract_identifiers() {
     | while IFS= read -r id; do
         [ -z "$id" ] && continue
         [ "${#id}" -lt 4 ] && continue
-        printf '%s' "$id" | grep -qE -- "$SKIP_IDENTS" && continue
+        grep -qE -- "$SKIP_IDENTS" <<< "$id" && continue
         printf '%s\n' "$id"
       done
 }
@@ -238,19 +238,19 @@ _check_and_emit() {
   if [ -z "$block" ]; then return; fi
 
   # Absence-wording exemption.
-  if printf '%s' "$what" | grep -qiE -- "$ABSENCE_WORDS"; then
+  if grep -qiE -- "$ABSENCE_WORDS" <<< "$what"; then
     _emit_block; _reset; return
   fi
 
   # Detect which trigger family fires.
   local is_dead_guard=0 is_missing_test=0
-  if printf '%s' "$what" | grep -qiE -- "$DEAD_GUARD_RE"; then
+  if grep -qiE -- "$DEAD_GUARD_RE" <<< "$what"; then
     is_dead_guard=1
   fi
-  if printf '%s' "$what" | grep -qiE -- "$MISSING_TEST_RE_1" \
-   || printf '%s' "$what" | grep -qiE -- "$MISSING_TEST_RE_2" \
-   || printf '%s' "$what" | grep -qiE -- "$LACKS_UPDATE_RE_1" \
-   || printf '%s' "$what" | grep -qiE -- "$LACKS_UPDATE_RE_2"; then
+  if grep -qiE -- "$MISSING_TEST_RE_1" <<< "$what" \
+   || grep -qiE -- "$MISSING_TEST_RE_2" <<< "$what" \
+   || grep -qiE -- "$LACKS_UPDATE_RE_1" <<< "$what" \
+   || grep -qiE -- "$LACKS_UPDATE_RE_2" <<< "$what"; then
     is_missing_test=1
   fi
   if [ "$is_dead_guard" -eq 0 ] && [ "$is_missing_test" -eq 0 ]; then
