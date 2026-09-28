@@ -1,0 +1,13 @@
+### FINDINGS_START
+FINDING: src/access.ts:3:BLOCKING
+WHAT: `requireEnabled` is declared twice in this file, duplicate identifier, build will not compile.
+EVIDENCE: the flag payload is
+```json
+{"findings": [], "flag": "CLARO"}
+```
+UNVERIFIABLE: no
+FINDING: src/access.ts:4:NIT
+WHAT: `requireEnabled` reads process.env on every call
+EVIDENCE: line 4
+UNVERIFIABLE: no
+### FINDINGS_END

@@ -127,10 +127,11 @@ _normalize_finding_markup() {
 # it is used only when complete and parseable. At 4096 tokens it was cut off on
 # every #7642 run, and the runs whose merge had no parseable FINDING: line sent
 # unvalidated prose to the voice pass, which posted the invented compile errors.
-# Args: $1 merge text  $2 merge stop_reason  $3 chunk dir  $4 chunk count -> stdout
+# Args: $1 merge text  $2 merge stop_reason  $3 chunk dir  $4.. chunk indices -> stdout
 _select_merge_output() {
-  local merge="$1" stop="$2" dir="$3" count="$4" raw i mn rn
-  raw=$(for ((i=0; i<count; i++)); do
+  local merge="$1" stop="$2" dir="$3" raw i mn rn
+  shift 3
+  raw=$(for i in "$@"; do
     [ -s "${dir}/chunk-${i}.out" ] && cat "${dir}/chunk-${i}.out"
   done | _normalize_finding_markup)
   merge=$(printf '%s' "$merge" | _normalize_finding_markup)
@@ -171,6 +172,64 @@ _scorecard_only() {
   fi
   j=$(_extract_json "$f" 2>/dev/null)
   [ -n "$j" ] && printf '%s' "$j" | jq -c '{scorecard: .scorecard}' 2>/dev/null | grep -v '"scorecard":null' || true
+}
+
+# Groups of chunk indices whose raw outputs total at most $3 bytes, in order,
+# one group per line. A chunk bigger than the budget gets a group of its own.
+# Args: $1 chunk dir  $2 chunk count  $3 byte budget
+_plan_merge_groups() {
+  local dir="$1" count="$2" budget="$3" i sz cur="" tot=0
+  for ((i=0; i<count; i++)); do
+    [ -s "${dir}/chunk-${i}.out" ] || continue
+    sz=$(wc -c < "${dir}/chunk-${i}.out" | tr -d ' ')
+    if [ -n "$cur" ] && [ $((tot + sz)) -gt "$budget" ]; then
+      echo "$cur"; cur=""; tot=0
+    fi
+    cur="${cur:+$cur }$i"; tot=$((tot + sz))
+  done
+  [ -n "$cur" ] && echo "$cur"
+  return 0
+}
+
+# --force-full means a full review of the whole PR, not a re-review of the delta
+# since the last one (#7642: a force-full on an already-reviewed head ran as a
+# scoped re-review). Drops the baseline: last reviewed commit and score anchor.
+# Existing threads stay as context. Returns 1 (no-op) without --force-full.
+_force_full_baseline() {
+  [ "${FORCE_FULL:-false}" = true ] || return 1
+  LAST_REVIEWED_SHA=""
+  PREV_SCORECARD_JSON=""
+  return 0
+}
+
+# Re-review verdicts are capped at COMMENT (v0.7.11); a --force-full review is a
+# full review, so it is not.  Args: $1 is_rereview  $2 force_full  $3 event
+_rereview_verdict_capped() {
+  [ "$1" = true ] && [ "$2" != true ] && [ "$3" = "REQUEST_CHANGES" ]
+}
+
+# True while elapsed seconds ($1) are under the budget ($2).
+_within_time_budget() { [ "${1:-0}" -lt "${2:-0}" ]; }
+
+# Chunk prompt header for --force-full on a PR with earlier review threads: a
+# full review of every file, with the threads as context rather than as scope.
+# Args: $1 this chunk's thread file
+_force_full_chunk_header() {
+  echo "# FULL REVIEW (--force-full) — EVERY FILE GETS FULL SCRUTINY"
+  echo ""
+  echo "This is a full review of the whole PR, not a re-review of recent changes. Review every file in your chunk as if for the first time."
+  echo ""
+  echo "## Earlier review threads on your files (context)"
+  if [ -s "${1:-}" ]; then
+    echo "For each thread, report THREAD_STATUS. If the author answered with evidence, check that evidence against the current code: do NOT raise the concern again if the answer holds, and DO raise it (as STILL_OPEN or AUTHOR_WRONG, with evidence) if the concern is still true."
+    echo ""
+    cat "$1"
+  else
+    echo "(No existing threads for your files)"
+  fi
+  echo ""
+  echo "---"
+  echo ""
 }
 
 # Threads for one review chunk: every WHOLE thread block (header, reviewer body,

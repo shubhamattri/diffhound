@@ -1,0 +1,6 @@
+### FINDINGS_START
+FINDING: src/access.ts:4:NIT
+WHAT: `requireEnabled` reads process.env on every call
+EVIDENCE: line 4
+UNVERIFIABLE: no
+### FINDINGS_END

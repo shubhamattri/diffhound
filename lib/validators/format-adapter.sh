@@ -35,7 +35,13 @@ _extract_inline_json() {
 
 _json=$(_extract_inline_json "$INPUT")
 
-if [ -n "$_json" ] && printf '%s' "$_json" | jq -e '.findings' >/dev/null 2>&1; then
+# FINDING: blocks take precedence: a ```json fence quoted inside a finding's
+# EVIDENCE is not the review's output format (#7642: a quoted {"findings": []}
+# replaced 27 FINDING blocks with an empty JSON document).
+_has_finding_blocks=false
+printf '%s' "$INPUT" | grep -qE '^[[:space:]]*FINDING:' && _has_finding_blocks=true
+
+if [ "$_has_finding_blocks" = false ] && [ -n "$_json" ] && printf '%s' "$_json" | jq -e '.findings' >/dev/null 2>&1; then
   # JSON path: extract findings → FINDING: blocks → validators → re-merge
   _findings_text=$(printf '%s' "$_json" | jq -r '
     .findings[] |
