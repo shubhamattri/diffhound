@@ -1,0 +1,4 @@
+FINDING: services/api/migrations/20260924100000_claro_outbox_portal_intents.ts:5:SHOULD-FIX
+WHAT: making `command_id` nullable here means the `unique(["command_id", "kind"])` from 20260909100000_claro_claim_commands.ts no longer dedups portal hand-off rows, because Postgres treats NULLs as distinct.
+EVIDENCE: table.uuid("command_id").nullable().alter()
+UNVERIFIABLE: no

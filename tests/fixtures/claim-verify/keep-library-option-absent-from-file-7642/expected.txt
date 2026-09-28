@@ -1,0 +1,3 @@
+FINDING: services/api/src/claims/claro/outbox.unit.spec.ts:10:NIT
+WHAT: `searchPath` is not defined for this suite, so it runs against the default schema unlike the integration specs.
+UNVERIFIABLE: no

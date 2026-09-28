@@ -149,7 +149,7 @@ def in_other_repo_files(repo: str, ident: str, exclude: str) -> bool:
     found = False
     try:
         if os.path.isdir(os.path.join(repo, ".git")) or os.path.isfile(os.path.join(repo, ".git")):
-            r = subprocess.run(["git", "-C", repo, "grep", "-l", "-F", "-e", ident, "--", ".", ":(exclude)" + exclude],
+            r = subprocess.run(["git", "-C", repo, "grep", "--untracked", "-l", "-F", "-e", ident, "--", ".", ":(exclude)" + exclude],
                                capture_output=True, text=True, timeout=60)
             found = bool(r.stdout.strip())
         else:
