@@ -3310,6 +3310,8 @@ _CLAUDE_TIMEOUT=$(( 180 + _PROMPT_BYTES / 300 ))
 [ "$_CLAUDE_TIMEOUT" -lt 180 ] && _CLAUDE_TIMEOUT=180
 echo "  [debug] prompt=${_PROMPT_BYTES}B, timeout=${_CLAUDE_TIMEOUT}s" >&2
 DIFFHOUND_STAGE="primary-review"
+_MONO_STOP=$(mktemp -t "pr-${PR_NUMBER}-mono-stop.XXXXXX")
+export DIFFHOUND_STOP_REASON_FILE="$_MONO_STOP"
 if ! _call_api "claude-opus-5" 32000 "$_CLAUDE_TIMEOUT" high < "$PROMPT_FILE" > "$CLAUDE_OUT" 2>"${CLAUDE_OUT}.stderr"; then
   echo "  [debug] claude failed — out=$(wc -c < "$CLAUDE_OUT" 2>/dev/null)B stderr=$(cat "${CLAUDE_OUT}.stderr" 2>/dev/null | head -3)" >&2
   # Check if partial output is usable (timeout may kill mid-write but JSON is complete)
@@ -3332,6 +3334,14 @@ if ! _call_api "claude-opus-5" 32000 "$_CLAUDE_TIMEOUT" high < "$PROMPT_FILE" > 
 fi
 
 spinner_stop "Pass 1 complete"
+unset DIFFHOUND_STOP_REASON_FILE
+# A reply cut off at max_tokens reviewed only part of the diff.
+_CHUNK_GAPS=$(_monolithic_gap "$_MONO_STOP")
+if [ -n "$_CHUNK_GAPS" ]; then
+  _CHUNK_GAP_FILES=$(grep '^diff --git' "$DIFF_FILE" | sed 's|^diff --git a/.* b/||' | tr '\n' ' ')
+  echo "  ✖ REVIEW INCOMPLETE: the review reply was cut off at max_tokens. Files not fully reviewed: ${_CHUNK_GAP_FILES}" >&2
+fi
+rm -f "$_MONO_STOP"
 
 fi  # end SMALL/MEDIUM tier monolithic path
 
@@ -5224,6 +5234,13 @@ if [ "$POST_REVIEW" = true ]; then
   if [ -n "${_CHUNK_GAPS:-}" ]; then
     _gap_tmp=$(mktemp -t "pr-${PR_NUMBER}-gaps.XXXXXX")
     { _coverage_banner "${_CHUNK_GAP_FILES:-}"; echo ""; cat "$REVIEW_SUMMARY"; } > "$_gap_tmp" && mv "$_gap_tmp" "$REVIEW_SUMMARY"
+  fi
+  # Never APPROVE with files unreviewed: cap at COMMENT and post it with the banner.
+  _capped_event=$(_coverage_capped_event "$REVIEW_EVENT" "${_CHUNK_GAPS:-}")
+  if [ "$_capped_event" != "$REVIEW_EVENT" ]; then
+    echo "  ⚠ Verdict ${REVIEW_EVENT} capped at ${_capped_event}: files without a complete review" >&2
+    REVIEW_EVENT="$_capped_event"
+    _cap_total_row_verdict "$REVIEW_SUMMARY"
   fi
 
   # Integrity gate: never post a pass that rests on lost or missing review work.
