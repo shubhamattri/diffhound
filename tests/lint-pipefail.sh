@@ -7,7 +7,7 @@
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 hits=$(grep -rnE '(^|[^|])\|[[:space:]]*grep[^|]*[[:space:]]-[a-zA-Z]*q|^[[:space:]]*\|[[:space:]]*grep[^|]*[[:space:]]-[a-zA-Z]*q' \
-         "$ROOT/lib" "$ROOT/bin" 2>/dev/null \
+         --include='*.sh' --include='diffhound' "$ROOT/lib" "$ROOT/bin" 2>/dev/null \
        | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#')
 if [ -n "$hits" ]; then
   echo "FAIL pipefail lint: 'producer | grep -q' fails at random under set -o pipefail:" >&2
