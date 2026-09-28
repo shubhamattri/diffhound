@@ -245,6 +245,25 @@ _has_invented_tool_io() {
   grep -qE '^[[:space:]]*\{"name": *"[A-Za-z_]+", *"input": *\{|^[[:space:]]*<(function_calls|invoke|tool_use)\b' "$1" 2>/dev/null
 }
 
+# An APPROVE says every file was checked. With files unreviewed the verdict can
+# be COMMENT at most.  Args: $1 event  $2 chunk gaps  -> event
+_coverage_capped_event() {
+  if [ "$1" = "APPROVE" ] && [ -n "$2" ]; then echo "COMMENT"; else echo "$1"; fi
+}
+
+# Same cap for the verdict word in the summary's **Total** row.  Args: $1 file
+_cap_total_row_verdict() {
+  local t; t=$(mktemp) || return 0
+  sed '/\*\*Total\*\*/s/APPROVE/COMMENT/' "$1" > "$t" && mv "$t" "$1"
+}
+
+# Gap marker for the single-call (SMALL/MEDIUM) review: "all" when its reply was
+# cut off at max_tokens, which covers only part of the diff.  Args: $1 stop file
+_monolithic_gap() {
+  [ "$(cat "$1" 2>/dev/null)" = "max_tokens" ] && printf 'all'
+  return 0
+}
+
 # Banner for a review some of whose files were not reviewed.  Args: $1 files
 _coverage_banner() {
   echo "> ⚠️ **Incomplete review.** These files got no complete review this run (the model returned nothing usable, or was cut off): ${1:-unknown}. Findings below cover the other files only; this is not a clean bill for the files listed."

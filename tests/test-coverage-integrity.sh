@@ -42,5 +42,23 @@ d="$TMP/nofind"; mkdir -p "$d"; cp "$TMP/nofind.out" "$d/chunk-0.out"; printf 'd
 if [ "$(_chunk_coverage_gaps "$d" 1)" = "0" ]; then PASS=$((PASS+1)); echo "ok   reply without findings block is a gap"
 else FAIL=$((FAIL+1)); echo "FAIL reply without findings block is a gap"; fi
 
+eq() { if [ "$2" = "$3" ]; then PASS=$((PASS+1)); echo "ok   $1"; else FAIL=$((FAIL+1)); echo "FAIL $1 — got [$2] want [$3]"; fi; }
+
+# Never APPROVE while any file went unreviewed.
+eq "cap: APPROVE with gaps becomes COMMENT" "$(_coverage_capped_event APPROVE "0 1")" "COMMENT"
+eq "cap: APPROVE with no gaps stays APPROVE" "$(_coverage_capped_event APPROVE "")" "APPROVE"
+eq "cap: REQUEST_CHANGES with gaps is kept" "$(_coverage_capped_event REQUEST_CHANGES "0")" "REQUEST_CHANGES"
+printf '| Correctness | 30/30 | ok |\n| **Total** | **98/100** | **APPROVE** |\n' > "$TMP/sum.md"
+_cap_total_row_verdict "$TMP/sum.md"
+eq "cap: Total row verdict rewritten" "$(grep -c 'APPROVE' "$TMP/sum.md")" "0"
+eq "gate: APPROVE with gaps is still refused if it ever reaches the gate" \
+   "$(_posting_gate_reason APPROVE 0 0 "0" false true LARGE)" "APPROVE while chunk(s) 0 produced no review"
+echo max_tokens > "$TMP/stop"; eq "single-call reply cut off at max_tokens is a gap" "$(_monolithic_gap "$TMP/stop")" "all"
+echo end_turn > "$TMP/stop"; eq "single-call complete reply is not a gap" "$(_monolithic_gap "$TMP/stop")" ""
+# The cap runs after the verdict is parsed and before the posting gate.
+order=$(grep -nE 'REVIEW_EVENT=\$\(parse_verdict|_coverage_capped_event "\$REVIEW_EVENT"|_GATE_REASON=\$\(_posting_gate_reason' "$ROOT/lib/review.sh" | cut -d: -f1 | tr '\n' ' ')
+sorted=$(tr ' ' '\n' <<< "$order" | grep . | sort -n | tr '\n' ' ')
+eq "review.sh: parse_verdict, then coverage cap, then posting gate" "$(wc -w <<< "$order" | tr -d ' ')/$order" "3/$sorted"
+
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]
