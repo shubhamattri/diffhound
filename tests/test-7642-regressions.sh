@@ -77,14 +77,40 @@ printf 'FINDING: a.ts:1:BLOCKING\nWHAT: real one\n' > "$TMP/chunks/chunk-0.out"
 printf '**FINDING:** b.ts:2:SHOULD-FIX\nWHAT: real two\n' > "$TMP/chunks/chunk-1.out"
 merged='FINDING: a.ts:1:BLOCKING
 WHAT: real one (merged)'
-got=$(_select_merge_output "$merged" "end_turn" "$TMP/chunks" 2 2>/dev/null)
+got=$(_select_merge_output "$merged" "end_turn" "$TMP/chunks" 0 1 2>/dev/null)
 has   "merge: complete parseable merge is used" "$got" "(merged)"
-got=$(_select_merge_output "$merged" "max_tokens" "$TMP/chunks" 2 2>/dev/null)
+got=$(_select_merge_output "$merged" "max_tokens" "$TMP/chunks" 0 1 2>/dev/null)
 lacks "merge: truncated merge is not used"      "$got" "(merged)"
 eq    "merge: truncated -> every raw finding"   "$(printf '%s\n' "$got" | grep -c '^FINDING:')" "2"
-got=$(_select_merge_output "## Summary: requireEnabled declared twice, orphaned brace in preparation.ts" "end_turn" "$TMP/chunks" 2 2>/dev/null)
+got=$(_select_merge_output "## Summary: requireEnabled declared twice, orphaned brace in preparation.ts" "end_turn" "$TMP/chunks" 0 1 2>/dev/null)
 lacks "merge: prose-only merge is not used"     "$got" "requireEnabled"
 eq    "merge: prose-only -> raw findings"       "$(printf '%s\n' "$got" | grep -c '^FINDING:')" "2"
+
+# ── 4b. merge is split to fit its output limit, never truncated ────────────
+eval "$(sed -n '/^_merge_chunk_group() {/,/^}/p' "$ROOT/lib/review.sh")"
+eval "$(sed -n '/^_merge_chunk_findings() {/,/^}/p' "$ROOT/lib/review.sh")"
+mk_chunk() { # dir idx findings-count pad-bytes
+  local i n
+  for ((n=0; n<$3; n++)); do printf 'FINDING: f%s.ts:%s:SHOULD-FIX\nWHAT: finding %s-%s\n' "$2" "$n" "$2" "$n"; done > "$1/chunk-$2.out"
+  head -c "$4" /dev/zero | tr '\0' 'x' >> "$1/chunk-$2.out"; echo >> "$1/chunk-$2.out"
+  printf 'f%s.ts\tSTANDARD\n' "$2" > "$1/chunk-$2.manifest"
+}
+_call_api() { # stub: merge = the first FINDING of its input, stop_reason from $STUB_STOP
+  echo x >> "$CALLS"; [ -n "${DIFFHOUND_STOP_REASON_FILE:-}" ] && printf '%s' "${STUB_STOP:-end_turn}" > "$DIFFHOUND_STOP_REASON_FILE"
+  grep -m1 -A1 '^FINDING:' | sed 's/WHAT: /WHAT: (merged) /'
+}
+M="$TMP/merge"; mkdir -p "$M"; CALLS="$TMP/calls"
+mk_chunk "$M" 0 3 12000; mk_chunk "$M" 1 3 12000; mk_chunk "$M" 2 3 1000
+eq "groups: split by byte budget" "$(_plan_merge_groups "$M" 3 20000 | tr '\n' '|')" "0|1 2|"
+: > "$CALLS"; _merge_chunk_findings "$M" 3 "$TMP/merged.out" 2>/dev/null
+eq "split merge: one model call per multi-chunk group" "$(wc -l < "$CALLS" | tr -d ' ')" "1"
+has "split merge: single-chunk group keeps its raw findings" "$(cat "$TMP/merged.out")" "WHAT: finding 0-2"
+has "split merge: merged group output is used" "$(cat "$TMP/merged.out")" "(merged)"
+: > "$CALLS"; STUB_STOP=max_tokens _merge_chunk_findings "$M" 3 "$TMP/merged2.out" 2>/dev/null
+eq "split merge: overflowing group falls back, all 9 findings kept" "$(grep -c '^FINDING:' "$TMP/merged2.out")" "9"
+rm -f "$M"/chunk-*; : > "$CALLS"; _merge_chunk_findings "$M" 3 "$TMP/merged3.out" 2>/dev/null
+eq "split merge: no chunk output, no model call" "$(wc -l < "$CALLS" | tr -d ' ')" "0"
+unset -f _call_api
 
 # ── 5. zero-findings guard on the voice pass ────────────────────────────────
 echo '[]' > "$TMP/merged-empty.json"
@@ -94,11 +120,12 @@ _voice_has_no_findings 0 ""                       && r=yes || r=no; eq "guard: 0
 _voice_has_no_findings 2 "$TMP/merged-empty.json" && r=yes || r=no; eq "guard: real findings do not fire"      "$r" "no"
 _voice_has_no_findings 0 "$TMP/merged-one.json"   && r=yes || r=no; eq "guard: a peer finding does not fire"   "$r" "no"
 eval "$(sed -n '/^    _count_findings() {/,/^    }/p' "$ROOT/lib/review.sh")"
-_extract_json() { :; }
 printf 'prose only\n' > "$TMP/prose.txt"
 eq "count: no findings is one line '0' (was '0\\n0')" "$(_count_findings "$TMP/prose.txt")" "0"
-printf 'FINDING: a.ts:1:NIT\nWHAT: x\n  FINDING: b.ts:2:NIT\n' > "$TMP/two.txt"
-eq "count: two findings" "$(_count_findings "$TMP/two.txt")" "2"
+printf 'FINDING: a.ts:1:NIT\nWHAT: x\nEVIDENCE:\n```json\n{"a":1}\n```\n```json\n{"findings":[]}\n```\n  FINDING: b.ts:2:NIT\n' > "$TMP/two.txt"
+eq "count: two findings despite quoted json fences" "$(_count_findings "$TMP/two.txt")" "2"
+printf '```json\n{"findings":[{"file":"a.ts"},{"file":"b.ts"}]}\n```\n' > "$TMP/json.txt"
+eq "count: JSON-format output still counted" "$(_count_findings "$TMP/json.txt")" "2"
 
 printf 'prose\n### SCORECARD_START\nSecurity: 20/25 — ok\nBlocking: a.ts:1\nShouldFix: NONE\nTotal: 80/100 — COMMENT\n### SCORECARD_END\n' > "$TMP/sc.txt"
 got=$(_scorecard_only "$TMP/sc.txt")
@@ -151,6 +178,36 @@ _claim_verify_summary "$TMP/summary.md" "$TMP/repo" "" 2>/dev/null
 got=$(cat "$TMP/summary.md")
 lacks "summary: false duplicate bullet removed" "$got" "requireEnabled declared twice"
 has   "summary: real duplicate bullet kept"     "$got" "KIND"
+
+# ── 8. --force-full is a full review, not a scoped re-review ─────────────────
+LAST_REVIEWED_SHA=abc; PREV_SCORECARD_JSON='{"security":{"score":20,"max":25}}'
+FORCE_FULL=false; _force_full_baseline && r=reset || r=kept
+eq "force-full off: baseline kept" "$r:$LAST_REVIEWED_SHA" "kept:abc"
+FORCE_FULL=true;  _force_full_baseline && r=reset || r=kept
+eq "force-full: last-reviewed baseline dropped" "$r:$LAST_REVIEWED_SHA" "reset:"
+eq "force-full: score anchor dropped" "$PREV_SCORECARD_JSON" ""
+_rereview_verdict_capped true false REQUEST_CHANGES && r=capped || r=free; eq "cap: plain re-review capped"   "$r" "capped"
+_rereview_verdict_capped true true  REQUEST_CHANGES && r=capped || r=free; eq "cap: force-full not capped"    "$r" "free"
+_rereview_verdict_capped false false REQUEST_CHANGES && r=capped || r=free; eq "cap: fresh review not capped" "$r" "free"
+eval "$(sed -n '/^_review_chunks_parallel() {/,/^}/p' "$ROOT/lib/review.sh")"
+CD="$TMP/cchunks"; mkdir -p "$CD"
+printf 'diff --git a/f0.ts b/f0.ts\n+x\n' > "$CD/chunk-0.diff"; printf 'f0.ts\tSTANDARD\n' > "$CD/chunk-0.manifest"
+printf 'THREAD at f0.ts:1\n  REVIEWER: concern\n  AUTHOR_REPLY (dev): answered with evidence\n' > "$TMP/fthreads.txt"
+printf 'f1.ts\n' > "$TMP/incr.txt"
+LIB_DIR="$ROOT/lib"; _filter_rag_for_files() { : > "$3"; }; _trim_rag() { :; }; _call_api() { cat > /dev/null; }
+FORCE_FULL=true _review_chunks_parallel "$CD" 1 "S" "" "$TMP" "" true "$TMP/fthreads.txt" "$TMP/incr.txt"; wait
+got=$(cat "$CD/chunk-0.prompt")
+has   "force-full chunk: full scrutiny header"     "$got" "EVERY FILE GETS FULL SCRUTINY"
+has   "force-full chunk: author answer in context" "$got" "answered with evidence"
+lacks "force-full chunk: no re-review blinders"     "$got" "# RE-REVIEW MODE"
+FORCE_FULL=false _review_chunks_parallel "$CD" 1 "S" "" "$TMP" "" true "$TMP/fthreads.txt" "$TMP/incr.txt"; wait
+has   "plain re-review chunk: blinders kept"       "$(cat "$CD/chunk-0.prompt")" "# RE-REVIEW MODE"
+unset -f _call_api
+
+# ── 9. post-review bookkeeping is time-boxed ────────────────────────────────
+_within_time_budget 100 720 && r=run || r=defer; eq "budget: early run does bookkeeping" "$r" "run"
+_within_time_budget 860 720 && r=run || r=defer; eq "budget: 14m run defers bookkeeping" "$r" "defer"
+has "budget: the auto-learn loop checks the budget" "$(sed -n '/Auto-learn from ALL previous PR caches/,/Auto-learned from/p' "$ROOT/lib/review.sh")" "_within_time_budget"
 
 echo
 echo "PASS=$PASS FAIL=$FAIL"

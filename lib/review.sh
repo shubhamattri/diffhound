@@ -1774,6 +1774,9 @@ _review_chunks_parallel() {
           done < "$chunk_manifest"
         fi
 
+        if [ "${FORCE_FULL:-false}" = true ]; then
+          _force_full_chunk_header "$_chunk_threads"
+        else
         echo "# RE-REVIEW MODE — CONTEXTUAL BLINDERS"
         echo ""
         echo "This is a RE-REVIEW. You see the FULL diff for context, but your feedback is SCOPED."
@@ -1819,6 +1822,7 @@ _review_chunks_parallel() {
         echo ""
         echo "---"
         echo ""
+        fi
       fi
       # Inject Jira context if available (PR-wide, not per-chunk)
       if [ -n "${JIRA_CONTEXT:-}" ]; then
@@ -1900,20 +1904,20 @@ _review_chunks_parallel() {
 }
 
 # ── Findings Merger: combine chunk outputs into single review ────────────────
-_merge_chunk_findings() {
-  local chunk_dir="$1"
-  local chunk_count="$2"
-  local output_file="$3"
+# Merges one group of chunk outputs (indices $3..) into $2 via Haiku.
+_merge_chunk_group() {
+  local chunk_dir="$1" output_file="$2" i
+  shift 2
+  local idx=("$@")
 
-  # If only 1 chunk, pass through
-  if [ "$chunk_count" -eq 1 ] && [ -s "${chunk_dir}/chunk-0.out" ]; then
-    cp "${chunk_dir}/chunk-0.out" "$output_file"
+  # A single chunk has nothing to deduplicate against.
+  if [ "${#idx[@]}" -eq 1 ]; then
+    _select_merge_output "" "" "$chunk_dir" "${idx[0]}" > "$output_file"
     return
   fi
 
-  # Collect all chunk outputs
   local all_findings=""
-  for ((i=0; i<chunk_count; i++)); do
+  for i in "${idx[@]}"; do
     local chunk_out="${chunk_dir}/chunk-${i}.out"
     [ ! -s "$chunk_out" ] && continue
     all_findings+="
@@ -1978,8 +1982,40 @@ Checklist: [verification steps]
   DIFFHOUND_STAGE="chunk-merge"
   merge_result=$(printf '%s' "$merge_prompt" \
     | DIFFHOUND_STOP_REASON_FILE="$_merge_stop" _call_api "claude-haiku-4-5-20251001" 8192 120 || true)
-  _select_merge_output "$merge_result" "$(cat "$_merge_stop" 2>/dev/null)" "$chunk_dir" "$chunk_count" > "$output_file"
+  _select_merge_output "$merge_result" "$(cat "$_merge_stop" 2>/dev/null)" "$chunk_dir" "${idx[@]}" > "$output_file"
   rm -f "$_merge_stop"
+}
+
+# Merge all chunk outputs. The merge's output is capped (8192 tokens) and a big
+# PR's findings do not fit: #7642 hit the cap at 4096 and again at 8192. So the
+# chunks are split into groups whose raw findings fit the cap, merged in
+# parallel, and concatenated. Nothing is truncated: a group whose merge still
+# overflows falls back to its raw findings, and duplicates across groups are
+# removed by dedup-helper in the validator pipeline.
+_merge_chunk_findings() {
+  local chunk_dir="$1" chunk_count="$2" output_file="$3"
+  local groups g n=0 pids=()
+  groups=$(_plan_merge_groups "$chunk_dir" "$chunk_count" "${DIFFHOUND_MERGE_GROUP_BYTES:-20000}")
+  # No chunk produced output: there is nothing to merge, so do not ask a model to.
+  [ -z "$groups" ] && { : > "$output_file"; return; }
+  if [ "$(printf '%s\n' "$groups" | grep -c .)" -le 1 ]; then
+    # shellcheck disable=SC2086
+    _merge_chunk_group "$chunk_dir" "$output_file" $groups
+    return
+  fi
+  echo "  ↻ chunk merge split into $(printf '%s\n' "$groups" | grep -c .) groups to fit the merge output limit" >&2
+  while IFS= read -r g; do
+    [ -z "$g" ] && continue
+    # shellcheck disable=SC2086
+    ( _merge_chunk_group "$chunk_dir" "${output_file}.g${n}" $g ) &
+    pids+=($!); n=$((n + 1))
+  done <<< "$groups"
+  for g in "${pids[@]}"; do wait "$g" 2>/dev/null || true; done
+  : > "$output_file"
+  for ((g=0; g<n; g++)); do
+    cat "${output_file}.g${g}" >> "$output_file" 2>/dev/null || true
+    rm -f "${output_file}.g${g}"
+  done
 }
 
 # ============================================================
@@ -2163,6 +2199,9 @@ if [ "$REVIEWER_COMMENT_COUNT" -gt 0 ]; then
     spinner_stop "Re-review mode — ${REVIEWER_COMMENT_COUNT} existing comments found"
   fi
   echo "  ↻ Checking which previous comments are addressed..."
+  if _force_full_baseline; then
+    echo "  --force-full: prior-review baseline ignored, full review of every file (existing threads kept as context)"
+  fi
 else
   spinner_stop "Fresh review — no prior comments from reviewer"
 fi
@@ -2408,7 +2447,7 @@ fi
 _ARCH_CHECKLIST=""
 _ARCH_PATTERNS_FILE="/home/ubuntu/diffhound/config/architectural-patterns.jsonl"
 if [ -f "$_ARCH_PATTERNS_FILE" ]; then
-  _HAS_PYTHON=$(grep -c '\.py' "$DIFF_FILE" 2>/dev/null || echo "0")
+  _HAS_PYTHON=$(grep -c '\.py' "$DIFF_FILE" 2>/dev/null || true)
   _LANG_FILTER="all"
   [ "${_HAS_PYTHON:-0}" -gt 0 ] && _LANG_FILTER="python|all"
   _ARCH_CHECKLIST=$(while IFS= read -r _pline; do
@@ -2933,6 +2972,13 @@ REVIEWER_VERDICT: [your assessment — is author's reply correct? what's the act
 
 ## EXISTING THREADS:
 REREVIEW_HEADER
+  if [ "${FORCE_FULL:-false}" = true ]; then
+    cat >> "$PROMPT_FILE" << 'FORCE_FULL_NOTE'
+
+## OVERRIDE (--force-full): this is a FULL review of the whole PR
+The re-review limits above (only new/changed lines, the cap on new non-blocking findings) do NOT apply. Review every changed file fully. Use the threads only as context: do not repeat a concern the author answered correctly; do raise it, with evidence, if it is still true.
+FORCE_FULL_NOTE
+  fi
 
 # -- Self-contradiction guard: inject prior suggestions --
 _suggestions_file="$REVIEW_CACHE_DIR/pr-${PR_NUMBER}-suggestions.jsonl"
@@ -3423,24 +3469,15 @@ if [ "${DIFFHOUND_SKIP_VALIDATORS:-0}" != "1" ] \
     # Count findings in either format (JSON .findings[] OR raw FINDING: lines).
     # LARGE tier emits FINDING:-format after chunked merge; MEDIUM/SMALL emit JSON.
     _count_findings() {
-      local f="$1"
+      local f="$1" n
       [ -s "$f" ] || { echo 0; return; }
-      # JSON path: only attempt if _extract_json produces non-empty output.
-      # Piping empty output into jq makes it parse "" (empty JSON string),
-      # which yields `.findings | length` → 0 — a false zero that hides the
-      # LARGE-tier FINDING: lines from the grep fallback below.
-      local _extracted n
-      _extracted=$(_extract_json "$f" 2>/dev/null)
-      if [ -n "$_extracted" ]; then
-        n=$(printf '%s' "$_extracted" | jq '.findings | length' 2>/dev/null || echo "")
-        if [ -n "$n" ] && [ "$n" != "null" ]; then
-          echo "$n"; return
-        fi
-      fi
-      # FINDING: format — bare (MEDIUM/SMALL) or indented (LARGE-tier Haiku merge)
-      # `grep -c || echo 0` printed "0\n0" on no match, which never equals "0",
-      # so the zero-findings guard on the voice pass could not fire.
+      # FINDING: blocks win. A chunk's EVIDENCE can quote a ```json fence (a
+      # package.json, a payload); on #7642 the JSON branch then printed one "0"
+      # per fence, so the log said "processed 0" for 27 real findings and a
+      # real drop count was unknowable.
       n=$(grep -cE '^[[:space:]]*FINDING:' "$f" 2>/dev/null || true)
+      if [ "${n:-0}" -gt 0 ]; then echo "$n"; return; fi
+      n=$(_extract_json "$f" 2>/dev/null | jq -s '[.[] | (.findings? // []) | if type == "array" then length else 0 end] | add // 0' 2>/dev/null)
       echo "${n:-0}"
     }
     _before=$(_count_findings "$CLAUDE_OUT")
@@ -3450,6 +3487,7 @@ if [ "${DIFFHOUND_SKIP_VALIDATORS:-0}" != "1" ] \
     else
       echo "  🛡  Validators processed ${_before} finding(s), no drops" >&2
     fi
+    echo "  🛡  Validator actions: $(grep -c 'DROP' "$_VALIDATOR_AUDIT" 2>/dev/null || true) drop, $(grep -cE 'DOWNGRADE' "$_VALIDATOR_AUDIT" 2>/dev/null || true) downgrade" >&2
     # Track whether all findings were dropped — voice rewrite must not hallucinate
     # COMMENT: lines from prose when 0 validated findings remain.
     _VALIDATOR_FINDING_COUNT="$_after"
@@ -3513,6 +3551,10 @@ _PEER_MODE="fresh"  # "fresh" = aggressive gap-hunt, "rereview" = incremental-on
 # DIFFHOUND_SKIP_PEER=1 is the deliberate escape hatch.
 if [ "${DIFFHOUND_SKIP_PEER:-0}" = "1" ]; then
   echo "  DIFFHOUND_SKIP_PEER=1 — peer review skipped (explicit opt-out)" >&2
+elif [ "$FORCE_FULL" = "true" ]; then
+  _RUN_PEER_REVIEW=true
+  _PEER_MODE="fresh"
+  echo "  --force-full — running full peer review" >&2
 elif [ "$FAST_MODE" = "true" ]; then
   _RUN_PEER_REVIEW=true
   _PEER_MODE="rereview"
@@ -5135,7 +5177,7 @@ if [ "$POST_REVIEW" = true ]; then
   # findings still post and stay actionable, but only a FRESH (round-1) review,
   # or a human, blocks a merge. Removes the false-positive merge-blocking that is
   # the actual harm; does not pretend the model is deterministic.
-  if [ "${IS_REREVIEW:-false}" = true ] && [ "$REVIEW_EVENT" = "REQUEST_CHANGES" ]; then
+  if _rereview_verdict_capped "${IS_REREVIEW:-false}" "${FORCE_FULL:-false}" "$REVIEW_EVENT"; then
     REVIEW_EVENT="COMMENT"
     _rr_tmp=$(mktemp -t "pr-${PR_NUMBER}-rrcap.XXXXXX")
     {
@@ -5341,9 +5383,18 @@ JSONEND
 
   # Auto-learn from ALL previous PR caches (0 LLM tokens, just GitHub API)
   # Picks up human edits/deletions on previously posted comments
+  # This is bookkeeping for OTHER PRs and runs after the review is posted, with
+  # no bound on how many PRs it walks (each can call GitHub and a model). On
+  # #7642 it pushed the job past the workflow's 15 minutes after a 14m19s review.
+  # It now stops when the run is past the budget; unprocessed caches are kept
+  # and picked up by the next run.
   _LEARNED_TOTAL=0
+  _LEARN_DEFERRED=0
   for _cache_file in "$REVIEW_CACHE_DIR"/pr-*-posted.json; do
     [ -f "$_cache_file" ] || continue
+    if ! _within_time_budget "$SECONDS" "${DIFFHOUND_LEARN_BUDGET_SECS:-720}"; then
+      _LEARN_DEFERRED=$((_LEARN_DEFERRED + 1)); continue
+    fi
     _cached_pr=$(jq -r '.pr' "$_cache_file" 2>/dev/null || true)
     [ -z "$_cached_pr" ] && continue
     [ "$_cached_pr" = "$PR_NUMBER" ] && continue  # skip current (just posted)
@@ -5352,6 +5403,7 @@ JSONEND
     _learn_from_pr "$_cached_pr" >/dev/null 2>&1 && _LEARNED_TOTAL=$((_LEARNED_TOTAL + 1)) || true
   done
   [ "$_LEARNED_TOTAL" -gt 0 ] && echo "  📚 Auto-learned from $_LEARNED_TOTAL previous review(s)"
+  [ "$_LEARN_DEFERRED" -gt 0 ] && echo "  📚 Auto-learn deferred for $_LEARN_DEFERRED earlier PR(s): run is at ${SECONDS}s, past the ${DIFFHOUND_LEARN_BUDGET_SECS:-720}s budget"
 
   # Auto-resolve threads addressed by new commits (re-review only)
   if [ "$IS_REREVIEW" = true ] && [ -n "$INCREMENTAL_DIFF_FILE" ] && [ -f "$INCREMENTAL_DIFF_FILE" ]; then
