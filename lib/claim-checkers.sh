@@ -22,12 +22,52 @@ _gt_dependency_declared_range() {  # $1 pkg -> declared range or empty
   done < <(find "$repo" -name package.json -not -path '*/node_modules/*' 2>/dev/null) | head -1
 }
 
-_check_symbol_defined() {  # $1 subject  $2 expected(true|false) -> verdict
-  local defined; defined=$(_gt_symbol_defined "$1")
-  if [ "$2" = "false" ]; then
-    [ "$defined" = "no" ] && echo TRUE || echo FALSE
+# Declared in the repo: a const/let/var/function/class/interface/type/enum/def
+# declaration, a method with a body, or a quoted object key. NOT a call site
+# (`beforeEach(...)`) or an option key (`searchPath: [...]`): those are uses of
+# library/global symbols, and #7642 run 36450368674 dropped true findings by
+# reading them as "defined in the repo".
+_gt_symbol_declared() {  # $1 symbol -> yes/no
+  local s="$1" repo="${DIFFHOUND_REPO:?}"
+  if grep -rqE "(export[[:space:]]+(const|default|function|class|interface|type|enum|async[[:space:]]+function)|const|let|var|function|class|interface|type|enum|def)[[:space:]]+${s}([[:space:]]|=|\(|:|<|$)|[\"']${s}[\"'][[:space:]]*:|^[[:space:]]*(async[[:space:]]+)?(static[[:space:]]+)?${s}[[:space:]]*\([^)]*\)[[:space:]]*(:[^={]*)?\{" \
+       "$repo" \
+       --include='*.ts' --include='*.tsx' --include='*.js' --include='*.jsx' --include='*.vue' --include='*.py' --include='*.graphql' \
+       --exclude-dir=node_modules 2>/dev/null; then echo yes; else echo no; fi
+}
+
+# The symbol appears as a whole word on a non-comment line of the given files.
+_gt_symbol_in_files() {  # $1 symbol, $2.. repo-relative paths -> yes/no
+  local s="$1" repo="${DIFFHOUND_REPO:?}" f; shift
+  for f in "$@"; do
+    [ -f "$repo/$f" ] || continue
+    if grep -qwF -- "$s" <<< "$(grep -v -E '^[[:space:]]*(#|//|\*)' "$repo/$f")"; then echo yes; return; fi
+  done
+  echo no
+}
+
+# $1 subject  $2 expected(true|false)  $3 scope: repo | file=<a,b,...>
+#   expected=true  ("X is an unscoped resolver"): X must exist at all: declared,
+#                  or used/named anywhere in the repo's code (a table name counts).
+#   expected=false ("X doesn't exist"): refuted only by a DECLARATION when the
+#                  claim is repo-wide, or by any use in the files it is about.
+_check_symbol_defined() {
+  local subj="$1" exp="${2:-true}" scope="${3:-repo}"
+  if [ "$exp" = "false" ]; then
+    local found
+    case "$scope" in
+      file=*) local IFS=','; # shellcheck disable=SC2086
+              found=$(_gt_symbol_in_files "$subj" ${scope#file=}) ;;
+      *)      found=$(_gt_symbol_declared "$subj") ;;
+    esac
+    [ "$found" = "no" ] && echo TRUE || echo FALSE
   else
-    [ "$defined" = "yes" ] && echo TRUE || echo FALSE
+    if [ "$(_gt_symbol_defined "$subj")" = "yes" ]; then echo TRUE; return; fi
+    if grep -rqwF -- "$subj" "${DIFFHOUND_REPO:?}" --include='*.ts' --include='*.tsx' --include='*.js' --include='*.jsx' \
+         --include='*.vue' --include='*.py' --include='*.graphql' --exclude-dir=node_modules 2>/dev/null; then
+      echo TRUE
+    else
+      echo FALSE
+    fi
   fi
 }
 
@@ -117,7 +157,7 @@ _verify_claim() {
   loc=$(printf '%s' "$c" | cut -d: -f3)
   expected=$(printf '%s' "$c" | cut -d: -f4-)
   case "$type" in
-    symbol_defined)     _check_symbol_defined "$subject" "${expected:-true}" ;;
+    symbol_defined)     _check_symbol_defined "$subject" "${expected:-true}" "${loc:-repo}" ;;
     dependency_version) _check_dependency_version "$subject" "${expected:-missing}" ;;
     file_contains)      _check_file_contains "$subject" "$loc" "${expected:-true}" ;;
     method_exists)      _check_method_exists "$subject" "$loc" ;;
@@ -129,7 +169,10 @@ _verify_claim() {
 # ── implicit claim extraction (no explicit CLAIMS: line) ─────────────────────
 # Returns "; "-separated claims derived from the block's prose, or empty.
 _extract_implicit_claims() {
-  local block="$1" what claims=""
+  # $2 (optional): the cited file. An absence claim that is not stated repo-wide
+  # ("anywhere", "in the repo/codebase") is about that file and the files the
+  # finding names, not about the whole repository.
+  local block="$1" cited="${2:-}" what claims=""
   what=$(printf '%s' "$block")
 
   local absence_re="does(n'?t| not) exist|do(n'?t| not) exist|not defined|don'?t exist anywhere|doesn'?t exist anywhere|missing entirely|not found anywhere|exist anywhere in the codebase"
@@ -140,8 +183,14 @@ _extract_implicit_claims() {
 
   # symbol_defined (absence): "X doesn't exist" -> claim X absent
   if grep -qiE "$absence_re" <<< "$what"; then
+    local scope="repo"
+    if [ -n "$cited" ] && ! grep -qiE "anywhere|in the (repo|repository|codebase|project|monorepo)|nowhere|the only exports" <<< "$what"; then
+      local named
+      named=$(grep -oE '[A-Za-z0-9_@./-]+\.(tsx?|jsx?|vue|py|cjs|mjs)\b' <<< "$what" | grep '/' | sort -u | tr '\n' ',')
+      scope="file=${cited}${named:+,${named%,}}"
+    fi
     while IFS= read -r sym; do
-      [ -n "$sym" ] && claims="${claims:+$claims; }symbol_defined:${sym}:repo:false"
+      [ -n "$sym" ] && claims="${claims:+$claims; }symbol_defined:${sym}:${scope}:false"
     done < <(printf '%s' "$what" | grep -iE "$absence_re" | grep -oE '`@?[A-Za-z_][A-Za-z0-9_]{2,}`|[A-Z][A-Z0-9_]{3,}' | tr -d '`' | sort -u)
   fi
 

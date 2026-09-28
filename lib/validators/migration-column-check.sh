@@ -80,21 +80,20 @@ _check_and_emit() {
   # Extract column candidates from "no `<X>` column" / "no `<X>` or `<Y>`
   # columns" / "missing `<X>` column" / "no <X>_<Y> column" patterns.
   # Both backticked and bare snake_case forms are matched — LLMs vary.
+  # Only an explicit absence assertion about a column is checked: "no `x`
+  # column", "without a `x` column", "missing `x` field". Until v0.7.50 any
+  # backticked snake_case word was checked as a fallback, so a TRUE finding
+  # that merely mentioned `command_id` next to a migration name ("makes
+  # `command_id` nullable, so the unique index in 20260909100000_... no longer
+  # dedups") was dropped because command_id exists (#7642 run 36450368674).
   local cols
   cols=$(printf '%s' "$what" \
-    | grep -oE "(no|missing)\s+\`?${SNAKE_RE}\`?(\s+(or|and|,)\s+\`?${SNAKE_RE}\`?)*\s+(column|field)" \
+    | grep -oiE "(no|missing|without|lacks|lacking|(does ?n'?o?t|doesn'?t) (have|include|define))(\s+(a|an|the|any))?\s+\`?${SNAKE_RE}\`?(\s+(or|and|,)\s+\`?${SNAKE_RE}\`?)*\s+(column|field)s?" \
     | grep -oE "$SNAKE_RE" \
     | sort -u || true)
 
   if [ -z "$cols" ]; then
-    # Fall back: any backticked snake_case identifier near the migration name.
-    cols=$(printf '%s' "$what" \
-      | grep -oE "\`${SNAKE_RE}\`" \
-      | tr -d '`' \
-      | sort -u || true)
-    if [ -z "$cols" ]; then
-      _emit_block; block=""; what=""; header_prefix=""; return
-    fi
+    _emit_block; block=""; what=""; header_prefix=""; return
   fi
 
   # Resolve migration file. If not present, no-op (can't verify, don't drop).

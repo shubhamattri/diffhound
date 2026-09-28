@@ -1,0 +1,4 @@
+FINDING: services/api/src/common/slackDelivery.ts:5:NIT
+WHAT: `strictSlackDelivery` returns a jobId-only payload, while the processor reads `dedupKey` to suppress repeats, so the two keys can disagree.
+EVIDENCE: slackDelivery.ts:5
+UNVERIFIABLE: no

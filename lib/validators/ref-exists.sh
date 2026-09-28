@@ -96,6 +96,27 @@ _check_symbol_present() {
 # v0.7.12: repo-wide symbol-definition check. _check_symbol_present only looks
 # in the cited file + same-dir siblings; a "doesn't exist ANYWHERE" claim needs
 # a repo-wide grep because the definition usually lives in a different file.
+# True when the symbol appears as a whole word on a non-comment line of any
+# code file in the repo (declaration, use, or string such as a table name).
+_symbol_in_repo_code() {
+  local s="$1" hits
+  if git -C "$DIFFHOUND_REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    hits=$(git -C "$DIFFHOUND_REPO" grep --untracked -lwF -e "$s" -- '*.ts' '*.tsx' '*.js' '*.jsx' '*.vue' '*.py' '*.cjs' '*.mjs' 2>/dev/null \
+      | sed "s|^|$DIFFHOUND_REPO/|") || return 1
+  else
+    hits=$(grep -rlwF -- "$s" "$DIFFHOUND_REPO" \
+      --include='*.ts' --include='*.tsx' --include='*.js' --include='*.jsx' --include='*.vue' --include='*.py' \
+      --include='*.cjs' --include='*.mjs' --exclude-dir=node_modules --exclude-dir=.git 2>/dev/null) || return 1
+  fi
+  [ -n "$hits" ] || return 1
+  local f
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    if grep -qwF -- "$s" <<< "$(grep -v -E '^[[:space:]]*(#|//|\*)' "$f")"; then return 0; fi
+  done <<< "$hits"
+  return 1
+}
+
 _symbol_defined_anywhere() {
   local s="$1"
   grep -qE -- "$SKIPLIST" <<< "$s" && return 1
@@ -157,7 +178,11 @@ _classify_and_flush() {
     local s
     for s in $all_syms; do
       [ -z "$s" ] && continue
-      if ! _check_symbol_present "$s"; then
+      # Hallucinated = not in the cited file or its directory AND nowhere else
+      # in the repo's code. A symbol defined in another module is real; the
+      # finding may be about how this file reaches it (#7642: `dedupKey` lives
+      # in utils/slack.ts and processors/slack.ts, finding cited slackDelivery.ts).
+      if ! _check_symbol_present "$s" && ! _symbol_in_repo_code "$s"; then
         missing_sym="$s"
         break
       fi

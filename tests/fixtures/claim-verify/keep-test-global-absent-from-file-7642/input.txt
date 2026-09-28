@@ -1,0 +1,3 @@
+FINDING: services/api/src/claims/claro/commands.unit.spec.ts:20:NIT
+WHAT: `beforeEach` is not defined in this spec, so the fake store is shared across tests.
+UNVERIFIABLE: no

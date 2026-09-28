@@ -1,0 +1,3 @@
+FINDING: services/api/src/claims/claro/outbox.ts:27:SHOULD-FIX
+WHAT: rows in `claro_claim_outbox` are unscoped by org, so the admin review query can read another org's follow-ups.
+UNVERIFIABLE: no
