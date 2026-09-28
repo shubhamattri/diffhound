@@ -177,3 +177,17 @@ _extract_implicit_claims() {
 
   printf '%s' "$claims"
 }
+
+# ── declaration / import facts (v0.7.40) ─────────────────────────────────────
+# "X is declared twice" / "X is used without an import" are facts about ONE file,
+# checkable at the PR head. monorepo #7642 posted a dozen of them about code that
+# compiled and passed CI (requireEnabled, PORTAL_INTAKE_KIND, params `ss`/`ctx__`
+# that exist in no commit). Prints NOCLAIM | TRUE | FALSE | UNVERIFIABLE.
+# Args: $1 path relative to DIFFHOUND_REPO   $2 claim text
+_CLAIM_CHECKERS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_check_decl_text() {
+  local rel="$1" text="$2" repo="${DIFFHOUND_REPO:-}"
+  { [ -z "$repo" ] || [ -z "$rel" ]; } && { echo NOCLAIM; return; }
+  command -v python3 >/dev/null 2>&1 || { echo UNVERIFIABLE; return; }
+  printf '%s' "$text" | python3 "${_CLAIM_CHECKERS_DIR}/decl_facts.py" "$repo" "$rel" 2>/dev/null || echo UNVERIFIABLE
+}

@@ -87,6 +87,10 @@ for k in ("findings","thread_statuses"):
       bl=$(printf '%s' "$line" | grep -oE '[A-Za-z0-9_./-]+\.(vue|ts|tsx|js|jsx|py):[0-9]+' | head -1)
       [ -n "$bl" ] && bl=$(basename "$bl")
       if [ -n "$bl" ] && printf '%s' "$fpset" | grep -qF " $bl "; then drop=1; fi
+      if [ "$drop" = "0" ] && type _check_decl_text >/dev/null 2>&1; then
+        local _rel; _rel=$(printf '%s' "$line" | grep -oE '[A-Za-z0-9_./-]+\.[A-Za-z0-9]+:[0-9]+' | head -1 | sed 's/:[0-9]*$//')
+        [ "$(_check_decl_text "$_rel" "$line")" = "FALSE" ] && drop=1
+      fi
       if [ "$drop" = "0" ] && type _extract_implicit_claims >/dev/null 2>&1; then
         claims=$(_extract_implicit_claims "$line")
         if [ -n "$claims" ]; then
@@ -108,6 +112,110 @@ for k in ("findings","thread_statuses"):
   #    function of verified findings, not the model's self-assessment). Without
   #    this, #7317 dropped both FP blockers yet still read REQUEST_CHANGES.
   _reconcile_summary_verdict "$summary_file"
+}
+
+# Finding fields decorated as markdown ("**FINDING:**", "- FINDING:", "### WHAT:")
+# are invisible to every validator, which key on a line starting "FINDING:".
+# Rewrites the decoration away; field content is untouched. stdin -> stdout.
+_normalize_finding_markup() {
+  sed -E 's/^[[:space:]]*([-*+>]|[0-9]+[.)])?[[:space:]]*(#+[[:space:]]*)?(\*\*|__)?(FINDING|WHAT|EVIDENCE|IMPACT|OPTIONS|DIFF_LINE|REACHABLE_PATH|REJECTED_ALTERNATIVE|UNVERIFIABLE|CLAIMS|THREAD_STATUS)(\*\*|__)?:(\*\*|__)?[[:space:]]*/\4: /' \
+    | sed -E '/^FINDING: /s/`//g'
+}
+
+# Which text becomes CLAUDE_OUT after a chunked review. The raw chunk outputs
+# are what every validator can check; the merge is only a dedup convenience, so
+# it is used only when complete and parseable. At 4096 tokens it was cut off on
+# every #7642 run, and the runs whose merge had no parseable FINDING: line sent
+# unvalidated prose to the voice pass, which posted the invented compile errors.
+# Args: $1 merge text  $2 merge stop_reason  $3 chunk dir  $4 chunk count -> stdout
+_select_merge_output() {
+  local merge="$1" stop="$2" dir="$3" count="$4" raw i mn rn
+  raw=$(for ((i=0; i<count; i++)); do
+    [ -s "${dir}/chunk-${i}.out" ] && cat "${dir}/chunk-${i}.out"
+  done | _normalize_finding_markup)
+  merge=$(printf '%s' "$merge" | _normalize_finding_markup)
+  mn=$(printf '%s\n' "$merge" | grep -cE '^[[:space:]]*FINDING:' || true)
+  rn=$(printf '%s\n' "$raw" | grep -cE '^[[:space:]]*FINDING:' || true)
+  if [ -n "$merge" ] && [ "$stop" = "max_tokens" ]; then
+    echo "  ⚠ chunk merge hit its output limit, using the ${rn:-0} raw chunk findings instead" >&2
+    merge=""
+  elif [ -n "$merge" ] && [ "${mn:-0}" -eq 0 ] && [ "${rn:-0}" -gt 0 ]; then
+    echo "  ⚠ chunk merge has no parseable FINDING: lines (chunks have ${rn}), using the raw chunk findings" >&2
+    merge=""
+  fi
+  if [ -n "$merge" ]; then printf '%s\n' "$merge"; else printf '%s\n' "$raw"; fi
+}
+
+# True when the voice pass has nothing structured to rewrite: validators left 0
+# findings and no pre-merged peer finding exists. The old test also required
+# "peer review did not run", which has been false on every run since v0.7.34,
+# so the voice model was handed unvalidated prose and told every finding must
+# become an inline comment.  Args: $1 validated count  $2 pre-merged JSON file
+_voice_has_no_findings() {
+  local n="${1:-1}" merged="${2:-}" m
+  m=$(jq 'length' "${merged:-/nonexistent}" 2>/dev/null || echo 0)
+  [ "$n" = "0" ] && [ "${m:-0}" = "0" ]
+}
+
+# The engineering scorecard from CLAUDE_OUT with every finding stripped, for the
+# voice pass when there are no findings to rewrite, so it scores from the
+# engineering pass instead of inventing numbers. The per-finding lists are
+# dropped: they name findings the validators rejected.  Args: $1 CLAUDE_OUT
+_scorecard_only() {
+  local f="$1" j
+  [ -s "$f" ] || return 0
+  if grep -q 'SCORECARD_START' "$f" 2>/dev/null; then
+    sed -n '/SCORECARD_START/,/SCORECARD_END/p' "$f" \
+      | grep -vE '^[[:space:]]*(Blocking|ShouldFix|Nits|OpenQuestions)[[:space:]]*:'
+    return 0
+  fi
+  j=$(_extract_json "$f" 2>/dev/null)
+  [ -n "$j" ] && printf '%s' "$j" | jq -c '{scorecard: .scorecard}' 2>/dev/null | grep -v '"scorecard":null' || true
+}
+
+# Threads for one review chunk: every WHOLE thread block (header, reviewer body,
+# every reply) whose file is in the chunk manifest. The old line-grep kept only
+# the "THREAD at path:line" header, so in chunked reviews the model never saw the
+# reviewer's concern or the author's answer and re-raised answered threads.
+# Args: $1 threads file  $2 chunk manifest (path<TAB>prio)  -> stdout
+_filter_threads_for_files() {
+  local threads="$1" manifest="$2"
+  { [ -s "$threads" ] && [ -s "$manifest" ]; } || return 0
+  awk -F'\t' 'NR == FNR { if ($1 != "") want[$1] = 1; next }
+    /^THREAD at / {
+      p = substr($0, 11); sub(/:[^:]*$/, "", p)
+      keep = (p in want)
+    }
+    keep { print }' "$manifest" "$threads"
+}
+
+# Ground-truth the INLINE comments that are about to be posted. Every other check
+# runs on FINDING blocks or summary bullets, so a claim introduced or reworded at
+# the merge/voice stage reached GitHub unchecked (monorepo #7642: "requireEnabled
+# is declared twice" posted inline on a file that declares it once). Drops only
+# COMMENT: lines whose declaration/import claim is FALSE at the PR head.
+# Args: $1 comments file (COMMENT:/REPLY: lines)  $2 repo (PR head tree)
+_claim_verify_comments() {
+  local cf="$1" repo="$2"
+  [ -s "$cf" ] || return 0
+  [ -d "$repo" ] || return 0
+  [ "${DIFFHOUND_CLAIM_VERIFY:-1}" = "1" ] || return 0
+  type _check_decl_text >/dev/null 2>&1 || return 0
+  local DIFFHOUND_REPO="$repo" tmp line rel dropped=0
+  tmp=$(mktemp -t "diffhound-cvcom.XXXXXX")
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      COMMENT:*)
+        rel=$(printf '%s' "$line" | sed -E 's/^COMMENT:[[:space:]]*([^:]+):.*/\1/')
+        if [ "$(_check_decl_text "$rel" "$(printf '%s' "${line#* — }" | tr '\037' '\n')")" = "FALSE" ]; then
+          printf '[claim-verify-comments: removed false claim on %s: %s]\n' "$rel" "$(printf '%s' "$line" | cut -c1-100)" >&2
+          dropped=$((dropped + 1)); continue
+        fi ;;
+    esac
+    printf '%s\n' "$line"
+  done < "$cf" > "$tmp" && mv "$tmp" "$cf" || rm -f "$tmp"
+  [ "$dropped" -gt 0 ] && echo "  claim-verify: removed ${dropped} inline comment(s) whose claim is false at head" >&2
+  return 0
 }
 
 # Make the **Total** row's VERDICT cohere with BOTH the surviving findings AND the

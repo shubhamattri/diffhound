@@ -1,0 +1,3 @@
+FINDING: services/api/src/claims/format.ts:1:SHOULD-FIX
+WHAT: `formatAmount` is defined twice, here and in services/api/src/common/money.ts, same body. extract one shared helper.
+UNVERIFIABLE: no

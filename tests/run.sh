@@ -125,4 +125,10 @@ if [ -z "$only" ] && [ -x "$ROOT/tests/test-derive-score.sh" ]; then
   "$ROOT/tests/test-derive-score.sh" || _unit_fail=1
 fi
 
+if [ -z "$only" ] && [ -x "$ROOT/tests/test-7642-regressions.sh" ]; then
+  echo
+  echo "=== unit: test-7642-regressions.sh ==="
+  "$ROOT/tests/test-7642-regressions.sh" || _unit_fail=1
+fi
+
 [ "$FAIL" -eq 0 ] && [ "$_unit_fail" -eq 0 ]

@@ -1,0 +1,3 @@
+FINDING: services/api/src/claims/claro/portalOutbox.ts:3:BLOCKING
+WHAT: `PORTAL_INTAKE_KIND` is declared twice in this file, duplicate identifier, build will not compile.
+UNVERIFIABLE: no

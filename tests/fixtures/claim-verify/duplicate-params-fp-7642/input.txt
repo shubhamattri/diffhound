@@ -1,0 +1,3 @@
+FINDING: services/api/src/claims/handler.ts:2:BLOCKING
+WHAT: dispatchPreparedClaimEffects's signature has ss and claim each declared three times in the params, duplicate identifier, won't compile.
+UNVERIFIABLE: no
