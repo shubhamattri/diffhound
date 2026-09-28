@@ -123,10 +123,12 @@ def main() -> None:
 
     sys.stdout.write("### CHANGES_SINCE_LAST_REVIEW\n")
     sys.stdout.write(
-        f"+{len(new)} new, -{len(resolved)} resolved, ={unchanged_count} unchanged\n"
+        f"+{len(new)} new, -{len(resolved)} not raised again, ={unchanged_count} unchanged\n"
     )
     if resolved:
-        sys.stdout.write("RESOLVED:\n")
+        # Not "resolved": a prior finding this pass did not repeat. It may be
+        # fixed, answered, or simply missed; only a THREAD_STATUS says which.
+        sys.stdout.write("NOT_RAISED_AGAIN (earlier findings not repeated this pass; NOT evidence they were fixed or ever real):\n")
         for f in resolved:
             sys.stdout.write(f"- {f.display}\n")
 

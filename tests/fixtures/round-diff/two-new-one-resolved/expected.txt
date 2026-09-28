@@ -13,6 +13,6 @@ OPTIONS:
 1. fix
 UNVERIFIABLE: no
 ### CHANGES_SINCE_LAST_REVIEW
-+2 new, -1 resolved, =0 unchanged
-RESOLVED:
++2 new, -1 not raised again, =0 unchanged
+NOT_RAISED_AGAIN (earlier findings not repeated this pass; NOT evidence they were fixed or ever real):
 - old.py `oldbug` bad logic

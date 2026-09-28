@@ -13,4 +13,4 @@ OPTIONS:
 1. r
 UNVERIFIABLE: no
 ### CHANGES_SINCE_LAST_REVIEW
-+0 new, -0 resolved, =2 unchanged
++0 new, -0 not raised again, =2 unchanged
