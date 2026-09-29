@@ -4,7 +4,12 @@
 export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
 
 # Source .profile for env vars (ANTHROPIC_API_KEY etc.) — needed for non-interactive SSH
-[ -f "$HOME/.profile" ] && . "$HOME/.profile" 2>/dev/null || true
+if [ "${DIFFHOUND_REVIEW_LOCKED:-}" != 1 ]; then
+  [ -f "$HOME/.profile" ] && . "$HOME/.profile" 2>/dev/null || true
+  # Covers old SSH consumers that invoke lib/review.sh directly as well as CLI.
+  # Resolve the same repo identity after loading profile-provided defaults.
+  exec python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/run_locked.py" "$@"
+fi
 
 # v0.7.34 (BX-3010): ~/.profile on the runner also exports CLAUDE_CODE_OAUTH_TOKEN,
 # which is Shubham's PERSONAL Claude subscription. v0.7.29-v0.7.30 ran the entire
@@ -32,6 +37,7 @@ source "${LIB_DIR}/platform.sh"
 source "${LIB_DIR}/parser.sh"
 source "${LIB_DIR}/github.sh"
 source "${LIB_DIR}/publish.sh"
+source "${LIB_DIR}/lifecycle.sh"
 source "${LIB_DIR}/rag.sh" 2>/dev/null || true  # for _filter_rag_for_files, _trim_rag
 source "${LIB_DIR}/jira.sh" 2>/dev/null || true  # for _extract_jira_ticket, _fetch_jira_ticket
 source "${LIB_DIR}/lint.sh" 2>/dev/null || true  # for _run_static_analysis
@@ -39,55 +45,7 @@ source "${LIB_DIR}/peer-validate.sh"  # for _validate_peer_output
 source "${LIB_DIR}/cost.sh"           # for _cost_record / _cost_summary
 source "${LIB_DIR}/design.sh"         # for run_design_check (advisory UX review of UI PRs)
 
-# ── Model backend: direct Anthropic API on diffhound's own key ───────────────
-# v0.7.31 (BX-3010): reverts the v0.7.29 `claude -p` backend. That backend
-# authenticated with CLAUDE_CODE_OAUTH_TOKEN, i.e. Shubham's PERSONAL Claude
-# subscription, and every call deliberately scrubbed ANTHROPIC_API_KEY so the
-# subscription was the only credential it could use. Diffhound now has a funded
-# key of its own, so every model call goes back to api.anthropic.com with
-# x-api-key. Two reasons this is a revert and not a new design:
-#   1. Provability. With the CLI, which credential paid is a precedence question
-#      between an env key, an OAuth token and ~/.claude.json. With x-api-key the
-#      billed account is the header, and nothing can silently fall back to a
-#      personal subscription.
-#   2. Prompt caching. The cache_control breakpoint below is worth ~90% off the
-#      repeated system prefix and the CLI path had no equivalent.
-# Do NOT reintroduce a `claude` CLI call anywhere in this pipeline — it bills
-# the wrong account and does it silently. _api_backend_ok is the loud gate.
-_ANTHROPIC_API_URL="${ANTHROPIC_API_URL:-https://api.anthropic.com/v1/messages}"
-
-# v0.7.32: thinking models put a `thinking` block FIRST in content, so the old
-# `.content[0].text` read null and every Opus call returned an empty string —
-# the exact silent-empty failure mode v0.7.30 exists to prevent. Always select
-# the text blocks by type, never by position. Proven on claude-opus-5:
-#   block_types=thinking,text   content[0].text=null
-_TEXT_BLOCKS='[.content[] | select(.type == "text") | .text] | join("")'
-
-# Effort + adaptive thinking are sent ONLY when a caller asks for an effort
-# level. Haiku 4.5 rejects `output_config.effort`, so the cheap layers must keep
-# omitting it; Opus 5 / Sonnet 5 think by default either way.
-_output_cfg() {
-  [ -z "${1:-}" ] && { printf '{}'; return; }
-  jq -nc --arg e "$1" '{thinking: {type: "adaptive"}, output_config: {effort: $e}}'
-}
-
-# A response that spent every output token thinking has stop_reason max_tokens and
-# no text block. Returning 0 there posted content-free "merge ok" reviews (PR #347).
-# Usage: printf '%s' "$resp" | _api_text_status  -> prints text; exit 2 if truncated-empty
-_api_text_status() {
-  local _r _t
-  _r=$(cat)
-  _t=$(printf '%s' "$_r" | jq -r "$_TEXT_BLOCKS" 2>/dev/null || true)
-  printf '%s' "$_t"
-  if [ -z "${_t//[[:space:]]/}" ] && [ "$(printf '%s' "$_r" | jq -r '.stop_reason // empty' 2>/dev/null)" = "max_tokens" ]; then
-    return 2
-  fi
-  return 0
-}
-
-_lower_effort() {
-  case "${1:-}" in max|xhigh) echo high ;; high) echo medium ;; medium) echo low ;; *) echo "" ;; esac
-}
+source "${LIB_DIR}/api.sh"
 
 # A single-call reply cut off at max_tokens still returned text, so it never hit
 # the failure retry; retry it once at the next lower effort (the chunk-path rule).
@@ -104,131 +62,6 @@ _mono_retry_cutoff() {
     rm -f "$_tmp"; echo max_tokens > "$3"
   fi
   return 0
-}
-
-# Usage: printf '%s' "$prompt" | _call_api MODEL [MAX_TOKENS] [TIMEOUT_SECS] [EFFORT]
-#        _call_api MODEL [MAX_TOKENS] [TIMEOUT_SECS] [EFFORT] < prompt_file
-_call_api() {
-  local model="$1"
-  local max_tokens="${2:-4096}"
-  local timeout_secs="${3:-120}"
-  local effort="${4:-}"
-
-  local _api_pf _api_jf
-  _api_pf=$(mktemp -t "api-prompt.XXXXXX")
-  _api_jf=$(mktemp -t "api-json.XXXXXX")
-  cat > "$_api_pf"
-  local _api_pf_keep; _api_pf_keep=$(mktemp -t "api-keep.XXXXXX"); cp "$_api_pf" "$_api_pf_keep"
-
-  jq -n --arg model "$model" \
-        --argjson max_tokens "$max_tokens" \
-        --argjson extra "$(_output_cfg "$effort")" \
-        --rawfile user "$_api_pf" \
-    '{model: $model, max_tokens: $max_tokens,
-      messages: [{role: "user", content: $user}]} + $extra' > "$_api_jf"
-  rm -f "$_api_pf"
-
-  local _api_r
-  _api_r=$($_TIMEOUT_CMD "$timeout_secs" curl -sf "$_ANTHROPIC_API_URL" \
-    -H "x-api-key: ${ANTHROPIC_API_KEY}" \
-    -H "anthropic-version: 2023-06-01" \
-    -H "anthropic-beta: prompt-caching-2024-07-31" \
-    -H "content-type: application/json" \
-    -d @"$_api_jf" 2>/dev/null || echo "")
-  rm -f "$_api_jf"
-
-  printf '%s' "$_api_r" | _cost_record "$model" "${DIFFHOUND_STAGE:-other}"
-  [ -n "${DIFFHOUND_STOP_REASON_FILE:-}" ] && \
-    printf '%s' "$_api_r" | jq -r '.stop_reason // empty' > "$DIFFHOUND_STOP_REASON_FILE" 2>/dev/null
-  local _api_txt _api_rc=0
-  _api_txt=$(printf '%s' "$_api_r" | _api_text_status) || _api_rc=$?
-  if [ "$_api_rc" = 2 ]; then
-    local _lower; _lower=$(_lower_effort "$effort")
-    echo "  [diffhound] ${model} spent all ${max_tokens} output tokens thinking (stop_reason=max_tokens, no text)${_lower:+; retrying at effort ${_lower}}" >&2
-    if [ -n "$_lower" ] && [ "${_DIFFHOUND_EFFORT_RETRY:-0}" != 1 ]; then
-      _DIFFHOUND_EFFORT_RETRY=1 _call_api "$model" "$max_tokens" "$timeout_secs" "$_lower" < "$_api_pf_keep"
-      local _rc=$?; rm -f "$_api_pf_keep"; return $_rc
-    fi
-    rm -f "$_api_pf_keep"; return 1
-  fi
-  rm -f "$_api_pf_keep"
-  # No text at all (empty body, network failure, content-free reply) is a
-  # failed call. Returning 0 here let a chunk review write an empty file that
-  # every later stage read as "nothing found".
-  _api_empty_is_failure "$_api_txt" || return 1
-  printf '%s' "$_api_txt"
-}
-
-# _call_api_system MODEL MAX_TOKENS TIMEOUT SYSTEM_FILE [EFFORT] < user_prompt
-_call_api_system() {
-  local model="$1"
-  local max_tokens="${2:-4096}"
-  local timeout_secs="${3:-120}"
-  local system_file="$4"
-  local effort="${5:-}"
-
-  local _api_pf _api_jf
-  _api_pf=$(mktemp -t "api-prompt.XXXXXX")
-  _api_jf=$(mktemp -t "api-json.XXXXXX")
-  cat > "$_api_pf"
-  local _api_pf_keep; _api_pf_keep=$(mktemp -t "api-keep.XXXXXX"); cp "$_api_pf" "$_api_pf_keep"
-
-  jq -n --arg model "$model" \
-        --argjson max_tokens "$max_tokens" \
-        --argjson extra "$(_output_cfg "$effort")" \
-        --rawfile system "$system_file" \
-        --rawfile user "$_api_pf" \
-    '{model: $model, max_tokens: $max_tokens,
-      system: [{type: "text", text: $system, cache_control: {type: "ephemeral"}}],
-      messages: [{role: "user", content: $user}]} + $extra' > "$_api_jf"
-  rm -f "$_api_pf"
-
-  local _api_r
-  _api_r=$($_TIMEOUT_CMD "$timeout_secs" curl -sf "$_ANTHROPIC_API_URL" \
-    -H "x-api-key: ${ANTHROPIC_API_KEY}" \
-    -H "anthropic-version: 2023-06-01" \
-    -H "anthropic-beta: prompt-caching-2024-07-31" \
-    -H "content-type: application/json" \
-    -d @"$_api_jf" 2>/dev/null || echo "")
-  rm -f "$_api_jf"
-
-  printf '%s' "$_api_r" | _cost_record "$model" "${DIFFHOUND_STAGE:-other}"
-  [ -n "${DIFFHOUND_STOP_REASON_FILE:-}" ] && \
-    printf '%s' "$_api_r" | jq -r '.stop_reason // empty' > "$DIFFHOUND_STOP_REASON_FILE" 2>/dev/null
-  local _api_txt _api_rc=0
-  _api_txt=$(printf '%s' "$_api_r" | _api_text_status) || _api_rc=$?
-  if [ "$_api_rc" = 2 ]; then
-    local _lower; _lower=$(_lower_effort "$effort")
-    echo "  [diffhound] ${model} spent all ${max_tokens} output tokens thinking (stop_reason=max_tokens, no text)${_lower:+; retrying at effort ${_lower}}" >&2
-    if [ -n "$_lower" ] && [ "${_DIFFHOUND_EFFORT_RETRY:-0}" != 1 ]; then
-      _DIFFHOUND_EFFORT_RETRY=1 _call_api_system "$model" "$max_tokens" "$timeout_secs" "$system_file" "$_lower" < "$_api_pf_keep"
-      local _rc=$?; rm -f "$_api_pf_keep"; return $_rc
-    fi
-    rm -f "$_api_pf_keep"; return 1
-  fi
-  rm -f "$_api_pf_keep"
-  # No text at all (empty body, network failure, content-free reply) is a
-  # failed call. Returning 0 here let a chunk review write an empty file that
-  # every later stage read as "nothing found".
-  _api_empty_is_failure "$_api_txt" || return 1
-  printf '%s' "$_api_txt"
-}
-
-# Proves the backend ANSWERS, not merely that a key is present. v0.7.30 exists
-# because a revoked-but-still-exported key passed a `-z` presence check and
-# diffhound posted content-free APPROVEs onto live monorepo PRs. Keep it a real
-# call. Echoes the model's reply on stdout so callers can show the failure.
-_api_backend_ok() {
-  [ -n "${ANTHROPIC_API_KEY:-}" ] || return 1
-  local _r
-  _r=$($_TIMEOUT_CMD 60 curl -s "$_ANTHROPIC_API_URL" \
-    -H "x-api-key: ${ANTHROPIC_API_KEY}" \
-    -H "anthropic-version: 2023-06-01" \
-    -H "content-type: application/json" \
-    -d '{"model":"claude-haiku-4-5-20251001","max_tokens":16,
-         "messages":[{"role":"user","content":"Reply with exactly: OK"}]}' 2>/dev/null || echo "")
-  printf '%s' "$_r" | jq -r '.error.message // empty' 2>/dev/null
-  printf '%s' "$_r" | jq -e "($_TEXT_BLOCKS) | length > 0" >/dev/null 2>&1
 }
 
 # ── Verify dependencies ─────────────────────────────────────
@@ -555,7 +388,7 @@ _learn_from_pr() {
   local current_comments
   current_comments=$(_gh_api_all "/repos/${repo_owner}/${repo_name}/pulls/${pr}/comments" \
     | jq "[.[] | select(.user.login == \"${REVIEWER_LOGIN}\") | {id,path,line,body,updated_at}]" \
-    2>/dev/null || echo "[]")
+    2>/dev/null) || return 1
 
   local posted_lines
   posted_lines=$(jq -r '.comments[]' "$cache_file" 2>/dev/null || true)
@@ -717,87 +550,6 @@ _learn_from_pr() {
   # ── Distill false positives into learned patterns ──
   _distill_false_positives "$pr" "$repo_owner" "$repo_name"
 
-  # ── Auto-resolve threads where dev confirmed resolution ──
-  _auto_resolve_replied_threads "$pr" "$repo_owner" "$repo_name" "$all_comments"
-}
-
-# ── Auto-resolve GitHub review threads based on dev replies ──
-_auto_resolve_replied_threads() {
-  local pr="$1" repo_owner="$2" repo_name="$3" all_comments="$4"
-  local resolved=0
-
-  # Resolution keywords: dev acknowledged or accepted the review comment
-  local _resolution_re="(^fixed|^done|^addressed|^agreed|^correct|^good point|^will do|^updated|^by design|^intentional|^acceptable|^fair point|^makes sense)"
-
-  # Get all reviewer top-level comment IDs
-  local reviewer_ids
-  reviewer_ids=$(printf '%s' "$all_comments" | jq -r \
-    --arg login "$REVIEWER_LOGIN" \
-    '[.[] | select(.user == $login and .in_reply_to_id == null) | .id] | .[]')
-
-  # Response cache: threads where Diffhound posted an AI reply THIS run
-  local response_cache="$REVIEW_CACHE_DIR/pr-${pr}-responses.txt"
-
-  # Collect thread IDs to resolve
-  local threads_to_resolve=()
-  while IFS= read -r cid; do
-    [ -z "$cid" ] && continue
-
-    # Get the thread
-    local thread
-    thread=$(printf '%s' "$all_comments" | jq -c \
-      --argjson parent "$cid" \
-      '[.[] | select(.id == $parent or .in_reply_to_id == $parent)] | sort_by(.id)')
-
-    local tlen
-    tlen=$(echo "$thread" | jq 'length' 2>/dev/null || echo "0")
-    [ "${tlen:-0}" -le 1 ] && continue
-
-    # Get the last reply (from dev, not bot -- already filtered by cache in _respond_to_dev_replies)
-    local last_body last_id
-    last_body=$(echo "$thread" | jq -r '.[-1].body' | head -5)
-    last_id=$(echo "$thread" | jq -r '.[-1].id')
-
-    # Skip if Diffhound posted a pushback reply to this thread in this run
-    # (means the AI disagreed with the dev -- don't auto-resolve)
-    if [ -f "$response_cache" ] && grep -qx "$last_id" "$response_cache" 2>/dev/null; then
-      continue
-    fi
-
-    # Check if dev's reply matches resolution keywords (case-insensitive, first line)
-    local first_line
-    first_line=$(echo "$last_body" | head -1 | tr '[:upper:]' '[:lower:]')
-    if grep -qiE "$_resolution_re" <<< "$first_line"; then
-      threads_to_resolve+=("$cid")
-    fi
-  done <<< "$reviewer_ids"
-
-  [ "${#threads_to_resolve[@]}" -eq 0 ] && return 0
-
-  # Every thread, all pages (REST databaseId -> GraphQL thread id).
-  local thread_map
-  if ! thread_map=$(dh_review_threads "$repo_owner" "$repo_name" "$pr"); then
-    echo "  warning: GraphQL thread fetch failed -- skipping auto-resolve" >&2
-    return 0
-  fi
-
-  for cid in "${threads_to_resolve[@]}"; do
-    local thread_id is_resolved
-    thread_id=$(printf '%s' "$thread_map" | jq -r --argjson dbid "$cid" \
-      '.[] | select(.db_id == $dbid) | .thread_id' 2>/dev/null)
-    is_resolved=$(printf '%s' "$thread_map" | jq -r --argjson dbid "$cid" \
-      '.[] | select(.db_id == $dbid) | .is_resolved' 2>/dev/null)
-
-    [ -z "$thread_id" ] && continue
-    [ "$is_resolved" = "true" ] && continue
-
-    if echo '{"query":"mutation { resolveReviewThread(input:{threadId:\"'"$thread_id"'\"}) { thread { isResolved } } }"}' \
-      | gh api graphql --input - > /dev/null 2>&1; then
-      resolved=$((resolved + 1))
-    fi
-  done
-
-  [ "$resolved" -gt 0 ] && echo "  resolved ${resolved} thread(s) where dev confirmed fix" >&2
 }
 
 # ── Respond to dev replies with AI-generated conversational replies ──
@@ -826,8 +578,7 @@ _respond_to_dev_replies() {
     2>/dev/null >> "$registry_file" || true
   sort -un "$registry_file" -o "$registry_file" 2>/dev/null || true
 
-  # response_cache kept for back-compat with _auto_resolve_replied_threads;
-  # it tracks dev-reply IDs the bot has answered, not the bot's own replies.
+  # Tracks dev-reply IDs already answered, not generated reply IDs.
   local response_cache="$REVIEW_CACHE_DIR/pr-${pr}-responses.txt"
   local _batch _batch_answered
   _batch=$(mktemp -t "learn-replies.XXXXXX"); _batch_answered=$(mktemp -t "learn-answered.XXXXXX")
@@ -981,10 +732,9 @@ RESPOND_RULES_END
     local _head _rj
     _head=$(gh api "/repos/${repo_owner}/${repo_name}/pulls/${pr}" --jq '.head.sha' 2>/dev/null || true)
     _rj=$(mktemp -t "learn-review.XXXXXX")
-    jq -n --arg sha "$_head" --arg b "Replied on $(grep -c . "$_batch") thread(s)." \
+    jq -n --arg sha "$_head" --arg b "<!-- diffhound-learn v1 --> Replied on $(grep -c . "$_batch") thread(s)." \
       '{commit_id: $sha, event: "COMMENT", body: $b, comments: []}' > "$_rj"
     if DIFFHOUND_LOGIN="$REVIEWER_LOGIN" dh_publish_review "$repo_owner" "$repo_name" "$pr" "$_head" COMMENT "$_rj" "$_batch"; then
-      # _auto_resolve_replied_threads skips threads with active push-back.
       cat "$_batch_answered" >> "$response_cache"
       echo "  🗣️  ${_DH_REPLIES_POSTED} AI responses posted to dev replies (one review)"
     else
@@ -1261,6 +1011,7 @@ cleanup() {
   [ -n "${_spinner_pid:-}" ] && kill "$_spinner_pid" 2>/dev/null && wait "$_spinner_pid" 2>/dev/null || true
   _spinner_pid=""
   dh_abandon_pending
+  [ -z "${_DH_STATE_DIR:-}" ] || rm -rf "$_DH_STATE_DIR"
   rm -f "${DIFF_FILE:-}" "${PROMPT_FILE:-}" "${CLAUDE_OUT:-}" "${CODEX_OUT:-}" "${GEMINI_OUT:-}" "${DIFFHOUND_USAGE_LOG:-}" \
         "${PEER_PROMPT_FILE:-}" "${_GEMINI_PROMPT_FILE:-}" "${SYNTH_PROMPT:-}" "${REVIEW_STRUCTURED:-}" "${REVIEW_SUMMARY:-}" \
         "${REVIEW_JSON:-}" "${REVIEW_STRUCTURED:-}.comments" "${REVIEW_STRUCTURED:-}.new_comments" \
@@ -2072,107 +1823,13 @@ LAST_REVIEWED_SHA=""
 # Fetch all inline comments (with thread structure)
 _gh_api_all "/repos/${REPO_OWNER}/${REPO_NAME}/pulls/${PR_NUMBER}/comments" \
   | jq '[.[] | {id, path, line, body, user: .user.login, in_reply_to_id, created_at}]' \
-  > "$EXISTING_COMMENTS_FILE" 2>/dev/null || echo "[]" > "$EXISTING_COMMENTS_FILE"
+  > "$EXISTING_COMMENTS_FILE" 2>/dev/null || { echo "Cannot read previous comments; stopping before publication" >&2; exit 1; }
 
 # Fetch review-level comments (summary bodies + commit_id for incremental diff)
 EXISTING_REVIEWS_FILE=$(mktemp -t "pr-${PR_NUMBER}-reviews.XXXXXX")
 _gh_api_all "/repos/${REPO_OWNER}/${REPO_NAME}/pulls/${PR_NUMBER}/reviews" \
   | jq '[.[] | {id, state, body, user: .user.login, submitted_at, commit_id}]' \
-  > "$EXISTING_REVIEWS_FILE" 2>/dev/null || echo "[]" > "$EXISTING_REVIEWS_FILE"
-
-# Reconstruct prior FINDING: blocks from our existing inline PR comments.
-# round-diff.py uses these as the "previous round" baseline to compute
-# new/resolved/unchanged accounting (DIFFHOUND_PRIOR_FINDINGS env var).
-#
-# v0.5.6: Two-tier reconstruction.
-# (1) Marked comments (posted by v0.5.6+): the diffhound-id v1 marker carries
-#     the original identity tuple (file_basename, primary_symbol,
-#     normalized_what[:80]) base64-encoded. Decode verbatim — apples-to-apples
-#     comparison with current-round dedup-helper.
-# (2) Unmarked legacy comments: fall back to the prior lossy regex (preserved
-#     unchanged below), so a PR reviewed under earlier diffhound versions
-#     still benefits from imperfect-but-better-than-nothing dedup.
-#
-# We emit FINDING: blocks in two flavors:
-#   - For marked comments, WHAT is the embedded normalized_what (already
-#     truncated and lowercased — dedup-helper.py will compute the same key).
-#   - For unmarked, WHAT is the legacy first-sentence reconstruction.
-PRIOR_FINDINGS_FILE=$(mktemp -t "pr-${PR_NUMBER}-prior-findings.XXXXXX")
-jq -r --arg login "$REVIEWER_LOGIN" '
-  [.[] | select(.in_reply_to_id == null and .user == $login and .path != null and .line != null)]
-  | .[]
-  | . as $c
-  | ($c.body | capture("<!-- diffhound-id v1: (?<b64>[A-Za-z0-9+/=]+) -->") // null) as $marker
-  | if $marker != null
-    then
-      # Marked: emit a placeholder FINDING that downstream Python will replace
-      # with the decoded tuple. We tag the body with the b64 payload so the
-      # post-processing step can substitute it without re-fetching.
-      "FINDING: \($c.path):\($c.line):MARKED\nMARKER_B64: \($marker.b64)\n"
-    else
-      # Legacy lossy reconstruction (pre-v0.5.6 comments).
-      ($c.body | capture("\\*\\*(?<sev>BLOCKING|SHOULD-FIX|NIT|OPEN_QUESTION)\\*\\*") // {sev:"SHOULD-FIX"}) as $sv
-      | ($c.body | gsub("\\*\\*(?:BLOCKING|SHOULD-FIX|NIT|OPEN_QUESTION)\\*\\*\\s*[^a-zA-Z`]*"; "")
-                 | split(". ")[0] | ltrimstr(" ") | rtrimstr(" ")) as $what
-      | "FINDING: \($c.path):\($c.line):\($sv.sev)\nWHAT: \($what)\n"
-    end
-' "$EXISTING_COMMENTS_FILE" 2>/dev/null > "${PRIOR_FINDINGS_FILE}.raw" || true
-
-# Two-file output:
-#   PRIOR_FINDINGS_FILE — legacy FINDING-block format. Marked comments emit
-#     plausible WHAT for round-diff.py's accounting (it uses identity-key
-#     style matching too, so the output below works for it). Unmarked legacy
-#     comments emit lossy first-sentence WHAT (unchanged from pre-v0.5.6).
-#   PRIOR_KEYS_FILE — exact identity tuples (basename TAB symbol TAB what80),
-#     one per line, decoded verbatim from markers. Skips unmarked comments.
-#     dedup-helper.py reads this via DIFFHOUND_PRIOR_KEYS for exact matching.
-PRIOR_KEYS_FILE=$(mktemp -t "pr-${PR_NUMBER}-prior-keys.XXXXXX")
-python3 - "${PRIOR_FINDINGS_FILE}.raw" "$PRIOR_FINDINGS_FILE" "$PRIOR_KEYS_FILE" <<'PYEOF' 2>/dev/null || { cp "${PRIOR_FINDINGS_FILE}.raw" "$PRIOR_FINDINGS_FILE"; : > "$PRIOR_KEYS_FILE"; }
-import base64, json, sys
-src, dst_findings, dst_keys = sys.argv[1], sys.argv[2], sys.argv[3]
-with open(src) as f:
-    text = f.read()
-out_findings = []
-out_keys = []
-lines = text.splitlines()
-i = 0
-while i < len(lines):
-    line = lines[i]
-    if line.startswith("FINDING: ") and line.endswith(":MARKED") and i + 1 < len(lines) and lines[i+1].startswith("MARKER_B64: "):
-        head = line[:-len(":MARKED")]  # "FINDING: path:line"
-        b64 = lines[i+1][len("MARKER_B64: "):].strip()
-        try:
-            j = json.loads(base64.b64decode(b64).decode("utf-8"), strict=False)
-            f_, s_, w_ = j.get("f", ""), j.get("s", ""), j.get("w", "")
-            if not f_:
-                i += 2; continue  # malformed — drop
-            # Exact identity tuple for dedup-helper consumption.
-            # Tab-separated; symbol/what may contain spaces but never tabs in
-            # practice (compute_identity_tuple collapses whitespace).
-            out_keys.append(f"{f_}\t{s_}\t{w_}")
-            # Synthetic FINDING block for round-diff.py / legacy compat.
-            # Round-diff uses the same (basename, primary_symbol, what80)
-            # identity logic; backtick-wrapping the symbol keeps it discoverable.
-            out_findings.append(f"{head}:SHOULD-FIX")
-            if s_:
-                out_findings.append(f"WHAT: `{s_}` {w_}")
-            else:
-                out_findings.append(f"WHAT: {w_}")
-        except Exception:
-            pass  # malformed → silently drop
-        i += 2
-        continue
-    out_findings.append(line)
-    i += 1
-with open(dst_findings, "w") as f:
-    f.write("\n".join(out_findings))
-    if out_findings: f.write("\n")
-with open(dst_keys, "w") as f:
-    f.write("\n".join(out_keys))
-    if out_keys: f.write("\n")
-PYEOF
-rm -f "${PRIOR_FINDINGS_FILE}.raw"
-export DIFFHOUND_PRIOR_KEYS="$PRIOR_KEYS_FILE"
+  > "$EXISTING_REVIEWS_FILE" 2>/dev/null || { echo "Cannot read previous reviews; stopping before publication" >&2; exit 1; }
 
 # Re-review mode when diffhound has reviewed this PR before: inline comments
 # from the reviewer, or a diffhound summary even if it had no inline comments
@@ -2304,7 +1961,8 @@ fi
 # For re-reviews: fetch incremental diff (only changes since last review)
 INCREMENTAL_DIFF_FILE=""
 INCREMENTAL_FILES_LIST=""
-if [ "$IS_REREVIEW" = true ] && [ -n "$LAST_REVIEWED_SHA" ]; then
+if [ "$IS_REREVIEW" = true ] && [ "$FORCE_FULL" != true ] && [ -n "$LAST_REVIEWED_SHA" ] \
+   && dh_incremental_base_ok "$REPO_PATH" "$REPO_OWNER" "$REPO_NAME" "$LAST_REVIEWED_SHA" "$HEAD_SHA"; then
   INCREMENTAL_DIFF_FILE=$(mktemp -t "pr-${PR_NUMBER}-incremental.XXXXXX")
   INCREMENTAL_FILES_LIST=$(mktemp -t "pr-${PR_NUMBER}-incr-files.XXXXXX")
 
@@ -2356,6 +2014,7 @@ fi
 # Determine re-review depth based on delta size (addresses bait-and-switch scenario)
 # REREVIEW_DEPTH: "shallow" = skip peer review, "full" = run peer review with re-review prompt
 REREVIEW_DEPTH="shallow"
+[ -n "$INCREMENTAL_DIFF_FILE" ] || REREVIEW_DEPTH="full"
 if [ "$IS_REREVIEW" = true ] && [ "$FORCE_FULL" != true ]; then
   _INCR_BYTES=${INCR_SIZE:-0}
   _INCR_LINES=$(wc -l < "${INCREMENTAL_DIFF_FILE:-/dev/null}" 2>/dev/null | tr -d ' ' || echo "0")
@@ -3549,7 +3208,7 @@ if [ "${DIFFHOUND_SKIP_VALIDATORS:-0}" != "1" ] \
   # for governance metrics instead of discarding it (v0.7.19).
   _VALIDATOR_AUDIT=$(mktemp -t "pr-${PR_NUMBER}-vaudit.XXXXXX")
   if DIFFHOUND_REPO="${DIFFHOUND_REPO:-${REPO_PATH:-$(pwd)}}" \
-     DIFFHOUND_PRIOR_FINDINGS="${PRIOR_FINDINGS_FILE:-}" \
+     DIFFHOUND_DEDUP_DISABLE=1 \
      "${LIB_DIR}/validators/format-adapter.sh" < "$CLAUDE_OUT" > "$_VALIDATED_OUT" 2>"$_VALIDATOR_AUDIT" \
      && [ -s "$_VALIDATED_OUT" ]; then
     # Count findings in either format (JSON .findings[] OR raw FINDING: lines).
@@ -3586,28 +3245,6 @@ if [ "${DIFFHOUND_SKIP_VALIDATORS:-0}" != "1" ] \
     tail -5 "$_VALIDATOR_AUDIT" 2>/dev/null | sed 's/^/      /' >&2
     _VALIDATORS_FAILED=true
     rm -f "$_VALIDATED_OUT"
-  fi
-fi
-
-# ============================================================
-# STEP 3.6: ROUND-DIFF — append CHANGES_SINCE_LAST_REVIEW accounting block.
-# Reads PRIOR_FINDINGS_FILE (reconstructed from existing inline comments) and
-# computes new/resolved/unchanged relative to the current validated findings.
-# On first reviews the prior file is empty → shows "+N new, -0 resolved".
-# Opt-out: DIFFHOUND_SKIP_VALIDATORS=1 (shares the validators skip flag)
-# ============================================================
-_ROUND_DIFF_PY="${LIB_DIR}/validators/round-diff.py"
-if [ "${DIFFHOUND_SKIP_VALIDATORS:-0}" != "1" ] \
-   && [ -x "$_ROUND_DIFF_PY" ] \
-   && [ -s "$CLAUDE_OUT" ]; then
-  _RD_OUT=$(mktemp -t "pr-${PR_NUMBER}-rd.XXXXXX")
-  if DIFFHOUND_PRIOR_FINDINGS="${PRIOR_FINDINGS_FILE}" \
-     python3 "$_ROUND_DIFF_PY" < "$CLAUDE_OUT" > "$_RD_OUT" 2>/dev/null \
-     && [ -s "$_RD_OUT" ]; then
-    mv "$_RD_OUT" "$CLAUDE_OUT"
-    echo "  🔄  round-diff: accounting block appended" >&2
-  else
-    rm -f "$_RD_OUT"
   fi
 fi
 
@@ -3905,7 +3542,7 @@ cp "$CLAUDE_OUT" "$SYNTH_FINDINGS"
 # ALWAYS runs on re-reviews — incremental diffs have HIGHER hallucination rates
 # and need the false-positive filter MORE than full diffs do.
 # ============================================================
-if [ "$FAST_MODE" != "true" ]; then
+if [ "$FAST_MODE" != "true" ] || [ "$IS_REREVIEW" = true ]; then
   spinner_start "Verifying findings (reducing false positives)..."
 
   VERIFY_PROMPT=$(mktemp -t "pr-${PR_NUMBER}-verify.XXXXXX")
@@ -5007,109 +4644,25 @@ if [ -f "$_BLOCKLIST_FILE" ] && [ -s "${REVIEW_STRUCTURED}.comments" ]; then
   fi
 fi
 
-# -- Re-review dedup: suppress duplicates ONLY if dev addressed the area --
-# Logic: if a new comment targets the same file:line as an existing thread AND
-# the dev modified that area in the incremental diff, suppress it (dev addressed it).
-# If the dev did NOT touch that area, keep the comment (still a valid concern).
-if [ "$IS_REREVIEW" = true ] && [ -f "$EXISTING_COMMENTS_FILE" ]; then
-  _existing_positions=$(jq -r --arg login "$REVIEWER_LOGIN" \
-    '[.[] | select(.user == $login and .in_reply_to_id == null and .path != null and .line != null) | "\(.path):\(.line)"] | .[]' \
-    "$EXISTING_COMMENTS_FILE" 2>/dev/null || true)
-
-  if [ -n "$_existing_positions" ]; then
-    # Build set of changed lines from incremental diff (file:line format)
-    _changed_lines_file=$(mktemp -t "pr-${PR_NUMBER}-changed-lines.XXXXXX")
-    if [ -n "${INCREMENTAL_DIFF_FILE:-}" ] && [ -s "${INCREMENTAL_DIFF_FILE:-}" ]; then
-      awk '
-        /^diff --git/ { file="" }
-        /^\+\+\+ b\// { file=substr($0,7) }
-        /^@@ / {
-          s=$0; sub(/.*\+/,"",s); sub(/,.*/,"",s)
-          line=int(s)-1
-        }
-        /^\+/ && file!="" { line++; print file ":" line }
-        /^ / && file!="" { line++ }
-        /^-/ { next }
-      ' "$INCREMENTAL_DIFF_FILE" > "$_changed_lines_file" 2>/dev/null || true
-    fi
-
-    _dedup_comments=$(mktemp -t "pr-${PR_NUMBER}-dedup-comments.XXXXXX")
-    _dedup_removed=0
-    while IFS= read -r _cline; do
-      _should_suppress=false
-      if [[ "$_cline" =~ ^COMMENT:\ (.+):([0-9]+): ]]; then
-        _c_file="${BASH_REMATCH[1]}"
-        _c_line="${BASH_REMATCH[2]}"
-        # Check if this comment duplicates an existing thread
-        _matches_existing=false
-        while IFS= read -r _epos; do
-          [ -z "$_epos" ] && continue
-          _e_file="${_epos%:*}"
-          _e_line="${_epos##*:}"
-          if [ "$_c_file" = "$_e_file" ] && [ -n "$_e_line" ] && [ "$_e_line" -eq "$_e_line" ] 2>/dev/null; then
-            _delta=$(( _c_line - _e_line ))
-            [ "$_delta" -lt 0 ] && _delta=$(( -_delta ))
-            if [ "$_delta" -le 5 ]; then
-              _matches_existing=true
-              break
-            fi
-          fi
-        done <<< "$_existing_positions"
-
-        if [ "$_matches_existing" = true ]; then
-          # Check if dev actually modified this area in the incremental diff
-          _dev_touched=false
-          if [ -s "$_changed_lines_file" ]; then
-            # Check if any changed line is within +-5 lines of the comment target
-            while IFS=: read -r _ch_file _ch_line; do
-              if [ "$_c_file" = "$_ch_file" ] && [ -n "$_ch_line" ] && [ "$_ch_line" -eq "$_ch_line" ] 2>/dev/null; then
-                _delta=$(( _c_line - _ch_line ))
-                [ "$_delta" -lt 0 ] && _delta=$(( -_delta ))
-                if [ "$_delta" -le 5 ]; then
-                  _dev_touched=true
-                  break
-                fi
-              fi
-            done < "$_changed_lines_file"
-          fi
-
-          if [ "$_dev_touched" = true ]; then
-            # Dev modified this area + it duplicates existing thread = suppress
-            _should_suppress=true
-          fi
-          # If dev did NOT touch it, keep the comment (still a valid unfixed concern)
-        fi
-      fi
-
-      if [ "$_should_suppress" = true ]; then
-        _dedup_removed=$((_dedup_removed + 1))
-      else
-        echo "$_cline" >> "$_dedup_comments"
-      fi
-    done < "${REVIEW_STRUCTURED}.comments"
-    rm -f "$_changed_lines_file"
-    if [ "$_dedup_removed" -gt 0 ]; then
-      echo "  Deduped: suppressed ${_dedup_removed} comment(s) addressed in new commits" >&2
-      mv "$_dedup_comments" "${REVIEW_STRUCTURED}.comments"
-    else
-      rm -f "$_dedup_comments"
-    fi
-  fi
-fi
-
 # Last check before posting: inline claims about declarations/imports must hold at head.
 _claim_verify_comments "${REVIEW_STRUCTURED}.comments" "${REPO_PATH:-${DIFFHOUND_REPO:-$(pwd)}}"
 
 # One readable review per push: drop repeats of findings already on the PR, then
 # cap what goes inline (in code; the prompt caps were ignored, 8 posted vs 3).
 # Capped findings are listed once in the summary, not lost.
-_DH_DEDUP_DROPPED=0
-if [ "$IS_REREVIEW" = true ]; then
-  dh_semantic_dedup "${REVIEW_STRUCTURED}.comments" "$EXISTING_COMMENTS_FILE" "$REVIEWER_LOGIN"
+_DH_STATE_DIR=$(mktemp -d -t "dh-lifecycle.XXXXXX")
+if ! dh_review_threads "$REPO_OWNER" "$REPO_NAME" "$PR_NUMBER" > "$_DH_STATE_DIR/threads"; then
+  echo "  Thread status unavailable: retaining findings rather than suppressing them" >&2
+  echo null > "$_DH_STATE_DIR/threads"
+fi
+if ! dh_plan_findings "${REVIEW_STRUCTURED}.comments" "$EXISTING_REVIEWS_FILE" "$EXISTING_COMMENTS_FILE" \
+     "$_DH_STATE_DIR/threads" "$REVIEWER_LOGIN" "$HEAD_SHA" "$_DH_STATE_DIR"; then
+  DIFFHOUND_FAIL_REASON="Could not reconcile finding history. No review published."
+  exit 1
 fi
 _DH_OVERFLOW=$(mktemp -t "pr-${PR_NUMBER}-overflow.XXXXXX")
 if [ "$IS_REREVIEW" = true ]; then _dh_cap="${DIFFHOUND_MAX_INLINE_REREVIEW:-3}"; else _dh_cap="${DIFFHOUND_MAX_INLINE:-8}"; fi
-dh_cap_inline_comments "${REVIEW_STRUCTURED}.comments" "$_dh_cap" "$_DH_OVERFLOW"
+dh_cap_inline_comments "${REVIEW_STRUCTURED}.comments" "$_dh_cap" "$_DH_OVERFLOW" || exit 1
 [ -s "$_DH_OVERFLOW" ] && echo "  Inline cap: $(grep -c . "$_DH_OVERFLOW") finding(s) moved to the summary (cap ${_dh_cap}, blockers never capped)" >&2
 _DH_REPLY_OVERFLOW=$(mktemp -t "pr-${PR_NUMBER}-reply-overflow.XXXXXX")
 dh_cap_replies "${REVIEW_STRUCTURED}.comments" "$DH_MAX_REPLIES_PER_RUN" "$_DH_REPLY_OVERFLOW"
@@ -5434,6 +4987,17 @@ if [ "$POST_REVIEW" = true ]; then
     printf '\n_%s finding(s) from this pass were already raised earlier on this PR; see those threads._\n' "$_DH_DEDUP_DROPPED" >> "$REVIEW_SUMMARY"
   fi
 
+  if ! python3 "${LIB_DIR}/review_state.py" finish "$_DH_STATE_DIR/plan" \
+       "${REVIEW_STRUCTURED}.new_comments" "$_DH_OVERFLOW" "$REVIEW_SUMMARY"; then
+    DIFFHOUND_FAIL_REASON="Could not persist complete finding history. No review published."
+    exit 1
+  fi
+  # An omitted old blocker remains open; an incremental clean pass cannot approve it.
+  if [ "$REVIEW_EVENT" = APPROVE ] && jq -e 'any(.findings[]; .status == "OPEN" and .severity == "BLOCKING")' "$_DH_STATE_DIR/plan" >/dev/null; then
+    REVIEW_EVENT=COMMENT
+    _cap_total_row_verdict "$REVIEW_SUMMARY"
+  fi
+
   # Build the review JSON (new inline comments only)
   cat > "$REVIEW_JSON" << JSONSTART
 {
@@ -5505,15 +5069,17 @@ JSONEND
   _inject_markers_into_review_json "$REVIEW_JSON"
   _dh_inline_n=$(jq '.comments | length' "$REVIEW_JSON" 2>/dev/null || echo 0)
 
+  _current_head=$(gh api "/repos/$REPO_OWNER/$REPO_NAME/pulls/$PR_NUMBER" --jq '.head.sha') || exit 1
+  if [ "$_current_head" != "$HEAD_SHA" ]; then
+    DIFFHOUND_FAIL_REASON="PR changed during review; no stale review published."
+    echo "$DIFFHOUND_FAIL_REASON" >&2
+    exit 1
+  fi
   _POSTED_OK=false
   if dh_quiet_rerun_ok "$IS_REREVIEW" "${FORCE_FULL:-false}" "$REVIEW_EVENT" "${_DH_MODEL_EVENT:-}" \
        "${_CHUNK_GAPS:-}" "${_dh_inline_n:-0}" "${REPLY_COUNT:-0}" "${LAST_DH_REVIEW_ID:-}"; then
-    # Nothing new to say: stamp the last review with this commit, no new
-    # notification. Its own content is kept; only the stamp and marker change.
-    _dh_old_body=$(jq -r --argjson id "$LAST_DH_REVIEW_ID" '.[] | select(.id == $id) | .body // ""' "$EXISTING_REVIEWS_FILE" 2>/dev/null \
-      | sed -E '/^_Re-checked at [0-9a-f]+: nothing new since the last review\._$/d')
-    { printf '_Re-checked at %s: nothing new since the last review._\n\n' "${HEAD_SHA:0:7}"
-      _dh_body_with_marker "$_dh_old_body" "$HEAD_SHA"; } > "${_dh_marked}.q"
+    # Publish the current summary/state even on a quiet rerun.
+    cp "$_dh_marked" "${_dh_marked}.q"
     if dh_update_review_body "$REPO_OWNER" "$REPO_NAME" "$PR_NUMBER" "$LAST_DH_REVIEW_ID" "${_dh_marked}.q"; then
       _POSTED_OK=true; NEW_COMMENT_COUNT=0
       spinner_stop "Nothing new: updated the last review in place (no new comment)"
@@ -5535,8 +5101,11 @@ JSONEND
       exit 1
     fi
   fi
+  if ! dh_upsert_summary "$REPO_OWNER" "$REPO_NAME" "$PR_NUMBER" "$REVIEWER_LOGIN" "$_dh_marked"; then
+    echo "  Summary refresh failed; the submitted review retains this run's complete history." >&2
+  fi
   rm -f "$_dh_marked"
-  dh_clear_status_comment "$REPO_OWNER" "$REPO_NAME" "$PR_NUMBER" "$HEAD_SHA"
+  DIFFHOUND_LOGIN="$REVIEWER_LOGIN" dh_clear_status_comment "$REPO_OWNER" "$REPO_NAME" "$PR_NUMBER" "$HEAD_SHA"
 
   echo ""
   echo "  → https://github.com/${REPO_OWNER}/${REPO_NAME}/pull/${PR_NUMBER}"
@@ -5603,13 +5172,6 @@ JSONEND
   done
   [ "$_LEARNED_TOTAL" -gt 0 ] && echo "  📚 Auto-learned from $_LEARNED_TOTAL previous review(s)"
   [ "$_LEARN_DEFERRED" -gt 0 ] && echo "  📚 Auto-learn deferred for $_LEARN_DEFERRED earlier PR(s): run is at ${SECONDS}s, past the ${DIFFHOUND_LEARN_BUDGET_SECS:-720}s budget"
-
-  # Auto-resolve threads addressed by new commits (re-review only)
-  if [ "$IS_REREVIEW" = true ] && [ -n "$INCREMENTAL_DIFF_FILE" ] && [ -f "$INCREMENTAL_DIFF_FILE" ]; then
-    _RESOLVED=$(resolve_addressed_comments "$REPO_OWNER" "$REPO_NAME" "$PR_NUMBER" \
-      "$EXISTING_COMMENTS_FILE" "$INCREMENTAL_DIFF_FILE" "$REVIEWER_LOGIN")
-    [ "$_RESOLVED" -gt 0 ] && echo "  ✓ Auto-resolved $_RESOLVED addressed thread(s)"
-  fi
 
   # Cleanup parse files
   rm -f "${REVIEW_STRUCTURED}.new_comments" "${REVIEW_STRUCTURED}.replies" 2>/dev/null || true

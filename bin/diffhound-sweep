@@ -152,10 +152,8 @@ while IFS= read -r LINE || [ -n "$LINE" ]; do
     # this commit, or one edited in place to cover it, means done. Shubham's own
     # manual reviews (no marker, no scorecard) and drafts do not count.
     if [ -n "$REVIEWER" ] && gh api --paginate "/repos/${REPO}/pulls/${PR}/reviews?per_page=100" 2>/dev/null \
-         | jq -s -e --arg sha "$SHA" --arg login "$REVIEWER" \
-             'add // [] | any(.[]; .user.login == $login and .state != "PENDING"
-                          and ((.body // "") | contains("<!-- diffhound-review v1 sha=" + $sha + " -->")
-                               or (.commit_id == $sha and test("SCORECARD_JSON|\\| Category \\| Score"))))' >/dev/null 2>&1; then
+         | jq -L "$DIFFHOUND_ROOT/lib" -s -e --arg sha "$SHA" --arg login "$REVIEWER" \
+             'include "review-identity"; add // [] | any(.[]; dh_covers($login; $sha))' >/dev/null 2>&1; then
       touch "${KEY_BASE}.done"
       continue
     fi

@@ -10,4 +10,14 @@ set -euo pipefail
 DIFFHOUND_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export DIFFHOUND_ROOT
 
+case "${1:-}" in
+  /ask|/describe|/labels|/changelog)
+    command="${1#/}"; shift
+    exec python3 "${DIFFHOUND_ROOT}/lib/commands.py" "$command" "$@"
+    ;;
+  --command-event)
+    shift
+    exec python3 "${DIFFHOUND_ROOT}/lib/commands.py" --event "$@"
+    ;;
+esac
 exec bash "${DIFFHOUND_ROOT}/lib/review.sh" "$@"

@@ -5,7 +5,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 _TEXT_BLOCKS='[.content[] | select(.type == "text") | .text] | join("")'
 # shellcheck disable=SC1090
-eval "$(sed -n '/^_api_text_status() {/,/^}/p;/^_lower_effort() {/,/^}/p' "$ROOT/lib/review.sh")"
+eval "$(sed -n '/^_api_text_status() {/,/^}/p;/^_lower_effort() {/,/^}/p' "$ROOT/lib/api.sh")"
 PASS=0; FAIL=0
 check(){ if [ "$2" = "$3" ]; then PASS=$((PASS+1)); echo "ok   $1"; else FAIL=$((FAIL+1)); echo "FAIL $1 — want [$3] got [$2]"; fi; }
 

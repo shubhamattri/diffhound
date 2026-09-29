@@ -36,11 +36,12 @@ jobs:
           REVIEWER_LOGIN: shubhamattri-nova
           REPLY_TO_USER: ${{ github.event.comment.user.login }}
           IN_REPLY_TO: ${{ github.event.comment.in_reply_to_id }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           # Only respond if parent is the diffhound reviewer.
           # Accept either the pre-hosted identity (REVIEWER_LOGIN) or any [bot] author
           # (e.g. github-actions[bot] from GitHub-hosted runners).
-          PARENT_USER=$(gh api /repos/${{ github.repository }}/pulls/comments/${IN_REPLY_TO} --jq '.user.login' 2>/dev/null || echo '')
+          PARENT_USER=$(gh api "/repos/${{ github.repository }}/pulls/comments/${IN_REPLY_TO}" --jq '.user.login' 2>/dev/null || echo '')
           parent_is_reviewer=false
           if [ "$PARENT_USER" = "$REVIEWER_LOGIN" ]; then
             parent_is_reviewer=true
@@ -48,9 +49,9 @@ jobs:
             parent_is_reviewer=true
           fi
           if [ "$parent_is_reviewer" = "true" ] && [ "$REPLY_TO_USER" != "$PARENT_USER" ]; then
-            echo "should_reply=true" >> $GITHUB_OUTPUT
+            echo "should_reply=true" >> "$GITHUB_OUTPUT"
           else
-            echo "should_reply=false" >> $GITHUB_OUTPUT
+            echo "should_reply=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Trigger Diffhound reply
@@ -63,4 +64,4 @@ jobs:
           echo "${{ secrets.DIFFHOUND_SSH_KEY }}" > ~/.ssh/diffhound_key
           chmod 600 ~/.ssh/diffhound_key
 
-          ssh -o StrictHostKeyChecking=no             -i ~/.ssh/diffhound_key             ubuntu@${{ secrets.DIFFHOUND_HOST }}             "cd /home/ubuntu/diffhound && bash lib/review.sh ${PR_NUMBER} --repo ${REPO} --learn"
+          ssh -o StrictHostKeyChecking=no             -i ~/.ssh/diffhound_key             ubuntu@${{ secrets.DIFFHOUND_HOST }}             "cd /home/ubuntu/diffhound && bash bin/diffhound ${PR_NUMBER} --repo ${REPO} --learn"

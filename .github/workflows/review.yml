@@ -60,4 +60,4 @@ jobs:
           ssh -o StrictHostKeyChecking=no \
             -i ~/.ssh/diffhound_key \
             ubuntu@${{ secrets.DIFFHOUND_HOST }} \
-            "cd /home/ubuntu/diffhound && bash lib/review.sh ${PR_NUMBER} --repo ${REPO} ${AUTO_FLAG} ${FAST_FLAG} ${SYNC_FLAG}"
+            "cd /home/ubuntu/diffhound && bash bin/diffhound ${PR_NUMBER} --repo ${REPO} ${AUTO_FLAG} ${FAST_FLAG} ${SYNC_FLAG}"
