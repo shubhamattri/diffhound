@@ -1,6 +1,7 @@
 #!/bin/bash
 # diffhound — GitHub API interaction
-# Handles review posting, comment threading, and fallback logic
+# List pagination, identity markers, voice indexing, auto-resolve.
+# Publishing a review lives in lib/publish.sh.
 
 # Source marker utilities (compute_identity_tuple / compose_marker / append_marker).
 # Use the same lib dir as the caller to support both VM and dev-machine paths.
@@ -89,164 +90,6 @@ _find_posted_review() {
   _gh_api_all "/repos/$1/$2/pulls/$3/reviews" | jq -r --arg sha "$4" --arg login "$5" --arg body "$body" \
     'def norm: gsub("\r"; "") | sub("\\s+$"; "");
      [.[] | select(.commit_id == $sha and .user.login == $login and ((.body // "") | norm) == ($body | norm))] | last | .id // empty' 2>/dev/null
-}
-
-# "path<TAB>line<TAB>body" for every inline comment by $4 on the PR, for
-# skipping comments that are already there.  Args: owner repo pr login
-_existing_comment_keys() {
-  _gh_api_all "/repos/$1/$2/pulls/$3/comments" | jq -r --arg login "$4" \
-    '.[] | select(.user.login == $login) | [.path, ((.line // .original_line) | tostring), .body] | @json' 2>/dev/null
-}
-
-# Post one inline comment unless the same path/line/body is already on the PR.
-# Echoes "posted" or "skipped".  Args: owner repo pr sha path line body keys_file
-_post_inline_once() {
-  local key
-  key=$(jq -cn --arg p "$5" --arg l "$6" --arg b "$7" '[$p, $l, $b]')
-  if [ -s "$8" ] && grep -qxF -- "$key" "$8"; then echo skipped; return 0; fi
-  if gh api --method POST -H "Accept: application/vnd.github+json" \
-      "/repos/$1/$2/pulls/$3/comments" \
-      -f "body=$7" -f "commit_id=$4" -f "path=$5" -F "line=$6" > /dev/null 2>&1; then
-    printf '%s\n' "$key" >> "$8"; echo posted
-  fi
-  return 0
-}
-
-# Post a complete review with inline comments to GitHub
-# Falls back to body-only + individual comments if bulk fails
-post_review() {
-  local repo_owner="$1" repo_name="$2" pr_number="$3"
-  local head_sha="$4" review_event="$5"
-  local review_summary="$6" review_json="$7"
-  local new_comments_file="$8" diff_file="$9"
-
-  # Append diffhound-id marker to each inline comment body before posting.
-  # Idempotent — append_marker checks for an existing marker and skips.
-  _inject_markers_into_review_json "$review_json"
-
-  local posted_ok=true
-  local new_comment_count
-  new_comment_count=$(wc -l < "$new_comments_file" | tr -d ' ')
-
-  local _post_err _bulk_failed=false _existing_review="" _login="${REVIEWER_LOGIN:-}"
-  _post_err=$(mktemp)
-  if ! gh api \
-    --method POST \
-    -H "Accept: application/vnd.github+json" \
-    -H "X-GitHub-Api-Version: 2022-11-28" \
-    "/repos/${repo_owner}/${repo_name}/pulls/${pr_number}/reviews" \
-    --input "$review_json" > /dev/null 2>"$_post_err"; then
-
-    _bulk_failed=true
-    echo "  review POST failed: $(head -c 300 "$_post_err" | tr '\n' ' ')" >&2
-    [ -n "$_login" ] || _login=$(gh api user --jq .login 2>/dev/null)
-    _existing_review=$(_find_posted_review "$repo_owner" "$repo_name" "$pr_number" "$head_sha" "$_login" "$review_json")
-  fi
-  if [ -n "$_existing_review" ]; then
-    # The failed POST had in fact created the review. Posting again duplicates it.
-    echo "  ...but the review exists on GitHub (id ${_existing_review}); not posting it again" >&2
-    new_comment_count=$(_gh_api_all "/repos/${repo_owner}/${repo_name}/pulls/${pr_number}/reviews/${_existing_review}/comments" | jq 'length' 2>/dev/null || echo 0)
-  elif [ "$_bulk_failed" = true ]; then
-
-    # Inline comments may have invalid line numbers — retry with body-only review
-    local _fallback_json
-    _fallback_json=$(mktemp)
-    jq '{commit_id: .commit_id, event: .event, body: .body, comments: []}' "$review_json" > "$_fallback_json"
-
-    if gh api \
-      --method POST \
-      -H "Accept: application/vnd.github+json" \
-      -H "X-GitHub-Api-Version: 2022-11-28" \
-      "/repos/${repo_owner}/${repo_name}/pulls/${pr_number}/reviews" \
-      --input "$_fallback_json" > /dev/null 2>&1; then
-
-      # Body posted, now post inline comments individually
-      local inline_posted=0 _keys
-      _keys=$(mktemp); _existing_comment_keys "$repo_owner" "$repo_name" "$pr_number" "$_login" > "$_keys"
-      if [ "$new_comment_count" -gt 0 ]; then
-        while IFS=: read -r filepath line rest; do
-          [[ ! "$filepath" =~ ^[a-zA-Z0-9/_.-]+$ ]] && continue
-          line="${line#\~}"
-          [[ ! "$line" =~ ^[0-9]+$ ]] && continue
-          line=$(snap_to_diff_line "$filepath" "$line" "$diff_file")
-          comment=$(strip_severity_label "$rest")
-          [ -z "$(printf '%s' "$comment" | tr -d '[:space:]')" ] && continue
-          comment=$(append_marker "$filepath" "$comment")
-          [ "$(_post_inline_once "$repo_owner" "$repo_name" "$pr_number" "$head_sha" "$filepath" "$line" "$comment" "$_keys")" = posted ] \
-            && inline_posted=$((inline_posted + 1))
-        done < "$new_comments_file"
-      fi
-      new_comment_count=$inline_posted
-    else
-      # If APPROVE/REQUEST_CHANGES failed (e.g. cannot approve/request-changes own PR), retry as COMMENT
-      if [ "$review_event" = "APPROVE" ] || [ "$review_event" = "REQUEST_CHANGES" ]; then
-        jq '.event = "COMMENT"' "$_fallback_json" > "${_fallback_json}.retry"
-        if gh api \
-          --method POST \
-          -H "Accept: application/vnd.github+json" \
-          -H "X-GitHub-Api-Version: 2022-11-28" \
-          "/repos/${repo_owner}/${repo_name}/pulls/${pr_number}/reviews" \
-          --input "${_fallback_json}.retry" > /dev/null 2>&1; then
-          review_event="COMMENT"
-          rm -f "${_fallback_json}.retry"
-          # Post inline comments individually (same logic as body-only success path)
-          local inline_posted=0 _keys
-          _keys=$(mktemp); _existing_comment_keys "$repo_owner" "$repo_name" "$pr_number" "$_login" > "$_keys"
-          if [ "$new_comment_count" -gt 0 ]; then
-            while IFS=: read -r filepath line rest; do
-              [[ ! "$filepath" =~ ^[a-zA-Z0-9/_.-]+$ ]] && continue
-              line="${line#\~}"
-              [[ ! "$line" =~ ^[0-9]+$ ]] && continue
-              line=$(snap_to_diff_line "$filepath" "$line" "$diff_file")
-              comment=$(strip_severity_label "$rest")
-              [ -z "$(printf '%s' "$comment" | tr -d '[:space:]')" ] && continue
-              comment=$(append_marker "$filepath" "$comment")
-              [ "$(_post_inline_once "$repo_owner" "$repo_name" "$pr_number" "$head_sha" "$filepath" "$line" "$comment" "$_keys")" = posted ] \
-                && inline_posted=$((inline_posted + 1))
-            done < "$new_comments_file"
-          fi
-          new_comment_count=$inline_posted
-        else
-          rm -f "${_fallback_json}.retry"
-          spinner_fail "Failed to post review to GitHub"
-          echo "  Summary saved: $review_summary" >&2
-          posted_ok=false
-        fi
-      else
-        spinner_fail "Failed to post review to GitHub"
-        echo "  Summary saved: $review_summary" >&2
-        posted_ok=false
-      fi
-    fi
-    rm -f "$_fallback_json"
-  fi
-  rm -f "$_post_err"
-
-  # Export for caller
-  _POSTED_OK="$posted_ok"
-  _FINAL_COMMENT_COUNT="$new_comment_count"
-}
-
-# Post reply comments to existing review threads
-post_thread_replies() {
-  local repo_owner="$1" repo_name="$2" pr_number="$3"
-  local replies_file="$4"
-
-  local reply_posted=0
-  while IFS=: read -r comment_id filepath line rest; do
-    reply_body="${rest}"
-    [[ ! "$comment_id" =~ ^[0-9]+$ ]] && continue
-    if gh api \
-      --method POST \
-      -H "Accept: application/vnd.github+json" \
-      -H "X-GitHub-Api-Version: 2022-11-28" \
-      "/repos/${repo_owner}/${repo_name}/pulls/${pr_number}/comments/${comment_id}/replies" \
-      --field "body=${reply_body}" > /dev/null 2>&1; then
-      reply_posted=$((reply_posted + 1))
-    fi
-  done < "$replies_file"
-
-  echo "$reply_posted"
 }
 
 # Index posted comments to voice JSONL for continuous learning
@@ -433,24 +276,13 @@ resolve_addressed_comments() {
 
   [ "${#addressed_ids[@]}" -eq 0 ] && { echo "0"; return 0; }
 
-  # 4. Fetch thread IDs via GraphQL (maps REST databaseId → GraphQL thread id)
-  local gql_query
-  gql_query=$(printf '{"query":"query { repository(owner:\"%s\", name:\"%s\") { pullRequest(number:%s) { reviewThreads(first:100) { nodes { id isResolved path line comments(first:1) { nodes { databaseId } } } } } } }"}' \
-    "$repo_owner" "$repo_name" "$pr_number")
-
-  local threads_response
-  threads_response=$(echo "$gql_query" | gh api graphql --input - 2>/dev/null)
-  if [ -z "$threads_response" ]; then
+  # 4. Every thread, all pages (REST databaseId → GraphQL thread id). Only the
+  #    first 100 were read before, so later threads on big PRs never resolved.
+  local thread_map
+  if ! thread_map=$(dh_review_threads "$repo_owner" "$repo_name" "$pr_number"); then
     echo "  ⚠ GraphQL thread fetch failed — skipping auto-resolve" >&2
     echo "0"; return 0
   fi
-
-  # Build map: databaseId → {thread_id, isResolved}
-  local thread_map
-  thread_map=$(printf '%s' "$threads_response" | jq -c '
-    [.data.repository.pullRequest.reviewThreads.nodes[] |
-     select(.comments.nodes | length > 0) |
-     {db_id: .comments.nodes[0].databaseId, thread_id: .id, is_resolved: .isResolved}]' 2>/dev/null || echo "[]")
 
   # 5. Resolve addressed + unresolved threads (with logging)
   local idx=0

@@ -31,6 +31,7 @@ source "${LIB_DIR}/spinner.sh"
 source "${LIB_DIR}/platform.sh"
 source "${LIB_DIR}/parser.sh"
 source "${LIB_DIR}/github.sh"
+source "${LIB_DIR}/publish.sh"
 source "${LIB_DIR}/rag.sh" 2>/dev/null || true  # for _filter_rag_for_files, _trim_rag
 source "${LIB_DIR}/jira.sh" 2>/dev/null || true  # for _extract_jira_ticket, _fetch_jira_ticket
 source "${LIB_DIR}/lint.sh" 2>/dev/null || true  # for _run_static_analysis
@@ -773,23 +774,12 @@ _auto_resolve_replied_threads() {
 
   [ "${#threads_to_resolve[@]}" -eq 0 ] && return 0
 
-  # Fetch thread IDs via GraphQL (maps REST databaseId -> GraphQL thread id)
-  local gql_query
-  gql_query=$(printf '{"query":"query { repository(owner:\"%s\", name:\"%s\") { pullRequest(number:%s) { reviewThreads(first:100) { nodes { id isResolved comments(first:1) { nodes { databaseId } } } } } } }"}' \
-    "$repo_owner" "$repo_name" "$pr")
-
-  local threads_response
-  threads_response=$(echo "$gql_query" | gh api graphql --input - 2>/dev/null)
-  if [ -z "$threads_response" ]; then
+  # Every thread, all pages (REST databaseId -> GraphQL thread id).
+  local thread_map
+  if ! thread_map=$(dh_review_threads "$repo_owner" "$repo_name" "$pr"); then
     echo "  warning: GraphQL thread fetch failed -- skipping auto-resolve" >&2
     return 0
   fi
-
-  local thread_map
-  thread_map=$(printf '%s' "$threads_response" | jq -c '
-    [.data.repository.pullRequest.reviewThreads.nodes[] |
-     select(.comments.nodes | length > 0) |
-     {db_id: .comments.nodes[0].databaseId, thread_id: .id, is_resolved: .isResolved}]' 2>/dev/null || echo "[]")
 
   for cid in "${threads_to_resolve[@]}"; do
     local thread_id is_resolved
@@ -1269,6 +1259,7 @@ cleanup() {
   local exit_code=$?
   [ -n "${_spinner_pid:-}" ] && kill "$_spinner_pid" 2>/dev/null && wait "$_spinner_pid" 2>/dev/null || true
   _spinner_pid=""
+  dh_abandon_pending
   rm -f "${DIFF_FILE:-}" "${PROMPT_FILE:-}" "${CLAUDE_OUT:-}" "${CODEX_OUT:-}" "${GEMINI_OUT:-}" "${DIFFHOUND_USAGE_LOG:-}" \
         "${PEER_PROMPT_FILE:-}" "${_GEMINI_PROMPT_FILE:-}" "${SYNTH_PROMPT:-}" "${REVIEW_STRUCTURED:-}" "${REVIEW_SUMMARY:-}" \
         "${REVIEW_JSON:-}" "${REVIEW_STRUCTURED:-}.comments" "${REVIEW_STRUCTURED:-}.new_comments" \
@@ -1277,7 +1268,7 @@ cleanup() {
         "${INCREMENTAL_DIFF_FILE:-}" "${INCREMENTAL_FILES_LIST:-}" \
         "${_USER_TMP:-}" "${VOICE_EXAMPLES_FILE:-}" "${RAG_CONTEXT_FILE:-}" \
         "${VERIFY_PROMPT:-}" "${VERIFY_OUT:-}" \
-        "${CLEANED_DIFF:-}" "${COMPRESSED_DIFF:-}" "${TRIAGE_FILE:-}" "${PR_SUMMARY_HEADER_FILE:-}"
+        "${CLEANED_DIFF:-}" "${COMPRESSED_DIFF:-}" "${TRIAGE_FILE:-}" "${PR_SUMMARY_HEADER_FILE:-}" "${_DH_OVERFLOW:-}" "${_DH_REPLY_OVERFLOW:-}"
   [ -n "${CHUNK_DIR:-}" ] && rm -rf "$CHUNK_DIR" 2>/dev/null || true
 
   # Restore original branch after PR HEAD checkout (legacy in-place path)
@@ -1297,11 +1288,9 @@ cleanup() {
   # Skip for signal kills (exit >= 128): these are GHA concurrency cancellations, not real failures
   # SIGTERM=143, SIGINT=130, SIGHUP=129 — all from cancel-in-progress: true
   if [ "$exit_code" -ne 0 ] && [ "$exit_code" -lt 128 ] && [ -n "${REPO_OWNER:-}" ] && [ -n "${REPO_NAME:-}" ] && [ -n "${PR_NUMBER:-}" ]; then
-    gh api --method POST \
-      -H "Accept: application/vnd.github+json" \
-      "/repos/${REPO_OWNER}/${REPO_NAME}/issues/${PR_NUMBER}/comments" \
-      -f "body=Diffhound review failed (exit code $exit_code).${DIFFHOUND_FAIL_REASON:+ ${DIFFHOUND_FAIL_REASON}} Check logs on the review VM." \
-      >/dev/null 2>&1 || true
+    # One status comment per PR, edited in place (#7642 had 15 separate ones).
+    dh_upsert_status_comment "$REPO_OWNER" "$REPO_NAME" "$PR_NUMBER" \
+      "Diffhound review failed at ${HEAD_SHA:0:7} (exit code $exit_code).${DIFFHOUND_FAIL_REASON:+ ${DIFFHOUND_FAIL_REASON}} Check logs on the review VM." || true
   fi
 }
 trap cleanup EXIT
@@ -2184,15 +2173,21 @@ PYEOF
 rm -f "${PRIOR_FINDINGS_FILE}.raw"
 export DIFFHOUND_PRIOR_KEYS="$PRIOR_KEYS_FILE"
 
-# Check if reviewer has already posted comments → re-review mode
+# Re-review mode when diffhound has reviewed this PR before: inline comments
+# from the reviewer, or a diffhound summary even if it had no inline comments
+# (without the latter a clean PR got a full fresh review on every push).
 REVIEWER_COMMENT_COUNT=$(jq --arg login "$REVIEWER_LOGIN" \
   '[.[] | select(.user == $login)] | length' "$EXISTING_COMMENTS_FILE" 2>/dev/null || echo "0")
+_LAST_DH_REVIEW=$(dh_last_diffhound_review "$EXISTING_REVIEWS_FILE" "$REVIEWER_LOGIN")
+LAST_DH_REVIEW_ID="${_LAST_DH_REVIEW%%$'\t'*}"
 
-if [ "$REVIEWER_COMMENT_COUNT" -gt 0 ]; then
+if [ "$REVIEWER_COMMENT_COUNT" -gt 0 ] || [ -n "$_LAST_DH_REVIEW" ]; then
   IS_REREVIEW=true
 
-  # Extract the commit SHA from our last review submission
-  LAST_REVIEWED_SHA=$(jq -r --arg login "$REVIEWER_LOGIN" \
+  # The commit our last review covered. The marker moves when a review is
+  # edited in place for a quiet rerun; the review's commit_id does not.
+  LAST_REVIEWED_SHA="${_LAST_DH_REVIEW#*$'\t'}"
+  [ -n "$_LAST_DH_REVIEW" ] || LAST_REVIEWED_SHA=$(jq -r --arg login "$REVIEWER_LOGIN" \
     '[.[] | select(.user == $login and .body != "")] | sort_by(.submitted_at) | last | .commit_id // empty' \
     "$EXISTING_REVIEWS_FILE" 2>/dev/null || echo "")
 
@@ -5089,6 +5084,20 @@ fi
 # Last check before posting: inline claims about declarations/imports must hold at head.
 _claim_verify_comments "${REVIEW_STRUCTURED}.comments" "${REPO_PATH:-${DIFFHOUND_REPO:-$(pwd)}}"
 
+# One readable review per push: drop repeats of findings already on the PR, then
+# cap what goes inline (in code; the prompt caps were ignored, 8 posted vs 3).
+# Capped findings are listed once in the summary, not lost.
+_DH_DEDUP_DROPPED=0
+if [ "$IS_REREVIEW" = true ]; then
+  dh_semantic_dedup "${REVIEW_STRUCTURED}.comments" "$EXISTING_COMMENTS_FILE" "$REVIEWER_LOGIN"
+fi
+_DH_OVERFLOW=$(mktemp -t "pr-${PR_NUMBER}-overflow.XXXXXX")
+if [ "$IS_REREVIEW" = true ]; then _dh_cap="${DIFFHOUND_MAX_INLINE_REREVIEW:-3}"; else _dh_cap="${DIFFHOUND_MAX_INLINE:-8}"; fi
+dh_cap_inline_comments "${REVIEW_STRUCTURED}.comments" "$_dh_cap" "$_DH_OVERFLOW"
+[ -s "$_DH_OVERFLOW" ] && echo "  Inline cap: $(grep -c . "$_DH_OVERFLOW") finding(s) moved to the summary (cap ${_dh_cap}, blockers never capped)" >&2
+_DH_REPLY_OVERFLOW=$(mktemp -t "pr-${PR_NUMBER}-reply-overflow.XXXXXX")
+dh_cap_replies "${REVIEW_STRUCTURED}.comments" "$DH_MAX_REPLIES_PER_RUN" "$_DH_REPLY_OVERFLOW"
+
 declare -a _ALL_COMMENTS=()
 while IFS= read -r _line; do
   _ALL_COMMENTS+=("$_line")
@@ -5247,6 +5256,7 @@ if [ "$POST_REVIEW" = true ]; then
   # Parse verdict (3-method fallback). The scorecard was already derived above
   # (before this block) and preserves the verdict word, so this still resolves.
   REVIEW_EVENT=$(parse_verdict "$REVIEW_SUMMARY" "${REVIEW_STRUCTURED}.new_comments")
+  _DH_MODEL_EVENT="$REVIEW_EVENT"   # before any cap; a capped block must never go quiet
 
   # Whatever the verdict, a review with unreviewed files says so at the top.
   if [ -n "${_CHUNK_GAPS:-}" ]; then
@@ -5262,8 +5272,13 @@ if [ "$POST_REVIEW" = true ]; then
   fi
 
   # Integrity gate: never post a pass that rests on lost or missing review work.
+  # Findings dropped as repeats or moved to the summary by the cap are accounted
+  # for, not lost; without this a fully deduped re-review failed the gate.
+  _dh_n_new=$(grep -c . "${REVIEW_STRUCTURED}.new_comments" 2>/dev/null || true)
+  _dh_n_over=$(grep -c . "${_DH_OVERFLOW:-/nonexistent}" 2>/dev/null || true)
+  _dh_accounted=$(( ${_dh_n_new:-0} + ${_DH_DEDUP_DROPPED:-0} + ${_dh_n_over:-0} ))
   _GATE_REASON=$(_posting_gate_reason "$REVIEW_EVENT" "${_VALIDATOR_FINDING_COUNT:-0}" \
-    "$(grep -c . "${REVIEW_STRUCTURED}.new_comments" 2>/dev/null || true)" \
+    "$_dh_accounted" \
     "${_CHUNK_GAPS:-}" "${_VALIDATORS_FAILED:-false}" "${_VALIDATORS_RAN:-false}" "${REVIEW_TIER:-}")
   if [ -n "$_GATE_REASON" ]; then
     spinner_fail "Not posting: ${_GATE_REASON}"
@@ -5304,7 +5319,10 @@ if [ "$POST_REVIEW" = true ]; then
   # findings still post and stay actionable, but only a FRESH (round-1) review,
   # or a human, blocks a merge. Removes the false-positive merge-blocking that is
   # the actual harm; does not pretend the model is deterministic.
-  if _rereview_verdict_capped "${IS_REREVIEW:-false}" "${FORCE_FULL:-false}" "$REVIEW_EVENT"; then
+  # Only a re-review with earlier threads is capped. A PR whose last review was a
+  # clean pass (no threads) must still be blockable when a later push adds a bug.
+  _dh_has_threads=false; [ "${REVIEWER_COMMENT_COUNT:-0}" -gt 0 ] && _dh_has_threads=true
+  if _rereview_verdict_capped "$_dh_has_threads" "${FORCE_FULL:-false}" "$REVIEW_EVENT"; then
     REVIEW_EVENT="COMMENT"
     _rr_tmp=$(mktemp -t "pr-${PR_NUMBER}-rrcap.XXXXXX")
     {
@@ -5393,6 +5411,13 @@ if [ "$POST_REVIEW" = true ]; then
     rm -f "$_dedup_tmp" 2>/dev/null || true
   fi
 
+  # Capped findings and repeats of earlier findings are named once in the summary.
+  dh_overflow_section "$_DH_OVERFLOW" >> "$REVIEW_SUMMARY"
+  _dh_replies_as_section "$_DH_REPLY_OVERFLOW" "$REPO_OWNER" "$REPO_NAME" "$PR_NUMBER" >> "$REVIEW_SUMMARY"
+  if [ "${_DH_DEDUP_DROPPED:-0}" -gt 0 ]; then
+    printf '\n_%s finding(s) from this pass were already raised earlier on this PR; see those threads._\n' "$_DH_DEDUP_DROPPED" >> "$REVIEW_SUMMARY"
+  fi
+
   # Build the review JSON (new inline comments only)
   cat > "$REVIEW_JSON" << JSONSTART
 {
@@ -5449,22 +5474,46 @@ JSONEND
     exit 3
   fi
 
-  # Post review + inline comments (with fallback)
-  post_review "$REPO_OWNER" "$REPO_NAME" "$PR_NUMBER" \
-    "$HEAD_SHA" "$REVIEW_EVENT" "$REVIEW_SUMMARY" "$REVIEW_JSON" \
-    "${REVIEW_STRUCTURED}.new_comments" "$DIFF_FILE"
+  # Hidden markers: the review records which commit it covers; each inline
+  # comment carries its identity for cross-round dedup.
+  _dh_marked=$(mktemp -t "pr-${PR_NUMBER}-marked.XXXXXX")
+  _dh_body_with_marker "$(cat "$REVIEW_SUMMARY")" "$HEAD_SHA" > "$_dh_marked"
+  jq --rawfile b "$_dh_marked" '.body = $b' "$REVIEW_JSON" > "${_dh_marked}.json" && mv "${_dh_marked}.json" "$REVIEW_JSON"
+  _inject_markers_into_review_json "$REVIEW_JSON"
+  _dh_inline_n=$(jq '.comments | length' "$REVIEW_JSON" 2>/dev/null || echo 0)
 
-  if [ "$_POSTED_OK" = true ]; then
-    NEW_COMMENT_COUNT="${_FINAL_COMMENT_COUNT:-$NEW_COMMENT_COUNT}"
-
-    # Post thread replies if any
-    if [ "$REPLY_COUNT" -gt 0 ]; then
-      REPLY_POSTED=$(post_thread_replies "$REPO_OWNER" "$REPO_NAME" "$PR_NUMBER" "${REVIEW_STRUCTURED}.replies")
-      spinner_stop "Posted (${REVIEW_EVENT}, ${NEW_COMMENT_COUNT} new inline, ${REPLY_POSTED} thread replies)"
+  _POSTED_OK=false
+  if dh_quiet_rerun_ok "$IS_REREVIEW" "${FORCE_FULL:-false}" "$REVIEW_EVENT" "${_DH_MODEL_EVENT:-}" \
+       "${_CHUNK_GAPS:-}" "${_dh_inline_n:-0}" "${REPLY_COUNT:-0}" "${LAST_DH_REVIEW_ID:-}"; then
+    # Nothing new to say: stamp the last review with this commit, no new
+    # notification. Its own content is kept; only the stamp and marker change.
+    _dh_old_body=$(jq -r --argjson id "$LAST_DH_REVIEW_ID" '.[] | select(.id == $id) | .body // ""' "$EXISTING_REVIEWS_FILE" 2>/dev/null \
+      | sed -E '/^_Re-checked at [0-9a-f]+: nothing new since the last review\._$/d')
+    { printf '_Re-checked at %s: nothing new since the last review._\n\n' "${HEAD_SHA:0:7}"
+      _dh_body_with_marker "$_dh_old_body" "$HEAD_SHA"; } > "${_dh_marked}.q"
+    if dh_update_review_body "$REPO_OWNER" "$REPO_NAME" "$PR_NUMBER" "$LAST_DH_REVIEW_ID" "${_dh_marked}.q"; then
+      _POSTED_OK=true; NEW_COMMENT_COUNT=0
+      spinner_stop "Nothing new: updated the last review in place (no new comment)"
+    fi
+    rm -f "${_dh_marked}.q"
+  fi
+  if [ "$_POSTED_OK" != true ]; then
+    DIFFHOUND_PR_AUTHOR="$PR_AUTHOR" DIFFHOUND_LOGIN="$REVIEWER_LOGIN" \
+      dh_publish_review "$REPO_OWNER" "$REPO_NAME" "$PR_NUMBER" "$HEAD_SHA" "$REVIEW_EVENT" \
+      "$REVIEW_JSON" "${REVIEW_STRUCTURED}.replies" || true
+    if [ "$_DH_POSTED" = true ]; then
+      _POSTED_OK=true; REVIEW_EVENT="$_DH_EVENT"; NEW_COMMENT_COUNT="$_DH_INLINE_POSTED"
+      spinner_stop "Posted one review (${REVIEW_EVENT}, ${NEW_COMMENT_COUNT} inline, ${_DH_REPLIES_POSTED} thread replies)"
     else
-      spinner_stop "Posted (${REVIEW_EVENT}, ${NEW_COMMENT_COUNT} inline)"
+      spinner_fail "Failed to post review to GitHub"
+      echo "  Summary saved: $REVIEW_SUMMARY" >&2
+      DIFFHOUND_FAIL_REASON="Could not post the review to GitHub."
+      rm -f "$_dh_marked"
+      exit 1
     fi
   fi
+  rm -f "$_dh_marked"
+  dh_clear_status_comment "$REPO_OWNER" "$REPO_NAME" "$PR_NUMBER" "$HEAD_SHA"
 
   echo ""
   echo "  → https://github.com/${REPO_OWNER}/${REPO_NAME}/pull/${PR_NUMBER}"
