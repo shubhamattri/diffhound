@@ -270,11 +270,6 @@ head -c 40000 /dev/zero | tr '\0' 'a' > "$TMP/big"
 has "leak: runaway body is refused" "$(dh_summary_leak_reason "$TMP/big")" "40000 characters"
 printf '## Summary\n| Category | Score |\nall good\n' > "$TMP/ok"
 eq "leak: a normal summary passes" "$(dh_summary_leak_reason "$TMP/ok")" ""
-fb=$(dh_fallback_summary "$C")
-has "fallback: counts by severity (capped file: 2 blocking, 2 should-fix)" "$fb" "| 2 | 2 | 0 |"
-has "fallback: lists files" "$fb" '- `b.ts`'
-eq "fallback summary itself passes the leak guard" "$(printf '%s' "$fb" > "$TMP/fb"; dh_summary_leak_reason "$TMP/fb")" ""
-
 echo
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ] || { printf '  failed: %s\n' "${FAILED[@]}"; exit 1; }

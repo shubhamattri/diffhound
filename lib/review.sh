@@ -4800,10 +4800,20 @@ _SYS_TMP=$(mktemp -t "pr-${PR_NUMBER}-sys.XXXXXX")
 printf '%s' "$_STATIC_SYSTEM" > "$_SYS_TMP"
 DIFFHOUND_STAGE="voice-rewrite"
 _call_api_system "claude-sonnet-5" 32000 300 "$_SYS_TMP" medium < "$_USER_TMP" > "$REVIEW_STRUCTURED" 2>/dev/null || true
+# The voice pass writes the human comments and the scorecard. One retry for a
+# blip; if the model still gives nothing, post nothing: raw primary-pass output
+# is not a review (monorepo #7642, 29 Sep: a 197k-char dump during a 503).
+if [ ! -s "$REVIEW_STRUCTURED" ]; then
+  echo "  Voice rewrite returned nothing; retrying once" >&2
+  sleep "${DIFFHOUND_VOICE_RETRY_SECS:-20}"
+  _call_api_system "claude-sonnet-5" 32000 300 "$_SYS_TMP" medium < "$_USER_TMP" > "$REVIEW_STRUCTURED" 2>/dev/null || true
+fi
 rm -f "$_SYS_TMP"
-# Empty output here means the voice pass failed outright; fall back to the raw
-# primary-pass findings rather than posting nothing.
-[ -s "$REVIEW_STRUCTURED" ] || cp "$CLAUDE_OUT" "$REVIEW_STRUCTURED"
+if [ ! -s "$REVIEW_STRUCTURED" ]; then
+  spinner_fail "Voice rewrite failed twice; not posting"
+  DIFFHOUND_FAIL_REASON="The model did not answer the wording step, so nothing was posted. The next push or the sweep retries."
+  exit 1
+fi
 
 rm -f "$_USER_TMP"
 
@@ -4891,11 +4901,11 @@ if [ "$_voice_comment_count" -eq 0 ] 2>/dev/null; then
           echo "COMMENT: ${_current_finding} — ${_current_body}"
         fi
       } > "${REVIEW_STRUCTURED}.comments"
-      # Never the raw merged output as the summary: on chunked reviews it is the
-      # reviewers' scratch notes (CHUNK_FILES, THREAD_STATUS, ...), which went out
-      # as a 197k-char review on monorepo #7642 when the voice model was down.
-      dh_fallback_summary "${REVIEW_STRUCTURED}.comments" > "$REVIEW_SUMMARY"
-      _recovered=true
+      # Raw merged findings are not posted: no human wording, no scorecard, and
+      # on chunked reviews the only summary is the reviewers' scratch notes.
+      spinner_fail "Voice rewrite returned no comments; not posting raw findings"
+      DIFFHOUND_FAIL_REASON="The wording step returned no usable comments for ${_finding_count} findings, so nothing was posted. The next push or the sweep retries."
+      exit 1
     fi
   fi
 fi
