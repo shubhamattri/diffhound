@@ -274,7 +274,7 @@ has "leak: internal chunk notes are refused" "$(dh_summary_leak_reason "$TMP/lea
 printf 'FINDING: a.ts:1:NIT\nWHAT: x\n' > "$TMP/leak2"
 has "leak: raw FINDING blocks are refused" "$(dh_summary_leak_reason "$TMP/leak2")" "internal notes"
 head -c 40000 /dev/zero | tr '\0' 'a' > "$TMP/big"
-has "leak: runaway body is refused" "$(dh_summary_leak_reason "$TMP/big")" "40000 characters"
+has "leak: runaway body is refused" "$(dh_summary_leak_reason "$TMP/big")" "40000 bytes"
 printf '## Summary\n| Category | Score |\nall good\n' > "$TMP/ok"
 eq "leak: a normal summary passes" "$(dh_summary_leak_reason "$TMP/ok")" ""
 echo

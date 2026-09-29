@@ -10,13 +10,10 @@ DH_STATUS_MARKER='<!-- diffhound-status v1 -->'
 DH_MAX_REPLIES_PER_RUN="${DIFFHOUND_MAX_REPLIES:-3}"
 _DH_PUBLISH_DIR="${BASH_SOURCE[0]%/*}"
 
-_dh_review_marker() { printf '<!-- diffhound-review v1 sha=%s -->' "$1"; }
-
 # Body with any earlier review marker removed and the marker for $2 appended.
 # Args: body_text sha
 _dh_body_with_marker() {
-  printf '%s' "$1" | sed -E 's/<!-- diffhound-review v1 sha=[0-9a-f]+ -->//g'
-  printf '\n\n%s\n' "$(_dh_review_marker "$2")"
+  printf '%s' "$1" | python3 "$_DH_PUBLISH_DIR/review_body.py" mark "$2"
 }
 
 # Last diffhound review on the PR as "id<TAB>reviewed_sha", or nothing.
@@ -117,10 +114,7 @@ _dh_replies_as_section() {
 # rejects the inline positions. Posting them one by one sends one notification
 # each and, on monorepo #7642, produced hundreds of single-comment reviews.
 _dh_inline_as_section() {
-  jq -r 'if (.comments | length) > 0 then
-           "\n**Findings** (could not be attached to diff lines)\n",
-           (.comments[] | "- `\(.path):\(.line)` \(.body | gsub("<!--[^>]*-->"; "") | gsub("\n+"; " "))")
-         else empty end' "$1" 2>/dev/null
+  python3 "$_DH_PUBLISH_DIR/review_state.py" inline-fallback "$1"
 }
 
 # True when review $1 (API path) exists and is no longer PENDING.
@@ -131,6 +125,9 @@ _dh_review_submitted() {
 }
 
 _dh_gh_post_json() {  # endpoint json_file → response on stdout
+  # Recheck after fallback inline/reply sections have been added, not only
+  # before assembly. Never send an oversized request or silently trim it.
+  python3 "$_DH_PUBLISH_DIR/review_body.py" check-json "$2" || return 1
   gh api --method POST -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" \
     "$1" --input "$2" 2>/dev/null
 }
@@ -145,6 +142,7 @@ dh_publish_review() {
   local owner="$1" repo="$2" pr="$3" sha="$4" event="$5" rj="$6" replies="$7"
   local base="/repos/${owner}/${repo}/pulls/${pr}/reviews" resp tmp id node
   _DH_POSTED=false; _DH_EVENT="$event"; _DH_INLINE_POSTED=0; _DH_REPLIES_POSTED=0; _DH_REVIEW_ID=""
+  python3 "$_DH_PUBLISH_DIR/review_body.py" check-json "$rj" || return 1
   tmp=$(mktemp -t "dh-pub.XXXXXX")
   dh_delete_stale_pending "$owner" "$repo" "$pr" || { rm -f "$tmp"; return 1; }
 
@@ -220,7 +218,9 @@ dh_publish_review() {
       as_built)   cp "$rj" "$tmp" ;;
       body_only|body_only_comment)
                   [ "$attempt" = body_only_comment ] && [ "$event" = COMMENT ] && continue
-                  { jq -r '.body' "$rj"; _dh_inline_as_section "$rj"; } > "${tmp}.body"
+                  if ! { jq -r '.body' "$rj" && _dh_inline_as_section "$rj"; } > "${tmp}.body"; then
+                    rm -f "$tmp" "${tmp}.body"; return 1
+                  fi
                   jq --rawfile b "${tmp}.body" '.comments = [] | .body = $b' "$rj" > "$tmp"
                   [ "$attempt" = body_only_comment ] && { jq '.event = "COMMENT"' "$tmp" > "${tmp}.c" && mv "${tmp}.c" "$tmp"; }
                   rm -f "${tmp}.body" ;;
@@ -280,6 +280,9 @@ dh_update_review_body() {
   local tmp rc
   tmp=$(mktemp -t "dh-upd.XXXXXX")
   jq -Rs '{body: .}' < "$5" > "$tmp"
+  if ! python3 "$_DH_PUBLISH_DIR/review_body.py" check-json "$tmp"; then
+    rm -f "$tmp"; return 1
+  fi
   gh api --method PUT -H "Accept: application/vnd.github+json" \
     "/repos/$1/$2/pulls/$3/reviews/$4" --input "$tmp" >/dev/null 2>&1; rc=$?
   rm -f "$tmp"; return $rc
@@ -389,13 +392,12 @@ dh_semantic_dedup() {
 # Why a summary must not be posted, or nothing. Catches the pipeline's internal
 # section markers and bodies too long for anyone to read.  Args: summary_file
 dh_summary_leak_reason() {
-  local f="$1" n
+  local f="$1" reason
   if grep -qE '^### (CHUNK_FILES|FINDINGS_START|FINDINGS_END|THREAD_STATUS|CROSS_FILE_NOTES|REQUIREMENT_COVERAGE)|^(FINDING|WHAT|EVIDENCE|IMPACT): ' "$f" 2>/dev/null; then
     echo "summary contains the reviewers' internal notes, not a review"; return 0
   fi
-  n=$(wc -c < "$f" 2>/dev/null | tr -d ' ')
-  if [ "${n:-0}" -gt "${DIFFHOUND_MAX_BODY_CHARS:-30000}" ]; then
-    echo "summary is ${n} characters (limit ${DIFFHOUND_MAX_BODY_CHARS:-30000})"; return 0
+  if ! reason=$(python3 "$_DH_PUBLISH_DIR/review_body.py" check "$f" 2>&1); then
+    printf '%s\n' "$reason"; return 0
   fi
   return 0
 }

@@ -1,9 +1,11 @@
 """Finding lifecycle across ephemeral runners; no network/model calls."""
 import importlib.util
 import pathlib
+import sys
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "lib"))
 spec = importlib.util.spec_from_file_location("review_state", ROOT / "lib/review_state.py")
 state = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(state)

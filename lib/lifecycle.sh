@@ -1,5 +1,18 @@
 #!/bin/bash
 # Publication-time history is the single owner of cross-round deduplication.
+# Assemble the exact body used by review.sh, including findings moved out of
+# inline comments. Args: plan selected overflow reply_overflow summary owner repo pr
+dh_finalize_summary() {
+  local plan="$1" selected="$2" overflow="$3" replies="$4" summary="$5"
+  # finish includes every open finding once, including overflow. Appending
+  # dh_overflow_section here duplicated capped findings and exhausted the budget.
+  _dh_replies_as_section "$replies" "$6" "$7" "$8" >> "$summary"
+  if [ "${_DH_DEDUP_DROPPED:-0}" -gt 0 ]; then
+    printf '\n_%s finding(s) from this pass were already raised earlier on this PR; see those threads._\n' "$_DH_DEDUP_DROPPED" >> "$summary"
+  fi
+  python3 "${BASH_SOURCE[0]%/*}/review_state.py" finish "$plan" "$selected" "$overflow" "$summary"
+}
+
 # Args: comments reviews previous_comments threads login sha output_directory
 dh_plan_findings() {
   local comments="$1" reviews="$2" previous="$3" threads="$4" login="$5" sha="$6" dir="$7"
@@ -19,12 +32,16 @@ dh_plan_findings() {
 # so a failed summary update never causes findings to be posted again.
 dh_upsert_summary() {
   local owner="$1" repo="$2" pr="$3" login="$4" body_file="$5" comments id tmp rc
-  local marker='<!-- diffhound-summary v1 -->'
+  local marker
+  marker=$(python3 "${BASH_SOURCE[0]%/*}/review_body.py" summary-marker) || return 1
   comments=$(_gh_api_all "/repos/$owner/$repo/issues/$pr/comments") || return 1
   id=$(jq -r --arg login "$login" --arg m "$marker" \
     '[.[] | select(.user.login == $login and ((.body // "") | startswith($m)))] | first | .id // empty' <<< "$comments") || return 1
   tmp=$(mktemp -t dh-summary.XXXXXX)
   jq -n --arg m "$marker" --rawfile b "$body_file" '{body: ($m + "\n" + $b)}' > "$tmp"
+  if ! python3 "${BASH_SOURCE[0]%/*}/review_body.py" check-json "$tmp"; then
+    rm -f "$tmp"; return 1
+  fi
   if [ -n "$id" ]; then
     gh api --method PATCH "/repos/$owner/$repo/issues/comments/$id" --input "$tmp" >/dev/null 2>&1; rc=$?
   else
