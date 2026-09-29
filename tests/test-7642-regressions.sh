@@ -32,6 +32,12 @@ lacks() { # name, haystack, needle
   else PASS=$((PASS+1)); echo "ok   $1"; fi
 }
 
+# Exercise the grep fallback in an archive/container without a parent Git repo.
+fixture="$ROOT/tests/fixtures/ref-exists/keep-symbol-defined-in-other-module-7642"
+cp -R "$fixture/repo" "$TMP/symbol-repo"
+got=$(DIFFHOUND_REPO="$TMP/symbol-repo" bash "$ROOT/lib/validators/ref-exists.sh" < "$fixture/input.txt")
+eq "symbols: cross-module reference survives outside Git" "$got" "$(cat "$fixture/expected.txt")"
+
 # ── 1. pagination: every page, as ONE array ─────────────────────────────────
 mkdir -p "$TMP/bin"
 cat > "$TMP/bin/gh" <<'SH'
