@@ -399,7 +399,7 @@ _learn_from_pr() {
     [ -z "$original_line" ] && continue
 
     local orig_body orig_path
-    orig_body=$(printf '%s' "$original_line" | sed -E 's/^[^:]+:[~]?[0-9]+:(BLOCKING|SHOULD-FIX|NIT)[[:space:]][—–-][[:space:]]*//')
+    orig_body=$(strip_severity_label "${original_line#*:*:}")
     orig_path=$(printf '%s' "$original_line" | cut -d: -f1)
     local orig_prefix="${orig_body:0:60}"
 

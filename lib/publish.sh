@@ -79,7 +79,7 @@ dh_overflow_section() {
   [ -s "$f" ] || return 0
   n=$(grep -c . "$f")
   printf '\n<details><summary>%s more finding(s), not posted inline to keep this PR readable</summary>\n\n' "$n"
-  sed -E 's/^COMMENT: ([^:]+):~?([0-9]+):([A-Z-]+)[[:space:]]*[—–-]?[[:space:]]*/- `\1:\2` (\3) /' "$f" | tr $'\x1f' ' '
+  sed -E 's/^COMMENT: ([^:]+):~?([0-9]+):([A-Z-]+)[[:space:]]*(—|–|-)?[[:space:]]*/- `\1:\2` (\3) /' "$f" | tr $'\x1f' ' '
   printf '\n</details>\n'
 }
 

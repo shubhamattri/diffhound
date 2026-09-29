@@ -117,10 +117,10 @@ index_voice_comments() {
   local indexed=0
   while IFS= read -r comment_line; do
     # Format: COMMENT: prefix already stripped — path:LINE:SEVERITY — text
-    [[ "$comment_line" =~ ^(.+):[~]?([0-9]+):(BLOCKING|SHOULD-FIX|NIT)[[:space:]][—–-][[:space:]](.+)$ ]] || continue
+    [[ "$comment_line" =~ ^(.+):[~]?([0-9]+):(BLOCKING|SHOULD-FIX|NIT)[[:space:]](—|–|-)[[:space:]](.+)$ ]] || continue
     local filepath="${BASH_REMATCH[1]}"
     local severity="${BASH_REMATCH[3]}"
-    local comment_text="${BASH_REMATCH[4]}"
+    local comment_text="${BASH_REMATCH[5]}"
     # Decode multi-line join character back to newlines
     comment_text=$(printf '%s' "$comment_text" | tr $'\x1f' '\n')
 

@@ -575,7 +575,7 @@ parse_summary() {
           _cat=$(echo "$_sline" | sed 's/:.*//' | sed 's/^ *//')
           _rest=$(echo "$_sline" | sed 's/^[^:]*: //')
           _score=$(echo "$_rest" | grep -oE '^[0-9]+/[0-9]+' || true)
-          _reason=$(echo "$_rest" | sed 's/^[0-9]*\/[0-9]* *[—–-]* *//')
+          _reason=$(echo "$_rest" | sed -E 's/^[0-9]*\/[0-9]* *(—|–|-)* *//')
           if grep -qi "total" <<< "$_cat"; then
             echo "| **${_cat}** | **${_score}** | ${_reason} |"
           elif [ -n "$_score" ]; then
