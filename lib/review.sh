@@ -88,6 +88,23 @@ _lower_effort() {
   case "${1:-}" in max|xhigh) echo high ;; high) echo medium ;; medium) echo low ;; *) echo "" ;; esac
 }
 
+# A single-call reply cut off at max_tokens still returned text, so it never hit
+# the failure retry; retry it once at the next lower effort (the chunk-path rule).
+# Args: $1 prompt file  $2 output file  $3 stop-reason file  $4 timeout secs
+_mono_retry_cutoff() {
+  [ -n "$(_monolithic_gap "$3")" ] || return 0
+  local _eff _tmp; _eff=$(_lower_effort high); _tmp=$(mktemp -t "mono-retry.XXXXXX")
+  echo "  ⚠ review reply cut off at max_tokens; retrying once at effort ${_eff}" >&2
+  if DIFFHOUND_STAGE="primary-review-retry" DIFFHOUND_STOP_REASON_FILE="$3" \
+       _call_api "claude-opus-5" 32000 "$4" "$_eff" < "$1" > "$_tmp" 2>>"${2}.stderr"; then
+    mv "$_tmp" "$2"
+  else
+    # Failed retry: keep the partial reply and its max_tokens stop, never a blank stop.
+    rm -f "$_tmp"; echo max_tokens > "$3"
+  fi
+  return 0
+}
+
 # Usage: printf '%s' "$prompt" | _call_api MODEL [MAX_TOKENS] [TIMEOUT_SECS] [EFFORT]
 #        _call_api MODEL [MAX_TOKENS] [TIMEOUT_SECS] [EFFORT] < prompt_file
 _call_api() {
@@ -3334,6 +3351,7 @@ if ! _call_api "claude-opus-5" 32000 "$_CLAUDE_TIMEOUT" high < "$PROMPT_FILE" > 
 fi
 
 spinner_stop "Pass 1 complete"
+_mono_retry_cutoff "$PROMPT_FILE" "$CLAUDE_OUT" "$_MONO_STOP" "$_CLAUDE_TIMEOUT"
 unset DIFFHOUND_STOP_REASON_FILE
 # A reply cut off at max_tokens reviewed only part of the diff.
 _CHUNK_GAPS=$(_monolithic_gap "$_MONO_STOP")
