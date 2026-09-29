@@ -330,50 +330,7 @@ ADIR="$TMP/adapter"; mkdir -p "$ADIR/repo"
 got=$(DIFFHOUND_REPO="$ADIR/repo" DIFFHOUND_OFFLINE=1 DIFFHOUND_VALIDATORS_RUN=cat "$ROOT/lib/validators/format-adapter.sh" < "$ADIR/in.txt" 2>/dev/null | head -1)
 eq "pipefail: format-adapter still sees FINDING blocks in a large input" "$got" "FINDING: b.ts:1:NIT"
 
-# Posting: a POST that errors after GitHub created the review must not be repeated.
-GH="$TMP/ghstub"; mkdir -p "$GH/bin"; : > "$GH/calls"
-cat > "$GH/bin/gh" <<'SH'
-#!/usr/bin/env bash
-echo "$*" >> "$GHSTATE/calls"
-case "$*" in
-  *"--method POST"*"/reviews"*)
-    if [ -f "$GHSTATE/bulk_creates" ] && jq -e '.comments | length > 0' "${@: -1}" >/dev/null; then
-      cp "${@: -1}" "$GHSTATE/created.json"; echo "HTTP 502" >&2; exit 1; fi
-    if jq -e '.comments | length > 0' "${@: -1}" >/dev/null; then echo "HTTP 422 line" >&2; exit 1; fi
-    exit 0 ;;
-  *"--method POST"*"/comments"*) exit 0 ;;
-  *"/reviews/77/comments"*) echo '[{"id":1},{"id":2}]' ;;
-  *"/reviews"*)
-    if [ -f "$GHSTATE/created.json" ]; then
-      jq -c '[{id: 77, commit_id: .commit_id, user: {login: "bot"}, body: (.body + "\n")}]' "$GHSTATE/created.json"
-    else echo '[]'; fi ;;
-  *"/comments"*) cat "$GHSTATE/existing.json" 2>/dev/null || echo '[]' ;;
-  *) echo '[]' ;;
-esac
-SH
-chmod +x "$GH/bin/gh"
-printf 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -0,0 +1,3 @@\n+a\n+b\n+c\n' > "$GH/diff"
-printf 'src/a.ts:1:BLOCKING — first\nsrc/a.ts:2:NIT — second\n' > "$GH/new"
-mkrev() { jq -n '{commit_id: "sha1", event: "COMMENT", body: "## Scorecard 71/100", comments: [{path: "src/a.ts", line: 1, body: "first"}, {path: "src/a.ts", line: 2, body: "second"}]}' > "$GH/review.json"; }
-spinner_fail() { :; }
-mkrev; touch "$GH/bulk_creates"
-( export GHSTATE="$GH" PATH="$GH/bin:$PATH" REVIEWER_LOGIN=bot
-  post_review o r 1 sha1 COMMENT "$GH/summary" "$GH/review.json" "$GH/new" "$GH/diff" 2>/dev/null
-  echo "$_POSTED_OK $_FINAL_COMMENT_COUNT" > "$GH/result" )
-eq "post: review created despite a POST error is not posted again" "$(grep -c -- '--method POST' "$GH/calls")" "1"
-eq "post: counted as posted with its inline comments" "$(cat "$GH/result")" "true 2"
-rm -f "$GH/bulk_creates" "$GH/created.json"; : > "$GH/calls"
-mkrev; : > "$GH/calls"
-( export GHSTATE="$GH" PATH="$GH/bin:$PATH" REVIEWER_LOGIN=bot
-  post_review o r 1 sha1 COMMENT "$GH/summary" "$GH/review.json" "$GH/new" "$GH/diff" >/dev/null 2>&1 )
-first_body=$(grep -- '--method POST' "$GH/calls" | grep '/comments' | head -1)
-eq "post: real bulk failure still falls back (failed bulk + body + each comment once)" "$(grep -c -- '--method POST' "$GH/calls")" "4"
-bodyA=$(append_marker src/a.ts "first")
-jq -n --arg b "$bodyA" '[{user: {login: "bot"}, path: "src/a.ts", line: 1, body: $b}]' > "$GH/existing.json"; : > "$GH/calls"
-mkrev; : > "$GH/calls"
-( export GHSTATE="$GH" PATH="$GH/bin:$PATH" REVIEWER_LOGIN=bot
-  post_review o r 1 sha1 COMMENT "$GH/summary" "$GH/review.json" "$GH/new" "$GH/diff" >/dev/null 2>&1 )
-eq "post: a comment already on the PR is not posted again in the fallback" "$(grep -- '--method POST' "$GH/calls" | grep -c '/comments')" "1"
+# Posting regressions (duplicate POST, per-comment fallback) moved to tests/test-one-review.sh.
 
 echo
 echo "PASS=$PASS FAIL=$FAIL"

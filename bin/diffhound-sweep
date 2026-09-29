@@ -92,6 +92,7 @@ _iso_to_epoch() {
 }
 
 NOW_EPOCH=$(date -u +%s)
+REVIEWER="${REVIEW_LOGIN:-$(gh api user --jq .login 2>/dev/null || true)}"
 GRACE_SEC=$((GRACE_MIN * 60))
 
 while IFS= read -r LINE || [ -n "$LINE" ]; do
@@ -143,6 +144,20 @@ while IFS= read -r LINE || [ -n "$LINE" ]; do
           continue
         fi
       fi
+    fi
+
+    # GitHub is the record of what was reviewed; local state is only a cache
+    # and is pruned after 30 days, which re-reviewed unchanged PRs monthly
+    # (monorepo #6882: 7 reviews at one commit). A diffhound review covering
+    # this commit, or one edited in place to cover it, means done. Shubham's own
+    # manual reviews (no marker, no scorecard) and drafts do not count.
+    if [ -n "$REVIEWER" ] && gh api --paginate "/repos/${REPO}/pulls/${PR}/reviews?per_page=100" 2>/dev/null \
+         | jq -s -e --arg sha "$SHA" --arg login "$REVIEWER" \
+             'add // [] | any(.[]; .user.login == $login and .state != "PENDING"
+                          and ((.body // "") | contains("<!-- diffhound-review v1 sha=" + $sha + " -->")
+                               or (.commit_id == $sha and test("SCORECARD_JSON|\\| Category \\| Score"))))' >/dev/null 2>&1; then
+      touch "${KEY_BASE}.done"
+      continue
     fi
 
     ATTEMPTS=$(cat "${KEY_BASE}.attempts" 2>/dev/null || echo 0)

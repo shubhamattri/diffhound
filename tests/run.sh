@@ -131,7 +131,7 @@ if [ -z "$only" ] && [ -x "$ROOT/tests/test-7642-regressions.sh" ]; then
   "$ROOT/tests/test-7642-regressions.sh" || _unit_fail=1
 fi
 
-for _t in lint-pipefail.sh test-coverage-integrity.sh test-guard-facts.sh; do
+for _t in lint-pipefail.sh test-coverage-integrity.sh test-guard-facts.sh test-one-review.sh; do
   if [ -z "$only" ] && [ -x "$ROOT/tests/$_t" ]; then
     echo
     echo "=== unit: $_t ==="
