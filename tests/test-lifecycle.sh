@@ -10,6 +10,18 @@ TMP=$(mktemp -d -t dh-lifecycle-test.XXXXXX)
 trap 'rm -rf "$TMP"' EXIT
 export DIFFHOUND_LOGIN=me
 assert() { [ "$1" = "$2" ] || { echo "FAIL $3: [$1] != [$2]" >&2; exit 1; }; }
+# Container images may use the byte-oriented C locale. Whole UTF-8 dash
+# sequences must be removed, without leaving invalid bytes in the concern.
+for dash in '—' '–' '-'; do
+  assert "$(LC_ALL=C strip_severity_label "BLOCKING $dash Keep the full concern")" 'Keep the full concern' 'severity delimiter survives C locale'
+  printf 'COMMENT: src/auth.ts:10:BLOCKING %s Keep the full concern\n' "$dash" > "$TMP/locale-overflow"
+  assert "$(LC_ALL=C dh_overflow_section "$TMP/locale-overflow" | sed -n '/^- /p')" '- `src/auth.ts:10` (BLOCKING) Keep the full concern' 'overflow delimiter survives C locale'
+  concern='Reject expired tokens before granting access to the private account.'
+  printf 'src/auth.ts:10:BLOCKING %s %s\n' "$dash" "$concern" > "$TMP/locale-comments"
+  : > "$TMP/locale-voice.jsonl"
+  assert "$(LC_ALL=C index_voice_comments "$TMP/locale-comments" 1 "$TMP/locale-voice.jsonl")" 1 'learning indexes Unicode comments in C locale'
+  assert "$(jq -r .comment "$TMP/locale-voice.jsonl")" "$concern" 'learning retains the exact concern'
+done
 # Render/inject the actual multiline publication payload, then recover its state.
 rendered=$(strip_severity_label $'BLOCKING — Reject expired tokens\x1fAn expired token currently grants access.\x1f\tKeep this tab too.')
 jq -n --arg body "$rendered" '{comments:[{path:"src/auth.ts",line:10,body:$body},{path:"next.ts",line:20,body:"Next finding"}]}' > "$TMP/multiline"

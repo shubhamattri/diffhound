@@ -575,7 +575,7 @@ parse_summary() {
           _cat=$(echo "$_sline" | sed 's/:.*//' | sed 's/^ *//')
           _rest=$(echo "$_sline" | sed 's/^[^:]*: //')
           _score=$(echo "$_rest" | grep -oE '^[0-9]+/[0-9]+' || true)
-          _reason=$(echo "$_rest" | sed 's/^[0-9]*\/[0-9]* *[—–-]* *//')
+          _reason=$(echo "$_rest" | sed -E 's/^[0-9]*\/[0-9]* *(—|–|-)* *//')
           if grep -qi "total" <<< "$_cat"; then
             echo "| **${_cat}** | **${_score}** | ${_reason} |"
           elif [ -n "$_score" ]; then
@@ -944,7 +944,7 @@ snap_to_diff_line() {
 # COMMENT: format is "path:LINE:SEVERITY — body". Returns only body.
 strip_severity_label() {
   local text="$1"
-  printf '%s' "$text" | sed -e 's/^[A-Z][A-Z_-]* [—–-] *//' -e "s/^[A-Z][A-Z_-]*$(printf '\x1f')//" | tr $'\x1f' '\n'
+  printf '%s' "$text" | sed -E -e 's/^[A-Z][A-Z_-]* (—|–|-) *//' -e "s/^[A-Z][A-Z_-]*$(printf '\x1f')//" | tr $'\x1f' '\n'
 }
 
 # Extract confidence scores from parsed JSON for verification pass
