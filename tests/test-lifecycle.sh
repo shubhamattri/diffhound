@@ -10,6 +10,11 @@ TMP=$(mktemp -d -t dh-lifecycle-test.XXXXXX)
 trap 'rm -rf "$TMP"' EXIT
 export DIFFHOUND_LOGIN=me
 assert() { [ "$1" = "$2" ] || { echo "FAIL $3: [$1] != [$2]" >&2; exit 1; }; }
+# Container images may use the byte-oriented C locale. Whole UTF-8 dash
+# sequences must be removed, without leaving invalid bytes in the concern.
+for dash in '—' '–' '-'; do
+  assert "$(LC_ALL=C strip_severity_label "BLOCKING $dash Keep the full concern")" 'Keep the full concern' 'severity delimiter survives C locale'
+done
 # Render/inject the actual multiline publication payload, then recover its state.
 rendered=$(strip_severity_label $'BLOCKING — Reject expired tokens\x1fAn expired token currently grants access.\x1f\tKeep this tab too.')
 jq -n --arg body "$rendered" '{comments:[{path:"src/auth.ts",line:10,body:$body},{path:"next.ts",line:20,body:"Next finding"}]}' > "$TMP/multiline"

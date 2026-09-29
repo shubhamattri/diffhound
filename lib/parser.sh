@@ -944,7 +944,7 @@ snap_to_diff_line() {
 # COMMENT: format is "path:LINE:SEVERITY — body". Returns only body.
 strip_severity_label() {
   local text="$1"
-  printf '%s' "$text" | sed -e 's/^[A-Z][A-Z_-]* [—–-] *//' -e "s/^[A-Z][A-Z_-]*$(printf '\x1f')//" | tr $'\x1f' '\n'
+  printf '%s' "$text" | sed -E -e 's/^[A-Z][A-Z_-]* (—|–|-) *//' -e "s/^[A-Z][A-Z_-]*$(printf '\x1f')//" | tr $'\x1f' '\n'
 }
 
 # Extract confidence scores from parsed JSON for verification pass
