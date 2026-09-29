@@ -829,6 +829,8 @@ _respond_to_dev_replies() {
   # response_cache kept for back-compat with _auto_resolve_replied_threads;
   # it tracks dev-reply IDs the bot has answered, not the bot's own replies.
   local response_cache="$REVIEW_CACHE_DIR/pr-${pr}-responses.txt"
+  local _batch _batch_answered
+  _batch=$(mktemp -t "learn-replies.XXXXXX"); _batch_answered=$(mktemp -t "learn-answered.XXXXXX")
 
   # Find reviewer top-level comment IDs
   local reviewer_ids
@@ -893,18 +895,11 @@ _respond_to_dev_replies() {
     fi
     if [ "${_bot_replies_in_thread:-0}" -ge 2 ]; then
       _has_escalation=$(printf '%s' "$thread" | jq -r --arg sig "$DIFFHOUND_ESCALATION_SIG" '
-        [.[] | select(.body | startswith($sig))] | length' 2>/dev/null || echo 0)
+        [.[] | select(.body | contains($sig))] | length' 2>/dev/null || echo 0)
       if [ "${_has_escalation:-0}" -eq 0 ]; then
         local _esc_body
         _esc_body="${DIFFHOUND_ESCALATION_SIG}"$'\n\n'"This thread has reached the automated reply limit (2). Flagging for human review."
-        local _esc_resp _esc_id
-        _esc_resp=$(gh api --method POST \
-          -H "Accept: application/vnd.github+json" \
-          -H "X-GitHub-Api-Version: 2022-11-28" \
-          "/repos/${repo_owner}/${repo_name}/pulls/${pr}/comments/${cid}/replies" \
-          --field "body=${_esc_body}" 2>/dev/null) || true
-        _esc_id=$(printf '%s' "$_esc_resp" | jq -r '.id // empty' 2>/dev/null || true)
-        [ -n "$_esc_id" ] && echo "$_esc_id" >> "$registry_file"
+        printf '%s:%s:%s:%s\n' "$cid" "x" "0" "$(printf '%s' "$_esc_body" | tr '\n' ' ')" >> "$_batch"
       fi
       continue
     fi
@@ -913,6 +908,11 @@ _respond_to_dev_replies() {
     local original_comment dev_reply file_path
     original_comment=$(printf '%s' "$thread" | jq -r '.[0].body')
     dev_reply=$(printf '%s' "$thread" | jq -r '.[-1].body')
+    # "Fixed"/"done" needs no answer; auto-resolve closes the thread. Answering
+    # every one of them was the bulk of the bot's replies on monorepo #7642.
+    if grep -qiE '^[[:space:]]*(already[[:space:]]+)?(fixed|done|addressed)([^[:alpha:]]|$)' <<< "${dev_reply%%$'\n'*}"; then
+      continue
+    fi
     file_path=$(printf '%s' "$thread" | jq -r '.[0].path // empty')
 
     # Get minimal code context (~20 lines around the comment)
@@ -969,29 +969,30 @@ RESPOND_RULES_END
 
     [ -z "$ai_reply" ] && continue
 
-    # Post the reply with a leading anchored signature so the consumer workflow
-    # guard, the loop-breaker, and the registry-bootstrap all recognise it.
-    local signed_reply
-    signed_reply="${DIFFHOUND_REPLY_SIG}"$'\n\n'"${ai_reply}"
-    local _post_resp _new_id
-    _post_resp=$(gh api \
-      --method POST \
-      -H "Accept: application/vnd.github+json" \
-      -H "X-GitHub-Api-Version: 2022-11-28" \
-      "/repos/${repo_owner}/${repo_name}/pulls/${pr}/comments/${cid}/replies" \
-      --field "body=${signed_reply}" 2>/dev/null) || continue
-    _new_id=$(printf '%s' "$_post_resp" | jq -r '.id // empty' 2>/dev/null || true)
-    if [ -n "$_new_id" ]; then
-      responded=$((responded + 1))
-      # Register the new reply ID — authoritative source for next invocation.
-      echo "$_new_id" >> "$registry_file"
-      # Legacy: response_cache still tracks the dev reply we answered, used by
-      # _auto_resolve_replied_threads to skip threads with active push-back.
-      echo "$last_reply_id" >> "$response_cache"
-    fi
+    # Collected, then posted together as ONE review (one notification). Each
+    # reply gets the leading diffhound signature, which the consumer workflow
+    # guard and the registry bootstrap recognise.
+    printf '%s:%s:%s:%s\n' "$cid" "${file_path:-x}" "0" "$(printf '%s' "$ai_reply" | tr '\n' ' ')" >> "$_batch"
+    echo "$last_reply_id" >> "$_batch_answered"
+    responded=$((responded + 1))
   done <<< "$reviewer_ids"
 
-  [ "$responded" -gt 0 ] && echo "  🗣️  $responded AI responses posted to dev replies"
+  if [ -s "$_batch" ]; then
+    local _head _rj
+    _head=$(gh api "/repos/${repo_owner}/${repo_name}/pulls/${pr}" --jq '.head.sha' 2>/dev/null || true)
+    _rj=$(mktemp -t "learn-review.XXXXXX")
+    jq -n --arg sha "$_head" --arg b "Replied on $(grep -c . "$_batch") thread(s)." \
+      '{commit_id: $sha, event: "COMMENT", body: $b, comments: []}' > "$_rj"
+    if DIFFHOUND_LOGIN="$REVIEWER_LOGIN" dh_publish_review "$repo_owner" "$repo_name" "$pr" "$_head" COMMENT "$_rj" "$_batch"; then
+      # _auto_resolve_replied_threads skips threads with active push-back.
+      cat "$_batch_answered" >> "$response_cache"
+      echo "  🗣️  ${_DH_REPLIES_POSTED} AI responses posted to dev replies (one review)"
+    else
+      responded=0
+    fi
+    rm -f "$_rj"
+  fi
+  rm -f "$_batch" "$_batch_answered"
 }
 
 # ── Distill false positives into learned patterns ────────────────────────────

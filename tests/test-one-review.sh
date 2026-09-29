@@ -181,6 +181,11 @@ has "replies: each reply carries the leading diffhound signature (skips the lear
 eq "replies: submitted once with the verdict" "$(grep -c '/reviews/900/events' "$GH/state/calls") $(jq -r .event "$GH/state/body.1")" "1 REQUEST_CHANGES"
 eq "replies: result" "$(cat "$GH/state/result")" "true REQUEST_CHANGES 2 2"
 
+# An escalation keeps its own signature (not double-signed).
+printf '55:x:0:<!-- diffhound-escalation v0.5.2 --> limit reached\n' > "$TMP/esc"
+reset_gh; mkrev COMMENT; run_pub COMMENT "$TMP/esc"
+has "replies: escalation body keeps its own leading signature" "$(cat "$GH/state/graphql")" '"b":"<!-- diffhound-escalation v0.5.2 --> limit reached"'
+
 # A reply whose thread cannot be found is listed in the submitted body.
 printf '55:a.ts:9:threaded\n99:c.ts:1:thread gone\n' > "$TMP/replies2"
 reset_gh; mkrev COMMENT; run_pub COMMENT "$TMP/replies2"

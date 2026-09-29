@@ -168,7 +168,10 @@ dh_publish_review() {
       while IFS=: read -r cid _p _l body; do
         [[ "$cid" =~ ^[0-9]+$ ]] || continue
         tid=$(jq -r --argjson d "$cid" '.[] | select(.db_id == $d) | .thread_id' <<< "$threads" 2>/dev/null | head -1)
-        if [ -n "$tid" ] && jq -nc --arg r "$node" --arg t "$tid" --arg b "${DH_REPLY_SIG}"$'\n\n'"${body}" '{
+        # Bodies that already carry a diffhound signature (escalations) keep it.
+        local signed="$body"
+        case "$body" in '<!-- diffhound-'*) : ;; *) signed="${DH_REPLY_SIG}"$'\n\n'"${body}" ;; esac
+        if [ -n "$tid" ] && jq -nc --arg r "$node" --arg t "$tid" --arg b "${signed}" '{
               query: "mutation($r:ID!,$t:ID!,$b:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewId:$r,pullRequestReviewThreadId:$t,body:$b}){comment{id}}}",
               variables: {r:$r, t:$t, b:$b}}' | gh api graphql --input - 2>/dev/null | jq -e '.data.addPullRequestReviewThreadReply.comment.id' >/dev/null 2>&1; then
           ok=$((ok + 1))
