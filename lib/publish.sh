@@ -371,3 +371,30 @@ dh_semantic_dedup() {
   _DH_DEDUP_DROPPED=$(wc -w <<< "$dups" | tr -d ' ')
   echo "  Dedup judge: dropped ${_DH_DEDUP_DROPPED} finding(s) already raised on this PR" >&2
 }
+
+# Why a summary must not be posted, or nothing. Catches the pipeline's internal
+# section markers and bodies too long for anyone to read.  Args: summary_file
+dh_summary_leak_reason() {
+  local f="$1" n
+  if grep -qE '^### (CHUNK_FILES|FINDINGS_START|FINDINGS_END|THREAD_STATUS|CROSS_FILE_NOTES|REQUIREMENT_COVERAGE)|^(FINDING|WHAT|EVIDENCE|IMPACT): ' "$f" 2>/dev/null; then
+    echo "summary contains the reviewers' internal notes, not a review"; return 0
+  fi
+  n=$(wc -c < "$f" 2>/dev/null | tr -d ' ')
+  if [ "${n:-0}" -gt "${DIFFHOUND_MAX_BODY_CHARS:-30000}" ]; then
+    echo "summary is ${n} characters (limit ${DIFFHOUND_MAX_BODY_CHARS:-30000})"; return 0
+  fi
+  return 0
+}
+
+# Plain summary used when the voice pass failed: counts by severity and the
+# files involved, never the raw model output.  Args: comments_file
+dh_fallback_summary() {
+  local f="$1" b s n
+  b=$(grep -c '^COMMENT: [^:]*:~\{0,1\}[0-9]*:BLOCKING' "$f" 2>/dev/null || true)
+  s=$(grep -c '^COMMENT: [^:]*:~\{0,1\}[0-9]*:SHOULD-FIX' "$f" 2>/dev/null || true)
+  n=$(grep -c '^COMMENT: [^:]*:~\{0,1\}[0-9]*:NIT' "$f" 2>/dev/null || true)
+  printf 'The written summary could not be produced this run (the wording step failed), so this review carries the findings only.\n\n'
+  printf '| Blocking | Should fix | Nit |\n|---|---|---|\n| %s | %s | %s |\n\n' "${b:-0}" "${s:-0}" "${n:-0}"
+  printf 'Files with findings:\n'
+  sed -nE 's/^COMMENT: ([^:]+):.*/- `\1`/p' "$f" | sort -u
+}

@@ -261,6 +261,20 @@ has "dedup: BLOCKING repeat is never dropped" "$(cat "$TMP/n4")" "BLOCKING — r
 has "dedup: reply lines survive a bogus DUP" "$(cat "$TMP/n4")" "REPLY: 11:"
 has "dedup: other-file finding survives a bogus DUP" "$(cat "$TMP/n4")" "unrelated file"
 
+# ── summary leak guard ─────────────────────────────────────────────────────
+printf '### CHUNK_FILES\n- a.ts\n### THREAD_STATUS (TASK 1)\n' > "$TMP/leak"
+has "leak: internal chunk notes are refused" "$(dh_summary_leak_reason "$TMP/leak")" "internal notes"
+printf 'FINDING: a.ts:1:NIT\nWHAT: x\n' > "$TMP/leak2"
+has "leak: raw FINDING blocks are refused" "$(dh_summary_leak_reason "$TMP/leak2")" "internal notes"
+head -c 40000 /dev/zero | tr '\0' 'a' > "$TMP/big"
+has "leak: runaway body is refused" "$(dh_summary_leak_reason "$TMP/big")" "40000 characters"
+printf '## Summary\n| Category | Score |\nall good\n' > "$TMP/ok"
+eq "leak: a normal summary passes" "$(dh_summary_leak_reason "$TMP/ok")" ""
+fb=$(dh_fallback_summary "$C")
+has "fallback: counts by severity (capped file: 2 blocking, 2 should-fix)" "$fb" "| 2 | 2 | 0 |"
+has "fallback: lists files" "$fb" '- `b.ts`'
+eq "fallback summary itself passes the leak guard" "$(printf '%s' "$fb" > "$TMP/fb"; dh_summary_leak_reason "$TMP/fb")" ""
+
 echo
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ] || { printf '  failed: %s\n' "${FAILED[@]}"; exit 1; }

@@ -4891,8 +4891,10 @@ if [ "$_voice_comment_count" -eq 0 ] 2>/dev/null; then
           echo "COMMENT: ${_current_finding} — ${_current_body}"
         fi
       } > "${REVIEW_STRUCTURED}.comments"
-      # Use CLAUDE_OUT as-is for summary (parse_summary handles SCORECARD_START/END)
-      parse_summary "$CLAUDE_OUT" "$REVIEW_SUMMARY"
+      # Never the raw merged output as the summary: on chunked reviews it is the
+      # reviewers' scratch notes (CHUNK_FILES, THREAD_STATUS, ...), which went out
+      # as a 197k-char review on monorepo #7642 when the voice model was down.
+      dh_fallback_summary "${REVIEW_STRUCTURED}.comments" > "$REVIEW_SUMMARY"
       _recovered=true
     fi
   fi
@@ -5465,6 +5467,13 @@ JSONEND
   # instead; a red check is recoverable, a false APPROVE is not.
   # A genuine clean review still carries a scorecard and runs to a few thousand
   # chars, so this threshold cannot block real output.
+  # Internal scaffolding or a runaway body is never posted.
+  _dh_bad_body=$(dh_summary_leak_reason "$REVIEW_SUMMARY")
+  if [ -n "$_dh_bad_body" ]; then
+    spinner_fail "Not posting: ${_dh_bad_body}"
+    DIFFHOUND_FAIL_REASON="Not posted: ${_dh_bad_body}"
+    exit 1
+  fi
   _summary_chars=$(tr -d '[:space:]' < "$REVIEW_SUMMARY" 2>/dev/null | wc -c | tr -d ' ')
   if [ "${_summary_chars:-0}" -lt 200 ]; then
     spinner_fail "Review body is empty (${_summary_chars} chars) — refusing to post"
