@@ -17,7 +17,7 @@ from review_body import require_summary_fits
 MARKER = re.compile(r"<!-- diffhound-state v1: (.*?) -->", re.S)
 SUBMITTED = {"COMMENTED", "APPROVED", "CHANGES_REQUESTED", "DISMISSED"}
 RANK = {"NIT": 0, "SHOULD-FIX": 1, "BLOCKING": 2}
-COMMENT = re.compile(r"^COMMENT: (.+?):~?(\d+):(BLOCKING|SHOULD-FIX|NIT)(?:\s*[—–-]\s*|\x1f)(.*)$")
+COMMENT = re.compile(r"^COMMENT: (.+?):~?(\d+):(BLOCKING|SHOULD-FIX|NIT)(?:\x1f|[ \t]*[—–-][ \t]*)(.*)$")
 
 
 def clean(body):
