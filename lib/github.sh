@@ -1,6 +1,6 @@
 #!/bin/bash
 # diffhound — GitHub API interaction
-# List pagination, identity markers, voice indexing, auto-resolve.
+# List pagination, identity markers, voice indexing.
 # Publishing a review lives in lib/publish.sh.
 
 # Source marker utilities (compute_identity_tuple / compose_marker / append_marker).
@@ -17,9 +17,21 @@ _GITHUB_SH_DIR="${BASH_SOURCE[0]%/*}"
 _gh_api_all() {
   local ep="$1" sep='?' out
   case "$ep" in *\?*) sep='&' ;; esac
-  out=$(gh api --paginate "${ep}${sep}per_page=100" 2>/dev/null \
-    | jq -c -s 'map(if type == "array" then . else [] end) | add // []' 2>/dev/null)
-  printf '%s\n' "${out:-[]}"
+  out=$(gh api --paginate "${ep}${sep}per_page=100" 2>/dev/null) || return 1
+  printf '%s\n' "$out" | jq -ce -s 'if length > 0 and all(.[]; type == "array") then add else error("invalid list response") end'
+}
+
+# An incremental range is safe only if the previously reviewed head is an
+# ancestor. Force pushes and unavailable ancestry fall back to the full PR diff.
+# Args: local_repo owner repo previous_sha head_sha
+dh_incremental_base_ok() {
+  if git -C "$1" cat-file -e "$4^{commit}" 2>/dev/null && git -C "$1" cat-file -e "$5^{commit}" 2>/dev/null; then
+    git -C "$1" merge-base --is-ancestor "$4" "$5"
+  else
+    local status
+    status=$(gh api "/repos/$2/$3/compare/$4...$5" --jq .status 2>/dev/null) || return 1
+    [ "$status" = ahead ] || [ "$status" = identical ]
+  fi
 }
 
 # Inject diffhound-id markers into review_json's comments[].body in-place.
@@ -33,7 +45,7 @@ _inject_markers_into_review_json() {
   local _tmp
   _tmp=$(mktemp -t "review-json-marked.XXXXXX")
 
-  # Walk comments[] in jq, emit (path, body) pairs as TSV; marker each in shell;
+  # Walk comments[] as JSON lines so tabs and paragraphs survive transport;
   # write back via jq with --slurpfile of the marked bodies. Done this way to
   # keep the shell-only base64/jq composition in compose_marker rather than
   # duplicating it inside a jq program.
@@ -41,8 +53,8 @@ _inject_markers_into_review_json() {
   _bodies_in=$(mktemp -t "bodies-in.XXXXXX")
   _bodies_out=$(mktemp -t "bodies-out.XXXXXX")
 
-  jq -r '.comments | to_entries[] | "\(.key)\t\(.value.path)\t\(.value.body)"' \
-    "$review_json" > "$_bodies_in" 2>/dev/null || true
+  jq -c '.comments[] | {path, body}' \
+    "$review_json" > "$_bodies_in" 2>/dev/null || { rm -f "$_tmp" "$_bodies_in" "$_bodies_out"; return 1; }
 
   # If there are no comments (empty array, body-only review), nothing to do.
   if [ ! -s "$_bodies_in" ]; then
@@ -52,10 +64,10 @@ _inject_markers_into_review_json() {
 
   # Build a JSON array of marked bodies, indexed in order, for slurp-merge.
   printf '[' > "$_bodies_out"
-  local _first=true
-  while IFS=$'\t' read -r _idx _path _body; do
-    [ -z "$_path" ] && continue
-    local _marked
+  local _first=true _row _path _body _marked
+  while IFS= read -r _row; do
+    _path=$(jq -r .path <<< "$_row")
+    _body=$(jq -r .body <<< "$_row")
     _marked=$(append_marker "$_path" "$_body")
     [ "$_first" = false ] && printf ',' >> "$_bodies_out"
     _first=false
@@ -87,9 +99,10 @@ _inject_markers_into_review_json() {
 _find_posted_review() {
   local body
   body=$(jq -r '.body // ""' "$6" 2>/dev/null)
-  _gh_api_all "/repos/$1/$2/pulls/$3/reviews" | jq -r --arg sha "$4" --arg login "$5" --arg body "$body" \
-    'def norm: gsub("\r"; "") | sub("\\s+$"; "");
-     [.[] | select(.commit_id == $sha and .user.login == $login and ((.body // "") | norm) == ($body | norm))] | last | .id // empty' 2>/dev/null
+  _gh_api_all "/repos/$1/$2/pulls/$3/reviews" | jq -L "$_GITHUB_SH_DIR" -r --arg sha "$4" --arg login "$5" --arg body "$body" \
+    'include "review-identity";
+     def norm: gsub("\r"; "") | sub("\\s+$"; "");
+     [.[] | select(dh_submitted and .commit_id == $sha and dh_author($login) and ((.body // "") | norm) == ($body | norm))] | last | .id // empty' 2>/dev/null
 }
 
 # Index posted comments to voice JSONL for continuous learning
@@ -183,128 +196,4 @@ index_voice_comments() {
   done < "$new_comments_file"
 
   echo "$indexed"
-}
-
-# Auto-resolve review threads that have been addressed by new commits
-# Args: repo_owner repo_name pr_number existing_comments_file incremental_diff_file reviewer_login
-resolve_addressed_comments() {
-  local repo_owner="$1" repo_name="$2" pr_number="$3"
-  local existing_comments_file="$4" incremental_diff_file="$5"
-  local reviewer_login="$6"
-  local tolerance=2
-  local resolved_count=0
-
-  # 1. Extract reviewer's top-level comment positions (path + line)
-  local reviewer_comments
-  reviewer_comments=$(jq -c --arg login "$reviewer_login" \
-    '[.[] | select(.user == $login and .in_reply_to_id == null and .path != null and .line != null) | {id, path, line}]' \
-    "$existing_comments_file" 2>/dev/null || echo "[]")
-
-  local comment_count
-  comment_count=$(printf '%s' "$reviewer_comments" | jq 'length')
-  [ "$comment_count" -eq 0 ] && { echo "0"; return 0; }
-
-  # 2. Parse incremental diff line-by-line to find actually changed lines per file
-  #    Only +/- lines count as changed; context lines (space prefix) are skipped.
-  local -A changed_lines  # file -> space-separated line numbers
-  local current_file="" new_line=0
-  while IFS= read -r diff_line; do
-    case "$diff_line" in
-      "--- "*)  ;;
-      "+++ /dev/null")
-        current_file=""  # file deletion — no new-side lines to track
-        ;;
-      "+++ b/"*)
-        current_file="${diff_line#+++ b/}"
-        ;;
-      "@@"*)
-        # Parse @@ -old,count +new,count @@ — track new-side line counter
-        if [[ "$diff_line" =~ \+([0-9]+)(,([0-9]+))? ]]; then
-          new_line="${BASH_REMATCH[1]}"
-        fi
-        ;;
-      "+"*)
-        # Added/modified line on new side — this is an actual change
-        [ -n "$current_file" ] && changed_lines["$current_file"]+="$new_line "
-        new_line=$((new_line + 1))
-        ;;
-      "-"*)
-        # Deleted line — doesn't advance new-side counter
-        ;;
-      " "*)
-        # Context line — unchanged, just advance counter
-        new_line=$((new_line + 1))
-        ;;
-    esac
-  done < "$incremental_diff_file"
-
-  # 3. Match: for each reviewer comment, check if any changed line is within ±tolerance
-  local addressed_ids=()
-  local addressed_paths=()
-  local i=0
-  while [ "$i" -lt "$comment_count" ]; do
-    local cid cpath cline
-    cid=$(printf '%s' "$reviewer_comments" | jq -r ".[$i].id")
-    cpath=$(printf '%s' "$reviewer_comments" | jq -r ".[$i].path")
-    cline=$(printf '%s' "$reviewer_comments" | jq -r ".[$i].line")
-    i=$((i + 1))
-
-    local lines_str="${changed_lines[$cpath]:-}"
-    [ -z "$lines_str" ] && continue
-
-    # Split space-separated line numbers into array for safe iteration
-    local -a line_arr=()
-    read -ra line_arr <<< "$lines_str"
-
-    local matched=false
-    local cl
-    for cl in "${line_arr[@]}"; do
-      [[ "$cl" =~ ^[0-9]+$ ]] || continue
-      local delta=$((cline - cl))
-      [ "$delta" -lt 0 ] && delta=$(( -delta ))
-      if [ "$delta" -le "$tolerance" ]; then
-        matched=true
-        break
-      fi
-    done
-
-    if [ "$matched" = true ]; then
-      addressed_ids+=("$cid")
-      addressed_paths+=("$cpath:$cline")
-    fi
-  done
-
-  [ "${#addressed_ids[@]}" -eq 0 ] && { echo "0"; return 0; }
-
-  # 4. Every thread, all pages (REST databaseId → GraphQL thread id). Only the
-  #    first 100 were read before, so later threads on big PRs never resolved.
-  local thread_map
-  if ! thread_map=$(dh_review_threads "$repo_owner" "$repo_name" "$pr_number"); then
-    echo "  ⚠ GraphQL thread fetch failed — skipping auto-resolve" >&2
-    echo "0"; return 0
-  fi
-
-  # 5. Resolve addressed + unresolved threads (with logging)
-  local idx=0
-  for aid in "${addressed_ids[@]}"; do
-    local thread_id is_resolved
-    thread_id=$(printf '%s' "$thread_map" | jq -r --argjson dbid "$aid" \
-      '.[] | select(.db_id == $dbid) | .thread_id' 2>/dev/null)
-    is_resolved=$(printf '%s' "$thread_map" | jq -r --argjson dbid "$aid" \
-      '.[] | select(.db_id == $dbid) | .is_resolved' 2>/dev/null)
-
-    [ -z "$thread_id" ] && { idx=$((idx + 1)); continue; }
-    [ "$is_resolved" = "true" ] && { idx=$((idx + 1)); continue; }
-
-    if echo '{"query":"mutation { resolveReviewThread(input:{threadId:\"'"$thread_id"'\"}) { thread { isResolved } } }"}' \
-      | gh api graphql --input - > /dev/null 2>&1; then
-      echo "    ↳ Resolved: ${addressed_paths[$idx]}" >&2
-      resolved_count=$((resolved_count + 1))
-    else
-      echo "    ↳ Failed to resolve: ${addressed_paths[$idx]}" >&2
-    fi
-    idx=$((idx + 1))
-  done
-
-  echo "$resolved_count"
 }

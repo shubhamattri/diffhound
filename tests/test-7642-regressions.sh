@@ -32,6 +32,12 @@ lacks() { # name, haystack, needle
   else PASS=$((PASS+1)); echo "ok   $1"; fi
 }
 
+# Exercise the grep fallback in an archive/container without a parent Git repo.
+fixture="$ROOT/tests/fixtures/ref-exists/keep-symbol-defined-in-other-module-7642"
+cp -R "$fixture/repo" "$TMP/symbol-repo"
+got=$(DIFFHOUND_REPO="$TMP/symbol-repo" bash "$ROOT/lib/validators/ref-exists.sh" < "$fixture/input.txt")
+eq "symbols: cross-module reference survives outside Git" "$got" "$(cat "$fixture/expected.txt")"
+
 # ── 1. pagination: every page, as ONE array ─────────────────────────────────
 mkdir -p "$TMP/bin"
 cat > "$TMP/bin/gh" <<'SH'
@@ -48,7 +54,7 @@ eq "pagination: one JSON array"                "$(printf '%s' "$got" | jq -s 'le
 eq "pagination: all 75 items, not the first 30" "$(printf '%s' "$got" | jq 'length')" "75"
 last=$(printf '%s' "$got" | jq -r '[.[] | {user: .user.login, body, commit_id, submitted_at} | select(.user == "bot" and .body != "")] | sort_by(.submitted_at) | last | .commit_id')
 eq "pagination: last reviewed commit is the newest one" "$last" "sha074"
-eq "pagination: gh failure yields []" "$(PATH="$TMP/nobin:/usr/bin:/bin" _gh_api_all /x 2>/dev/null | jq -c .)" "[]"
+eq "pagination: gh failure is not empty history" "$(PATH="$TMP/nobin:/usr/bin:/bin" _gh_api_all /x 2>/dev/null; echo $?)" "1"
 
 # ── 2. chunk thread filter keeps whole threads, exact paths only ────────────
 cat > "$TMP/threads.txt" <<'T'
@@ -238,8 +244,8 @@ eq "gate: APPROVE after validators dropped every finding allowed" "$(_posting_ga
 eq "gate: findings posted allowed" "$(_posting_gate_reason REQUEST_CHANGES 4 4 "" false true HUGE)" ""
 eq "gate: small tier JSON path, validators optional" "$(_posting_gate_reason APPROVE 0 0 "" false false SMALL)" ""
 has "gate: wired before posting" "$(sed -n '/REVIEW_EVENT=\$(parse_verdict/,/exit 1/p' "$ROOT/lib/review.sh")" "_posting_gate_reason"
-has "api: _call_api fails on empty text" "$(sed -n '/^_call_api() {/,/^}/p' "$ROOT/lib/review.sh")" "_api_empty_is_failure"
-has "api: _call_api_system fails on empty text" "$(sed -n '/^_call_api_system() {/,/^}/p' "$ROOT/lib/review.sh")" "_api_empty_is_failure"
+has "api: _call_api fails on empty text" "$(sed -n '/^_call_api() {/,/^}/p' "$ROOT/lib/api.sh")" "_api_empty_is_failure"
+has "api: _call_api_system fails on empty text" "$(sed -n '/^_call_api_system() {/,/^}/p' "$ROOT/lib/api.sh")" "_api_empty_is_failure"
 rd=$(printf 'FINDING: a.ts:1:NIT\nWHAT: new thing\n' > "$TMP/cur.txt"; printf 'FINDING: b.ts:2:BLOCKING\nWHAT: `requireEnabled` declared twice\n' > "$TMP/prior.txt"; DIFFHOUND_PRIOR_FINDINGS="$TMP/prior.txt" python3 "$ROOT/lib/validators/round-diff.py" < "$TMP/cur.txt")
 lacks "round-diff: a prior finding not repeated is not called resolved" "$rd" "RESOLVED:"
 has   "round-diff: says it is not evidence of a fix" "$rd" "NOT evidence they were fixed"
@@ -251,7 +257,7 @@ has   "round-diff: says it is not evidence of a fix" "$rd" "NOT evidence they we
 S="$TMP/stub"; mkdir -p "$S"
 printf '#!/usr/bin/env bash\nshift; exec "$@"\n' > "$S/tmo"; chmod +x "$S/tmo"
 printf '#!/usr/bin/env bash\ncat "$STUB_RESP"\n' > "$S/curl"; chmod +x "$S/curl"
-eval "$(sed -n '/^_TEXT_BLOCKS=/p;/^_output_cfg() {/,/^}/p;/^_api_text_status() {/,/^}/p;/^_lower_effort() {/,/^}/p;/^_call_api() {/,/^}/p' "$ROOT/lib/review.sh")"
+eval "$(sed -n '/^_TEXT_BLOCKS=/p;/^_output_cfg() {/,/^}/p;/^_api_text_status() {/,/^}/p;/^_lower_effort() {/,/^}/p;/^_call_api() {/,/^}/p' "$ROOT/lib/api.sh")"
 _cost_record() { cat > /dev/null; }
 call() { # response-json -> "rc|stdout|stop"
   printf '%s' "$1" > "$S/resp.json"

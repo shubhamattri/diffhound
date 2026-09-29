@@ -104,9 +104,10 @@ _symbol_in_repo_code() {
     hits=$(git -C "$DIFFHOUND_REPO" grep --untracked -lwF -e "$s" -- '*.ts' '*.tsx' '*.js' '*.jsx' '*.vue' '*.py' '*.cjs' '*.mjs' 2>/dev/null \
       | sed "s|^|$DIFFHOUND_REPO/|") || return 1
   else
-    hits=$(grep -rlwF -- "$s" "$DIFFHOUND_REPO" \
+    hits=$(grep -rlwF \
       --include='*.ts' --include='*.tsx' --include='*.js' --include='*.jsx' --include='*.vue' --include='*.py' \
-      --include='*.cjs' --include='*.mjs' --exclude-dir=node_modules --exclude-dir=.git 2>/dev/null) || return 1
+      --include='*.cjs' --include='*.mjs' --exclude-dir=node_modules --exclude-dir=.git \
+      -- "$s" "$DIFFHOUND_REPO" 2>/dev/null) || return 1
   fi
   [ -n "$hits" ] || return 1
   local f

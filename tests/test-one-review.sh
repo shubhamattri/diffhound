@@ -54,13 +54,13 @@ eq "overflow: nothing to say when nothing was capped" "$(: > "$TMP/none"; dh_ove
 
 # ── last diffhound review ──────────────────────────────────────────────────
 jq -n '[
-  {id: 1, user: "me", submitted_at: "2026-09-01", commit_id: "aaa", body: "| Category | Score | Notes |\n| x |"},
-  {id: 2, user: "me", submitted_at: "2026-09-02", commit_id: "bbb", body: "lgtm, ship it"},
-  {id: 3, user: "other", submitted_at: "2026-09-03", commit_id: "ccc", body: "| Category | Score | Notes |"}
+  {id: 1, user: "me", state: "COMMENTED", submitted_at: "2026-09-01", commit_id: "aaa", body: "| Category | Score | Notes |\n| x |"},
+  {id: 2, user: "me", state: "COMMENTED", submitted_at: "2026-09-02", commit_id: "bbb", body: "lgtm, ship it"},
+  {id: 3, user: "other", state: "COMMENTED", submitted_at: "2026-09-03", commit_id: "ccc", body: "| Category | Score | Notes |"}
 ]' > "$TMP/reviews"
 eq "last review: legacy scorecard body, manual review ignored, falls back to commit_id" \
   "$(dh_last_diffhound_review "$TMP/reviews" me)" $'1\taaa'
-jq '. + [{id: 4, user: "me", submitted_at: "2026-09-04", commit_id: "ddd", body: "summary\n<!-- diffhound-review v1 sha=eeeeeee1 -->"}]' "$TMP/reviews" > "$TMP/reviews2"
+jq '. + [{id: 4, user: "me", state: "COMMENTED", submitted_at: "2026-09-04", commit_id: "ddd", body: "summary\n<!-- diffhound-review v1 sha=eeeeeee1 -->"}]' "$TMP/reviews" > "$TMP/reviews2"
 eq "last review: marker sha wins over commit_id (review edited in place)" \
   "$(dh_last_diffhound_review "$TMP/reviews2" me)" $'4\teeeeeee1'
 jq '. + [{id: 9, user: "me", state: "PENDING", submitted_at: "2026-09-09", commit_id: "zzz", body: "| Category | Score |\n<!-- diffhound-review v1 sha=fff -->"}]' "$TMP/reviews2" > "$TMP/reviews3"
@@ -101,6 +101,7 @@ case "$*" in
     [ -f "$GHSTATE/submit_fails" ] && { echo "HTTP 422" >&2; exit 1; }
     echo '{"id": 900}' ;;
   *"--method POST"*"/reviews"*)
+    [ -f "$GHSTATE/all_posts_fail" ] && exit 1
     if ! jq -e 'has("event")' "$input" >/dev/null; then
       [ -f "$GHSTATE/pending_fails" ] && { echo "HTTP 422 pending exists" >&2; exit 1; }
       echo '{"id": 900, "node_id": "PRR_900"}'; exit 0
@@ -124,7 +125,7 @@ case "$*" in
   *"/reviews"*)
     if [ -f "$GHSTATE/reviews.json" ]; then cat "$GHSTATE/reviews.json"; exit 0; fi
     if [ -f "$GHSTATE/created.json" ]; then
-      jq -c '[{id: 77, commit_id: .commit_id, user: {login: "me"}, body: (.body + "\n")}]' "$GHSTATE/created.json"
+      jq -c '[{id: 77, state: "COMMENTED", commit_id: .commit_id, user: {login: "me"}, body: (.body + "\n")}]' "$GHSTATE/created.json"
     else echo '[]'; fi ;;
   *) echo '[]' ;;
 esac
@@ -204,6 +205,12 @@ reset_gh; jq -n '[{id: 5, state: "PENDING", user: {login: "me"}, body: "x <!-- d
 mkrev COMMENT; run_pub COMMENT "$TMP/replies"
 eq "pending: only diffhound's leftover draft is deleted" "$(grep -- '--method DELETE' "$GH/state/calls" | grep -oE 'reviews/[0-9]+' | tr '\n' ' ')" "reviews/5 "
 
+# A network failure with only a matching unsent draft must not report success.
+reset_gh; mkrev COMMENT; touch "$GH/state/all_posts_fail"
+jq '[{id:901,state:"PENDING",commit_id:.commit_id,user:{login:"me"},body:.body}]' "$GH/review.json" > "$GH/state/reviews.json"
+run_pub COMMENT "$TMP/noreplies"
+eq "publish: matching PENDING review cannot turn failed writes into success" "$(cut -d' ' -f1 "$GH/state/result")" false
+
 # Submit fails: the pending review is deleted, replies go into the body.
 reset_gh; touch "$GH/state/submit_fails"; mkrev COMMENT; run_pub COMMENT "$TMP/replies"
 eq "replies: failed submit deletes the pending draft" "$(grep -c -- '--method DELETE.*/reviews/900' "$GH/state/calls")" "1"
@@ -221,16 +228,16 @@ threads=$(export GHSTATE="$GH/state" PATH="$GH/bin:$PATH"; dh_review_threads o r
 eq "threads: all pages read" "$(jq -c '[.[].thread_id]' <<< "$threads")" '["T1","T2"]'
 
 # Status comment: edited in place when one exists, created only once.
-reset_gh; jq -n '[{id: 42, body: "<!-- diffhound-status v1 -->\nold failure"}]' > "$GH/state/issue_comments.json"
-( export GHSTATE="$GH/state" PATH="$GH/bin:$PATH"; dh_upsert_status_comment o r 1 "failed again" )
+reset_gh; jq -n '[{id: 42, user: {login: "me"}, body: "<!-- diffhound-status v1 -->\nold failure"}]' > "$GH/state/issue_comments.json"
+( export GHSTATE="$GH/state" PATH="$GH/bin:$PATH" DIFFHOUND_LOGIN=me; dh_upsert_status_comment o r 1 "failed again" )
 eq "status: existing comment is PATCHed, nothing new posted" \
   "$(grep -c -- '--method PATCH.*/issues/comments/42' "$GH/state/calls") $(posts)" "1 0"
 reset_gh
-( export GHSTATE="$GH/state" PATH="$GH/bin:$PATH"; dh_upsert_status_comment o r 1 "failed" )
+( export GHSTATE="$GH/state" PATH="$GH/bin:$PATH" DIFFHOUND_LOGIN=me; dh_upsert_status_comment o r 1 "failed" )
 eq "status: first failure creates one comment" "$(grep -c -- '--method POST.*/issues/1/comments' "$GH/state/calls")" "1"
 
 # ── semantic dedup ─────────────────────────────────────────────────────────
-jq -n '[{id: 11, user: "me", in_reply_to_id: null, path: "src/a.ts", line: 10, body: "`retry` swallows the error\n<!-- diffhound-id v1: x -->"},
+jq -n '[{id: 11, user: "me", is_resolved: false, severity: "SHOULD-FIX", in_reply_to_id: null, path: "src/a.ts", line: 10, body: "`retry` swallows the error\n<!-- diffhound-id v1: x -->"},
         {id: 12, user: "dev", in_reply_to_id: null, path: "src/b.ts", line: 3, body: "not ours"}]' > "$TMP/existing"
 cat > "$TMP/new" <<'EOF'
 COMMENT: src/a.ts:14:SHOULD-FIX — retry() eats the exception, callers never see it

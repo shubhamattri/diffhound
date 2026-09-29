@@ -38,7 +38,7 @@ RUN curl -fsSL -o /tmp/gitleaks.tgz \
   && rm /tmp/gitleaks.tgz \
   && gitleaks version
 
-# ── LLM CLIs (claude fallback, codex + gemini peer review) ─
+# ── Optional CLIs (codex + gemini peer review; claude is not the runtime backend) ─
 # Unpinned initially; pin once image has been validated under real load.
 RUN npm install -g --omit=dev \
       @anthropic-ai/claude-code \

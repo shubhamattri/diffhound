@@ -7,7 +7,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck disable=SC1091
 source "$ROOT/lib/parser.sh"
 # shellcheck disable=SC1090
-eval "$(sed -n '/^_lower_effort() {/,/^}/p;/^_mono_retry_cutoff() {/,/^}/p' "$ROOT/lib/review.sh")"
+eval "$(sed -n '/^_lower_effort() {/,/^}/p' "$ROOT/lib/api.sh")"
+eval "$(sed -n '/^_mono_retry_cutoff() {/,/^}/p' "$ROOT/lib/review.sh")"
 TMP=$(mktemp -d -t diffhound-monoretry.XXXXXX); trap 'rm -rf "$TMP"' EXIT
 PASS=0; FAIL=0
 check(){ if [ "$2" = "$3" ]; then PASS=$((PASS+1)); echo "ok   $1"; else FAIL=$((FAIL+1)); echo "FAIL $1 — want [$3] got [$2]"; fi; }

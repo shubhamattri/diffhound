@@ -6,6 +6,18 @@ branding:
   color: 'blue'
 
 inputs:
+  command:
+    description: 'review, ask, describe, labels, or changelog'
+    required: false
+    default: 'review'
+  question:
+    description: 'Question for the ask command'
+    required: false
+    default: ''
+  apply:
+    description: 'Apply an explicit command to GitHub; false previews the generated result'
+    required: false
+    default: 'false'
   pr-number:
     description: 'PR number to review'
     required: true
@@ -26,6 +38,9 @@ runs:
   using: 'docker'
   image: 'Dockerfile'
   env:
+    INPUT_COMMAND: ${{ inputs.command }}
+    INPUT_QUESTION: ${{ inputs.question }}
+    INPUT_APPLY: ${{ inputs.apply }}
     INPUT_PR_NUMBER: ${{ inputs.pr-number }}
     INPUT_MODE: ${{ inputs.mode }}
     INPUT_AUTO_POST: ${{ inputs.auto-post }}

@@ -1,0 +1,36 @@
+name: Diffhound PR commands
+on:
+  workflow_call:
+    secrets:
+      DIFFHOUND_GITHUB_TOKEN:
+        description: 'Token for the existing reviewer account, with PR and issue write access'
+        required: true
+      ANTHROPIC_API_KEY:
+        description: 'Funded Diffhound API key'
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: diffhound-commands-${{ github.repository }}-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  command:
+    if: >-
+      github.event_name == 'issue_comment' && github.event.action == 'created' &&
+      github.event.issue.pull_request && startsWith(github.event.comment.body, '/')
+    runs-on: ubuntu-latest
+    steps:
+      # Never check out the PR head with a write token. Only Diffhound's code runs.
+      - uses: actions/checkout@v4
+        with:
+          repository: shubhamattri/diffhound
+          ref: main
+          persist-credentials: false
+      - name: Run the authorized command
+        env:
+          GH_TOKEN: ${{ secrets.DIFFHOUND_GITHUB_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: bash bin/diffhound --command-event "$GITHUB_EVENT_PATH"

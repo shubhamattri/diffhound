@@ -131,12 +131,20 @@ if [ -z "$only" ] && [ -x "$ROOT/tests/test-7642-regressions.sh" ]; then
   "$ROOT/tests/test-7642-regressions.sh" || _unit_fail=1
 fi
 
-for _t in lint-pipefail.sh test-coverage-integrity.sh test-guard-facts.sh test-one-review.sh; do
+for _t in lint-pipefail.sh test-coverage-integrity.sh test-guard-facts.sh test-one-review.sh test-thinking-exhaustion.sh test-mono-cutoff-retry.sh; do
   if [ -z "$only" ] && [ -x "$ROOT/tests/$_t" ]; then
     echo
     echo "=== unit: $_t ==="
     "$ROOT/tests/$_t" || _unit_fail=1
   fi
 done
+
+if [ -z "$only" ]; then
+  for _t in test-review-state.py test-commands.py test-review-lock.py; do
+    python3 "$ROOT/tests/$_t" || _unit_fail=1
+  done
+  bash "$ROOT/tests/test-lifecycle.sh" || _unit_fail=1
+  bash "$ROOT/tests/test-command-entrypoint.sh" || _unit_fail=1
+fi
 
 [ "$FAIL" -eq 0 ] && [ "$_unit_fail" -eq 0 ]
