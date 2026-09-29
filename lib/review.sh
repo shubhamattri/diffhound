@@ -4980,15 +4980,8 @@ if [ "$POST_REVIEW" = true ]; then
     rm -f "$_dedup_tmp" 2>/dev/null || true
   fi
 
-  # Capped findings and repeats of earlier findings are named once in the summary.
-  dh_overflow_section "$_DH_OVERFLOW" >> "$REVIEW_SUMMARY"
-  _dh_replies_as_section "$_DH_REPLY_OVERFLOW" "$REPO_OWNER" "$REPO_NAME" "$PR_NUMBER" >> "$REVIEW_SUMMARY"
-  if [ "${_DH_DEDUP_DROPPED:-0}" -gt 0 ]; then
-    printf '\n_%s finding(s) from this pass were already raised earlier on this PR; see those threads._\n' "$_DH_DEDUP_DROPPED" >> "$REVIEW_SUMMARY"
-  fi
-
-  if ! python3 "${LIB_DIR}/review_state.py" finish "$_DH_STATE_DIR/plan" \
-       "${REVIEW_STRUCTURED}.new_comments" "$_DH_OVERFLOW" "$REVIEW_SUMMARY"; then
+  if ! dh_finalize_summary "$_DH_STATE_DIR/plan" "${REVIEW_STRUCTURED}.new_comments" \
+       "$_DH_OVERFLOW" "$_DH_REPLY_OVERFLOW" "$REVIEW_SUMMARY" "$REPO_OWNER" "$REPO_NAME" "$PR_NUMBER"; then
     DIFFHOUND_FAIL_REASON="Could not persist complete finding history. No review published."
     exit 1
   fi

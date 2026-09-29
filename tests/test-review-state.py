@@ -1,9 +1,11 @@
 """Finding lifecycle across ephemeral runners; no network/model calls."""
 import importlib.util
 import pathlib
+import sys
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "lib"))
 spec = importlib.util.spec_from_file_location("review_state", ROOT / "lib/review_state.py")
 state = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(state)
@@ -118,6 +120,22 @@ class Lifecycle(unittest.TestCase):
     def test_case_sensitive_code_is_not_normalized_into_same_defect(self):
         result = self.run_round([self.finding("Check `Token`"), self.finding("Check `token`")])
         self.assertEqual(len(result["comments"]), 2)
+
+    def test_unit_separator_preserves_body_leading_dashes_and_resolution(self):
+        for prefix in ["- ", "— ", "– ", "   - "]:
+            with self.subTest(prefix=prefix):
+                body = prefix + "Reject expired tokens"
+                line = "COMMENT: src/auth.ts:10:SHOULD-FIX\x1f" + body
+                first = self.run_round([line])
+                self.assertEqual(first["findings"][0]["body"], body.strip())
+                comment = {"id": 55, "user": "me", "path": "src/auth.ts", "line": 10,
+                           "body": body + "\n<!-- diffhound-id v1: abc -->"}
+                threads = [{"db_id": 55, "is_resolved": True}]
+                resolved = self.run_round([], first, threads, [comment])
+                self.assertEqual(len(resolved["findings"]), 1)
+                self.assertEqual(resolved["findings"][0]["status"], "RESOLVED")
+                reopened = self.run_round([line], resolved, threads, [comment])
+                self.assertEqual(reopened["comments"], [line])
 
     def test_resolved_findings_never_enter_semantic_suppression(self):
         first = self.run_round([self.finding()])

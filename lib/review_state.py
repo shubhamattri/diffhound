@@ -12,11 +12,12 @@ import re
 import sys
 import zlib
 from pathlib import Path
+from review_body import require_summary_fits
 
 MARKER = re.compile(r"<!-- diffhound-state v1: (.*?) -->", re.S)
 SUBMITTED = {"COMMENTED", "APPROVED", "CHANGES_REQUESTED", "DISMISSED"}
 RANK = {"NIT": 0, "SHOULD-FIX": 1, "BLOCKING": 2}
-COMMENT = re.compile(r"^COMMENT: (.+?):~?(\d+):(BLOCKING|SHOULD-FIX|NIT)\s*[—–-]\s*(.*)$")
+COMMENT = re.compile(r"^COMMENT: (.+?):~?(\d+):(BLOCKING|SHOULD-FIX|NIT)(?:\x1f|[ \t]*[—–-][ \t]*)(.*)$")
 
 
 def clean(body):
@@ -131,7 +132,7 @@ def merge_aliases(plan, prior, lines, matches):
     for number, prior_id in matches:
         current = parse(lines[number - 1])
         old = next(p for p in prior if p["id"] == prior_id)
-        if current["path"] != old["path"] or RANK[current["severity"]] > RANK[old["severity"]]:
+        if current is None or current["path"] != old["path"] or RANK[current["severity"]] > RANK[old["severity"]]:
             raise ValueError("Invalid semantic match")
         target = by_id[old["ledger_id"]]
         if current["id"] != target["id"]:
@@ -161,6 +162,26 @@ def finalize(plan, lines):
     return plan
 
 
+def finding_line(finding):
+    """Render the complete visible concern used by history and fallback checks."""
+    return f"- **{finding['severity']}** `{finding['path']}:{finding['line']}` — {finding['body']}"
+
+
+def inline_fallback(review):
+    """Append only inline concerns missing from the complete visible history."""
+    body = review["body"]
+    history = load_history([{"user": "local", "state": "COMMENTED", "body": body}], "local")
+    visible = {identity(f["path"], f["body"]) for f in history["findings"]
+               if f["status"] == "OPEN" and finding_line(f) in body}
+    missing = [c for c in review.get("comments", []) if identity(c["path"], c["body"]) not in visible]
+    if not missing:
+        return ""
+    lines = ["\n**Findings** (could not be attached to diff lines)\n"]
+    for comment in missing:
+        lines.append(f"- `{comment['path']}:{comment['line']}` {clean(comment['body'])}")
+    return "\n".join(lines) + "\n"
+
+
 def summary(plan):
     """Persistent visible inventory includes findings posted only in the body."""
     opened = [f for f in plan["findings"] if f["status"] == "OPEN"]
@@ -168,7 +189,7 @@ def summary(plan):
     lines = [f"\n### Finding history\n\n{len(opened)} open · {fixed} resolved in GitHub threads.",
              "Absence from an incremental review does not mark a finding fixed."]
     for finding in sorted(opened, key=lambda f: -RANK[f["severity"]]):
-        lines.append(f"- **{finding['severity']}** `{finding['path']}:{finding['line']}` — {finding['body']}")
+        lines.append(finding_line(finding))
     return "\n".join(lines) + "\n\n" + marker(plan) + "\n"
 
 
@@ -178,8 +199,7 @@ def complete_summary(plan, generated):
     if len(re.sub(r"\s+", "", clean(generated))) < 200:
         raise ValueError("Generated review summary is empty or too short; history is not a review")
     body = generated + summary(plan)
-    if len(body.encode()) > 60000:
-        raise ValueError("Review history exceeds safe GitHub body size; refusing to truncate findings")
+    require_summary_fits(body, plan["sha"])
     return body
 
 
@@ -204,6 +224,13 @@ def main():
     elif command == "prior":
         plan_file, login = args
         print(json.dumps(semantic_prior(json.loads(Path(plan_file).read_text()), login)))
+    elif command == "inline-fallback":
+        sys.stdout.write(inline_fallback(json.loads(Path(args[0]).read_text())))
+    elif command == "candidates":
+        for number, line in enumerate(Path(args[0]).read_text().split("\n"), 1):
+            finding = parse(line)
+            if finding is not None and finding["severity"] != "BLOCKING":
+                print(f"{number}\t{finding['path']}\t{finding['severity']}")
     elif command == "aliases":
         plan_file, prior_file, source, matches_file = args
         matches = [tuple(map(int, row.split())) for row in Path(matches_file).read_text().splitlines()]
