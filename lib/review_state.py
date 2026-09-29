@@ -17,7 +17,7 @@ from review_body import require_summary_fits
 MARKER = re.compile(r"<!-- diffhound-state v1: (.*?) -->", re.S)
 SUBMITTED = {"COMMENTED", "APPROVED", "CHANGES_REQUESTED", "DISMISSED"}
 RANK = {"NIT": 0, "SHOULD-FIX": 1, "BLOCKING": 2}
-COMMENT = re.compile(r"^COMMENT: (.+?):~?(\d+):(BLOCKING|SHOULD-FIX|NIT)\s*[—–-]\s*(.*)$")
+COMMENT = re.compile(r"^COMMENT: (.+?):~?(\d+):(BLOCKING|SHOULD-FIX|NIT)(?:\s*[—–-]\s*|\x1f)(.*)$")
 
 
 def clean(body):
@@ -132,7 +132,7 @@ def merge_aliases(plan, prior, lines, matches):
     for number, prior_id in matches:
         current = parse(lines[number - 1])
         old = next(p for p in prior if p["id"] == prior_id)
-        if current["path"] != old["path"] or RANK[current["severity"]] > RANK[old["severity"]]:
+        if current is None or current["path"] != old["path"] or RANK[current["severity"]] > RANK[old["severity"]]:
             raise ValueError("Invalid semantic match")
         target = by_id[old["ledger_id"]]
         if current["id"] != target["id"]:
@@ -226,6 +226,11 @@ def main():
         print(json.dumps(semantic_prior(json.loads(Path(plan_file).read_text()), login)))
     elif command == "inline-fallback":
         sys.stdout.write(inline_fallback(json.loads(Path(args[0]).read_text())))
+    elif command == "candidates":
+        for number, line in enumerate(Path(args[0]).read_text().split("\n"), 1):
+            finding = parse(line)
+            if finding is not None and finding["severity"] != "BLOCKING":
+                print(f"{number}\t{finding['path']}\t{finding['severity']}")
     elif command == "aliases":
         plan_file, prior_file, source, matches_file = args
         matches = [tuple(map(int, row.split())) for row in Path(matches_file).read_text().splitlines()]

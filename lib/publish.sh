@@ -332,18 +332,21 @@ dh_semantic_dedup() {
   [ -n "$prior" ] && [ "$prior" != "[]" ] || return 0
 
   # Only non-blocking findings on a file that already has a prior comment are judged.
-  local n=0 line path asked_map="" asked_paths="[]"
+  local n line path severity candidates asked_map="" asked_paths="[]"
+  candidates=$(mktemp -t "dh-dedup-candidates.XXXXXX")
+  # The judge and persisted history must use the same finding grammar.
+  if ! python3 "$_DH_PUBLISH_DIR/review_state.py" candidates "$f" > "$candidates"; then
+    rm -f "$candidates"; return 1
+  fi
   local new_block; new_block=$(mktemp -t "dh-dedup-new.XXXXXX")
-  while IFS= read -r line; do
-    n=$((n + 1))
-    [[ "$line" =~ ^COMMENT:\ ([^:]+):~?([0-9]+):([A-Z-]+) ]] || continue
-    path="${BASH_REMATCH[1]}"
-    [ "${BASH_REMATCH[3]}" = BLOCKING ] && continue
+  while IFS=$'\t' read -r n path severity; do
     jq -e --arg p "$path" 'any(.[]; .path == $p)' <<< "$prior" >/dev/null 2>&1 || continue
+    line=$(sed -n "${n}p" "$f")
     printf '%s: %s\n' "$n" "$(printf '%s' "${line#COMMENT: }" | tr $'\x1f' ' ')" >> "$new_block"
-    asked_map="${asked_map}${n}"$'\t'"${path}"$'\n'
+    asked_map="${asked_map}${n}"$'\t'"${path}"$'\t'"${severity}"$'\n'
     asked_paths=$(jq -c --arg p "$path" '. + [$p] | unique' <<< "$asked_paths")
-  done < "$f"
+  done < "$candidates"
+  rm -f "$candidates"
   if [ -z "$asked_map" ]; then rm -f "$new_block"; return 0; fi
 
   prompt=$(mktemp -t "dh-dedup-prompt.XXXXXX")
@@ -374,7 +377,7 @@ dh_semantic_dedup() {
     num="${num%:}"
     npath=$(awk -F'\t' -v k="$num" '$1 == k { print $2 }' <<< "$asked_map")
     [ -n "$npath" ] || continue
-    sev=$(sed -n "${num}p" "$f" | sed -E 's/^COMMENT: [^:]+:~?[0-9]+:([A-Z-]+).*/\1/')
+    sev=$(awk -F'\t' -v k="$num" '$1 == k { print $3 }' <<< "$asked_map")
     jq -e --argjson id "$pid" --arg p "$npath" --arg sev "$sev" \
       'def rank: if . == "BLOCKING" then 2 elif . == "SHOULD-FIX" then 1 elif . == "NIT" then 0 else -1 end;
        any(.[]; .id == $id and .path == $p and (.severity | rank) >= ($sev | rank))' <<< "$prior" >/dev/null 2>&1 || continue

@@ -77,6 +77,19 @@ assert "$(cat "$TMP/new")" 'COMMENT: src/auth.ts:20:BLOCKING — Check authentic
 assert "$_DH_DEDUP_DROPPED" 2 'repeat accounting'
 assert "$(jq '[.findings[].aliases // [] | length] | add' "$TMP/round2/plan")" 1 'semantic identity persists'
 
+# The renderer accepts a unit separator after severity as well as a dash.
+# Judge line numbers must refer to the same grammar as lifecycle state.
+mkdir "$TMP/separator-round"
+printf 'COMMENT: src/auth.ts:90:SHOULD-FIX\037Do not accept expired tokens\nCOMMENT: src/auth.ts:91:SHOULD-FIX invalid delimiter\n' > "$TMP/new"
+dh_plan_findings "$TMP/new" "$TMP/reviews" "$TMP/comments" "$TMP/threads" me ccc "$TMP/separator-round"
+assert "$(cat "$TMP/new")" 'COMMENT: src/auth.ts:91:SHOULD-FIX invalid delimiter' 'unit-separated semantic repeat is remembered'
+assert "$(jq '[.findings[].aliases // [] | length] | add' "$TMP/separator-round/plan")" 1 'unit-separated alias persists'
+mkdir "$TMP/malformed-round"
+_call_api() { touch "$TMP/unexpected-judge"; cat >/dev/null; printf '1: DUP 1\n'; }
+dh_plan_findings "$TMP/new" "$TMP/reviews" "$TMP/comments" "$TMP/threads" me ddd "$TMP/malformed-round"
+test ! -e "$TMP/unexpected-judge"
+assert "$(cat "$TMP/new")" 'COMMENT: src/auth.ts:91:SHOULD-FIX invalid delimiter' 'unparseable concern is never semantically dropped'
+
 # The shared predicate used by sweep, including a real body string and legacy reviews.
 jq -n '[{user:{login:"me"},state:"COMMENTED",commit_id:"aaa",body:"| Category | Score |"}]' > "$TMP/raw"
 assert "$(jq -L "$ROOT/lib" 'include "review-identity"; any(.[]; dh_covers("me"; "aaa"))' "$TMP/raw")" true 'sweep legacy SHA'
