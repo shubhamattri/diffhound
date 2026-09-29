@@ -4803,8 +4803,18 @@ _call_api_system "claude-sonnet-5" 32000 300 "$_SYS_TMP" medium < "$_USER_TMP" >
 # The voice pass writes the human comments and the scorecard. One retry for a
 # blip; if the model still gives nothing, post nothing: raw primary-pass output
 # is not a review (monorepo #7642, 29 Sep: a 197k-char dump during a 503).
+# Also retry when the pass answered but wrote no COMMENT: lines although the
+# primary pass had findings (it sometimes returns free text).
+_dh_primary_n=$(grep -c '^FINDING:' "$CLAUDE_OUT" 2>/dev/null || true)
+[ "${_dh_primary_n:-0}" -gt 0 ] || _dh_primary_n=$({ _extract_json "$CLAUDE_OUT" 2>/dev/null || cat "$CLAUDE_OUT"; } | jq '.findings | length' 2>/dev/null || echo 0)
+if [ -s "$REVIEW_STRUCTURED" ] && [ "${_dh_primary_n:-0}" -gt 0 ] 2>/dev/null; then
+  _dh_probe=$(mktemp -t "voice-probe.XXXXXX")
+  parse_comments "$REVIEW_STRUCTURED" "$_dh_probe" 2>/dev/null || true
+  grep -q '^COMMENT:' "$_dh_probe" 2>/dev/null || : > "$REVIEW_STRUCTURED"
+  rm -f "$_dh_probe" "${REVIEW_STRUCTURED}.json.probe" 2>/dev/null
+fi
 if [ ! -s "$REVIEW_STRUCTURED" ]; then
-  echo "  Voice rewrite returned nothing; retrying once" >&2
+  echo "  Voice rewrite returned nothing usable; retrying once" >&2
   sleep "${DIFFHOUND_VOICE_RETRY_SECS:-20}"
   _call_api_system "claude-sonnet-5" 32000 300 "$_SYS_TMP" medium < "$_USER_TMP" > "$REVIEW_STRUCTURED" 2>/dev/null || true
 fi
@@ -4847,18 +4857,11 @@ if [ "$_voice_comment_count" -eq 0 ] 2>/dev/null; then
   _claude_findings=$(echo "$_claude_json" | jq '.findings | length' 2>/dev/null || echo "0")
   _claude_findings=$(echo "${_claude_findings:-0}" | tr -d '[:space:]')
   if [ "${_claude_findings:-0}" -gt 0 ] 2>/dev/null; then
-    echo "  Voice rewrite lost findings — falling back to Claude's JSON output" >&2
-    if ! grep -q '^```json' "$CLAUDE_OUT" 2>/dev/null; then
-      _fenced_tmp=$(mktemp -t "pr-${PR_NUMBER}-fenced.XXXXXX")
-      { echo '```json'; echo "$_claude_json"; echo '```'; } > "$_fenced_tmp"
-      parse_comments "$_fenced_tmp" "${REVIEW_STRUCTURED}.comments"
-      parse_summary "$_fenced_tmp" "$REVIEW_SUMMARY"
-      rm -f "$_fenced_tmp"
-    else
-      parse_comments "$CLAUDE_OUT" "${REVIEW_STRUCTURED}.comments"
-      parse_summary "$CLAUDE_OUT" "$REVIEW_SUMMARY"
-    fi
-    _recovered=true
+    # Claude's own wording is not posted either: comments must come from the
+    # voice pass (Shubham's wording) with its scorecard.
+    spinner_fail "Voice rewrite returned no comments; not posting unworded findings"
+    DIFFHOUND_FAIL_REASON="The wording step returned no usable comments for ${_claude_findings} findings, so nothing was posted. The next push or the sweep retries."
+    exit 1
   fi
 
   # Recovery path 2: FINDINGS_START format (chunked/merged reviews)
