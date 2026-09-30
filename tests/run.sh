@@ -140,7 +140,7 @@ for _t in lint-pipefail.sh test-coverage-integrity.sh test-guard-facts.sh test-o
 done
 
 if [ -z "$only" ]; then
-  for _t in test-review-state.py test-review-body.py test-commands.py test-review-lock.py; do
+  for _t in test-review-state.py test-review-body.py test-history-growth.py test-commands.py test-review-lock.py; do
     python3 "$ROOT/tests/$_t" || _unit_fail=1
   done
   bash "$ROOT/tests/test-lifecycle.sh" || _unit_fail=1

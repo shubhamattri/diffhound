@@ -5073,7 +5073,8 @@ JSONEND
        "${_CHUNK_GAPS:-}" "${_dh_inline_n:-0}" "${REPLY_COUNT:-0}" "${LAST_DH_REVIEW_ID:-}"; then
     # Publish the current summary/state even on a quiet rerun.
     cp "$_dh_marked" "${_dh_marked}.q"
-    if dh_update_review_body "$REPO_OWNER" "$REPO_NAME" "$PR_NUMBER" "$LAST_DH_REVIEW_ID" "${_dh_marked}.q"; then
+    if dh_refresh_review "$REPO_OWNER" "$REPO_NAME" "$PR_NUMBER" "$LAST_DH_REVIEW_ID" \
+         "${_dh_marked}.q" "$_DH_STATE_DIR/plan"; then
       _POSTED_OK=true; NEW_COMMENT_COUNT=0
       spinner_stop "Nothing new: updated the last review in place (no new comment)"
     fi

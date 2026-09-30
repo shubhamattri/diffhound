@@ -50,3 +50,10 @@ dh_upsert_summary() {
   fi
   rm -f "$tmp"; return "$rc"
 }
+
+# Args: owner repo pr review_id body_copy plan. The caller retains the append
+# body separately so a failed PUT can still publish one complete new review.
+dh_refresh_review() {
+  python3 "${BASH_SOURCE[0]%/*}/review_state.py" refresh "$6" "$5" "$4" || return 1
+  dh_update_review_body "$1" "$2" "$3" "$4" "$5"
+}

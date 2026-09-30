@@ -111,7 +111,7 @@ export REVIEW_LOGIN="your-github-username"
 | `DIFFHOUND_MAX_INLINE` | `8` | Initial-review nonblocking inline limit; remaining findings go in the review body. |
 | `DIFFHOUND_MAX_INLINE_REREVIEW` | `3` | Subsequent-review nonblocking inline limit. Blockers remain uncapped. |
 | `DIFFHOUND_MAX_REPLIES` | `3` | Thread replies per review; overflow is included in the body. |
-| `DIFFHOUND_MAX_BODY_CHARS` | `30000` | Legacy name for the final UTF-8 **byte** budget (1–60000), including hidden state and markers. Shared by assembly, review publishing, fallback bodies, and sticky summaries. Findings are never silently truncated. |
+| `DIFFHOUND_MAX_BODY_CHARS` | `30000` | Legacy name for the final UTF-8 **byte** budget (1–60000), including hidden state and markers. Shared by assembly, review publishing, fallback bodies, and sticky summaries. Earlier findings stay in linked reviews; a single oversized round still fails without truncation. |
 | `DIFFHOUND_DEDUP_MODEL` | `claude-haiku-4-5-20251001` | Judge for reworded repeats of known open, nonblocking findings. |
 | `DIFFHOUND_COMMAND_MODEL` | `claude-sonnet-5` | Model for explicit PR commands. Each command makes one generation call. |
 | `DIFFHOUND_LOCK_DIR` | `~/.cache/diffhound/locks` | Shared host directory for per-PR review locks. All processes on a host must use the same directory. |
@@ -229,10 +229,21 @@ History is stored in submitted review bodies, so fresh Actions/Docker workers ca
 recover it. An unreadable history stops publication; an unavailable thread-status
 read keeps findings rather than hiding them. Body-only findings stay open until
 there is explicit resolution evidence; incremental silence never closes them.
-Very large histories fail visibly at the body-size limit instead of being dropped.
+A single oversized round fails visibly instead of dropping findings.
 Exact matching is deterministic; semantic matching remains model-dependent and
 keeps findings when the judge fails or is uncertain. It never suppresses a new
 BLOCKING finding. See [the adoption matrix](docs/OSS-ADOPTION.md).
+
+History format v2 stores only changed finding records and points to the prior submitted
+review. A new round shows its selected/new/reopened findings in full and links to earlier
+rounds; it does not copy the PR's complete history into every comment. Reading all review
+pages reconstructs the full state, including older v1 snapshots. Missing, corrupt, foreign,
+or unsubmitted parent reviews stop publication instead of resetting deduplication.
+Quiet refreshes keep the replaced review's original parent and visible findings.
+
+After v2 reviews have been published, use a v2-aware build when rolling back. Version
+v0.7.60 and older cannot reconstruct v2 history. A legacy-reader guard makes them
+stop rather than silently reuse stale state; pause publishing or use a v2-aware build. There is no database migration or runtime-secret change.
 
 ### 25 engineering principles
 
@@ -247,6 +258,7 @@ The review checks for real issues across 5 categories:
 ### What it won't flag
 
 Lint nits are banned. Trailing newlines, extra blank lines, whitespace, import ordering — these are linter concerns, not review concerns.
+
 
 ## Project Structure
 
