@@ -14,10 +14,11 @@ import zlib
 from pathlib import Path
 from review_body import require_summary_fits
 
-MARKER = re.compile(r"<!-- diffhound-state v1: (.*?) -->", re.S)
+MARKER = re.compile(r"<!-- diffhound-state v([12]): (.*?) -->", re.S)
 SUBMITTED = {"COMMENTED", "APPROVED", "CHANGES_REQUESTED", "DISMISSED"}
 RANK = {"NIT": 0, "SHOULD-FIX": 1, "BLOCKING": 2}
 COMMENT = re.compile(r"^COMMENT: (.+?):~?(\d+):(BLOCKING|SHOULD-FIX|NIT)(?:\x1f|[ \t]*[—–-][ \t]*)(.*)$")
+LEGACY_READER_GUARD = "<!-- diffhound-state v1: upgrade-required-history-v2 -->"
 
 
 def clean(body):
@@ -39,36 +40,97 @@ def parse(line):
 
 
 def marker(plan):
-    """Only committed history goes in the marker; local planning data stays local."""
-    history = {key: plan[key] for key in ("sha", "findings", "resolved_threads")}
+    """Encode a legacy snapshot for compatibility and migration fixtures."""
+    return encode_history({key: plan[key] for key in ("sha", "findings", "resolved_threads")}, 1)
+
+
+def encode_history(history, version=2):
+    """Encode only committed state, never local planning data."""
     encoded = base64.b64encode(zlib.compress(json.dumps(history, separators=(",", ":")).encode())).decode()
-    return f"<!-- diffhound-state v1: {encoded} -->"
+    return f"<!-- diffhound-state v{version}: {encoded} -->"
+
+
+def decode_history(body):
+    """Read one bounded snapshot/delta; the loader checks its ancestry."""
+    match = MARKER.search(body or "")
+    if not match:
+        return None
+    try:
+        decoder = zlib.decompressobj()
+        raw = decoder.decompress(base64.b64decode(match[2], validate=True), 1_000_000)
+        if not decoder.eof:
+            raise ValueError("history exceeds limit")
+        history = json.loads(raw)
+        if not isinstance(history["sha"], str) or not isinstance(history["resolved_threads"], list):
+            raise ValueError("invalid history")
+        if match[1] == "2" and history["parent"] is not None and (
+                type(history["parent"]) is not int or history["parent"] <= 0):
+            raise ValueError("invalid parent review")
+        for key in ("removed", "visible_ids"):
+            values = history.get(key, [])
+            if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+                raise ValueError("invalid finding references")
+        for finding in history["findings"]:
+            if (finding["severity"] not in RANK or finding["status"] not in {"OPEN", "RESOLVED"}
+                    or type(finding["line"]) is not int or not isinstance(finding["id"], str) or not finding["id"]):
+                raise ValueError("invalid finding")
+            for key in ("path", "body"):
+                if not isinstance(finding[key], str):
+                    raise ValueError("invalid finding")
+        return int(match[1]), history
+    except (ValueError, KeyError, TypeError, zlib.error) as error:
+        raise ValueError("Cannot read previous Diffhound finding state; refusing to forget it") from error
 
 
 def load_history(reviews, login):
-    for review in sorted(reviews, key=lambda r: r.get("submitted_at") or "", reverse=True):
-        if review.get("user") != login or review.get("state") not in SUBMITTED:
-            continue
-        match = MARKER.search(review.get("body") or "")
-        if not match:
-            continue
-        try:
-            decoder = zlib.decompressobj()
-            raw = decoder.decompress(base64.b64decode(match[1], validate=True), 1_000_000)
-            if not decoder.eof:
-                raise ValueError("history exceeds limit")
-            history = json.loads(raw)
-            for finding in history["findings"]:
-                if (finding["severity"] not in RANK or finding["status"] not in {"OPEN", "RESOLVED"}
-                        or not isinstance(finding["line"], int) or not finding["id"]):
-                    raise ValueError("invalid finding")
-                for key in ("path", "body"):
-                    if not isinstance(finding[key], str):
-                        raise ValueError("invalid finding")
-            return history
-        except (ValueError, KeyError, TypeError, zlib.error) as error:
-            raise ValueError("Cannot read previous Diffhound finding state; refusing to forget it") from error
-    return {"findings": [], "resolved_threads": []}
+    """Rebuild the latest state from submitted reviews, following explicit parents."""
+    trusted = [r for r in reviews if r.get("user") == login and r.get("state") in SUBMITTED]
+    marked = [r for r in trusted if MARKER.search(r.get("body") or "")]
+    if not marked:
+        return {"findings": [], "resolved_threads": [], "review_id": None, "parent_findings": []}
+    latest = max(marked, key=lambda r: (r.get("submitted_at") or "", r.get("id") or 0))
+    indexed = {r["id"]: r for r in trusted if r.get("id") is not None}
+    chain, seen, current = [], set(), latest
+    while True:
+        decoded = decode_history(current.get("body"))
+        if decoded is None or current.get("id") in seen:
+            raise ValueError("Missing or cyclic Diffhound history; refusing to forget findings")
+        seen.add(current.get("id"))
+        version, payload = decoded
+        chain.append(payload)
+        parent = payload.get("parent") if version == 2 else None
+        if parent is None:
+            break
+        if parent not in indexed:
+            raise ValueError("Missing parent Diffhound review; refusing to forget findings")
+        current = indexed[parent]
+    findings, parent_findings = {}, []
+    for payload in reversed(chain):
+        if payload is chain[0]:
+            parent_findings = list(findings.values())
+        for key in payload.get("removed", []):
+            findings.pop(key, None)
+        findings.update((f["id"], f) for f in payload["findings"])
+    return dict(chain[0], findings=list(findings.values()), review_id=latest.get("id"),
+                parent_findings=parent_findings)
+
+
+def delta_marker(plan, refresh=False):
+    """Keep old concerns in their original reviews; record only changed records."""
+    history = plan.get("history", {})
+    parent = history.get("parent") if refresh else history.get("review_id")
+    baseline = history.get("parent_findings", []) if refresh else history.get("findings", [])
+    previous = {f["id"]: f for f in baseline} if parent is not None else {}
+    def stable(finding):
+        return {k: v for k, v in finding.items() if k != "change"}
+    changed = [f for f in plan["findings"] if stable(f) != stable(previous.get(f["id"], {}))]
+    removed = sorted(previous.keys() - {f["id"] for f in plan["findings"]})
+    encoded = encode_history({"sha": plan["sha"], "parent": parent, "findings": changed,
+                           "removed": removed, "visible_ids": [f["id"] for f in visible_findings(plan, refresh)],
+                           "resolved_threads": plan["resolved_threads"]})
+    # Old readers would silently skip v2 and reuse stale v1 state. Make their
+    # existing corruption guard stop publication instead of forgetting findings.
+    return encoded + "\n" + LEGACY_READER_GUARD
 
 
 def reconcile(reviews, comments, threads, login, sha, lines):
@@ -116,7 +178,7 @@ def reconcile(reviews, comments, threads, login, sha, lines):
     return {"sha": sha, "findings": list(findings.values()),
             "resolved_threads": sorted(resolved) if threads is not None else history.get("resolved_threads", []),
             "comments": output, "duplicates": len(repeats), "repeats": repeats, "before": before,
-            "threads_known": threads is not None}
+            "threads_known": threads is not None, "history": history}
 
 
 def semantic_prior(plan, login):
@@ -159,6 +221,7 @@ def finalize(plan, lines):
     known = {f["id"] for f in committed}
     committed.extend(dict(f, status="OPEN", change="NEW") for key, f in selected.items() if key not in known)
     plan["findings"] = committed
+    plan["selected_ids"] = sorted(selected)
     return plan
 
 
@@ -170,9 +233,10 @@ def finding_line(finding):
 def inline_fallback(review):
     """Append only inline concerns missing from the complete visible history."""
     body = review["body"]
-    history = load_history([{"user": "local", "state": "COMMENTED", "body": body}], "local")
-    visible = {identity(f["path"], f["body"]) for f in history["findings"]
-               if f["status"] == "OPEN" and finding_line(f) in body}
+    decode_history(body)  # Refuse corrupt local state without needing prior API reads.
+    visible = set()
+    for match in re.finditer(r"^- \*\*(BLOCKING|SHOULD-FIX|NIT)\*\* `(.+?):(\d+)` — (.*)$", body, re.M):
+        visible.add(identity(match[2], match[4]))
     missing = [c for c in review.get("comments", []) if identity(c["path"], c["body"]) not in visible]
     if not missing:
         return ""
@@ -182,15 +246,43 @@ def inline_fallback(review):
     return "\n".join(lines) + "\n"
 
 
-def summary(plan):
-    """Persistent visible inventory includes findings posted only in the body."""
+def visible_findings(plan, refresh=False):
+    """Keep this round's full concerns visible, including after an in-place edit."""
+    history = plan.get("history", {})
+    prior_ids = {f["id"] for f in history.get("findings", [])}
+    retained = set(history.get("visible_ids", prior_ids)) if refresh else set()
+    return [f for f in plan["findings"] if f["status"] == "OPEN" and (
+        f["id"] not in prior_ids or f["id"] in retained or f["id"] in plan.get("selected_ids", [])
+        or f["change"] in {"NEW", "REOPENED", "ESCALATED"})]
+
+
+def summary(plan, refresh=False):
+    """Show this round in full and link to earlier rounds instead of copying them."""
     opened = [f for f in plan["findings"] if f["status"] == "OPEN"]
     fixed = len(plan["findings"]) - len(opened)
     lines = [f"\n### Finding history\n\n{len(opened)} open · {fixed} resolved in GitHub threads.",
              "Absence from an incremental review does not mark a finding fixed."]
-    for finding in sorted(opened, key=lambda f: -RANK[f["severity"]]):
+    history = plan.get("history", {})
+    parent = history.get("parent") if refresh else history.get("review_id")
+    visible = visible_findings(plan, refresh)
+    if parent is not None:
+        lines.append(f"[Earlier findings and history](#pullrequestreview-{parent}). "
+                     "Unchanged concerns remain recorded there; they are not marked fixed.")
+    for finding in sorted(visible, key=lambda f: -RANK[f["severity"]]):
         lines.append(finding_line(finding))
-    return "\n".join(lines) + "\n\n" + marker(plan) + "\n"
+    return "\n".join(lines) + "\n\n" + delta_marker(plan, refresh) + "\n"
+
+
+def refresh_summary(plan, body, review_id):
+    """Rebase an in-place edit on its parent, never on the review being replaced."""
+    if plan.get("history", {}).get("review_id") != review_id:
+        raise ValueError("Cannot refresh a review that is not the latest history record")
+    section = summary(plan)
+    if body.count(section) != 1:
+        raise ValueError("Cannot identify the complete history section for refresh")
+    result = body.replace(section, summary(plan, refresh=True), 1)
+    require_summary_fits(result, plan["sha"])
+    return result
 
 
 def complete_summary(plan, generated):
@@ -226,6 +318,10 @@ def main():
         print(json.dumps(semantic_prior(json.loads(Path(plan_file).read_text()), login)))
     elif command == "inline-fallback":
         sys.stdout.write(inline_fallback(json.loads(Path(args[0]).read_text())))
+    elif command == "refresh":
+        plan_file, body_file, review_id = args
+        body = refresh_summary(json.loads(Path(plan_file).read_text()), Path(body_file).read_text(), int(review_id))
+        Path(body_file).write_text(body)
     elif command == "candidates":
         for number, line in enumerate(Path(args[0]).read_text().split("\n"), 1):
             finding = parse(line)
