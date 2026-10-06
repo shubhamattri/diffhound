@@ -66,6 +66,17 @@ brew install coreutils gawk jq gh
 sudo apt-get install jq gh
 ```
 
+Review generation allows up to 128,000 output tokens for Opus/Sonnet and 64,000
+for chunk merging with Haiku. Review and formatting calls have 900-second
+timeouts (merge: 600 seconds). Large full reviews can exceed 25 minutes; callers
+should allow 60 minutes for the complete job. These ceilings do not force longer
+answers. The final body remains limited to 150,000 UTF-8 bytes.
+
+The voice pass must finish with `end_turn` and complete comment/summary sections,
+a scorecard, verdict, and checklist. Both attempts are validated; incomplete
+output fails without publication. Voice prompts, outputs, stop reasons, and errors
+are archived with each run for diagnosis.
+
 ## Usage
 
 ```bash

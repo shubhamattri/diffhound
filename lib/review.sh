@@ -46,6 +46,7 @@ source "${LIB_DIR}/cost.sh"           # for _cost_record / _cost_summary
 source "${LIB_DIR}/design.sh"         # for run_design_check (advisory UX review of UI PRs)
 
 source "${LIB_DIR}/api.sh"
+source "${LIB_DIR}/voice.sh"
 
 # A single-call reply cut off at max_tokens still returned text, so it never hit
 # the failure retry; retry it once at the next lower effort (the chunk-path rule).
@@ -55,7 +56,7 @@ _mono_retry_cutoff() {
   local _eff _tmp; _eff=$(_lower_effort high); _tmp=$(mktemp -t "mono-retry.XXXXXX")
   echo "  ⚠ review reply cut off at max_tokens; retrying once at effort ${_eff}" >&2
   if DIFFHOUND_STAGE="primary-review-retry" DIFFHOUND_STOP_REASON_FILE="$3" \
-       _call_api "claude-opus-5" 32000 "$4" "$_eff" < "$1" > "$_tmp" 2>>"${2}.stderr"; then
+       _call_api "claude-opus-5" 128000 "$4" "$_eff" < "$1" > "$_tmp" 2>>"${2}.stderr"; then
     mv "$_tmp" "$2"
   else
     # Failed retry: keep the partial reply and its max_tokens stop, never a blank stop.
@@ -1012,6 +1013,7 @@ cleanup() {
   _spinner_pid=""
   dh_abandon_pending
   [ -z "${_DH_STATE_DIR:-}" ] || rm -rf "$_DH_STATE_DIR"
+  [ -z "${REVIEW_STRUCTURED:-}" ] || rm -f "$REVIEW_STRUCTURED".attempt-*
   rm -f "${DIFF_FILE:-}" "${PROMPT_FILE:-}" "${CLAUDE_OUT:-}" "${CODEX_OUT:-}" "${GEMINI_OUT:-}" "${DIFFHOUND_USAGE_LOG:-}" \
         "${PEER_PROMPT_FILE:-}" "${_GEMINI_PROMPT_FILE:-}" "${SYNTH_PROMPT:-}" "${REVIEW_STRUCTURED:-}" "${REVIEW_SUMMARY:-}" \
         "${REVIEW_JSON:-}" "${REVIEW_STRUCTURED:-}.comments" "${REVIEW_STRUCTURED:-}.new_comments" \
@@ -1681,7 +1683,7 @@ _review_chunks_parallel() {
       # stop_reason per chunk: a reply cut off at max_tokens is incomplete even
       # when it has some text. stderr stays out of the review text.
       DIFFHOUND_STOP_REASON_FILE="${chunk_dir}/chunk-${i}.stop" \
-        _call_api "claude-opus-5" 32000 600 high < "$chunk_prompt" > "$chunk_out" 2>"${chunk_dir}/chunk-${i}.err" || \
+        _call_api "claude-opus-5" 128000 900 high < "$chunk_prompt" > "$chunk_out" 2>"${chunk_dir}/chunk-${i}.err" || \
         echo "CHUNK_${i}_FAILED" > "$chunk_out"
     ) &
     pids+=($!)
@@ -1773,12 +1775,12 @@ Checklist: [verification steps]
   _merge_stop=$(mktemp -t "chunk-merge-stop.XXXXXX")
   DIFFHOUND_STAGE="chunk-merge"
   merge_result=$(printf '%s' "$merge_prompt" \
-    | DIFFHOUND_STOP_REASON_FILE="$_merge_stop" _call_api "claude-haiku-4-5-20251001" 8192 120 || true)
+    | DIFFHOUND_STOP_REASON_FILE="$_merge_stop" _call_api "claude-haiku-4-5-20251001" 64000 600 || true)
   _select_merge_output "$merge_result" "$(cat "$_merge_stop" 2>/dev/null)" "$chunk_dir" "${idx[@]}" > "$output_file"
   rm -f "$_merge_stop"
 }
 
-# Merge all chunk outputs. The merge's output is capped (8192 tokens) and a big
+# Merge all chunk outputs. The merge's output is capped (64000 tokens) and a big
 # PR's findings do not fit: #7642 hit the cap at 4096 and again at 8192. So the
 # chunks are split into groups whose raw findings fit the cap, merged in
 # parallel, and concatenated. Nothing is truncated: a group whose merge still
@@ -2229,7 +2231,7 @@ export _FRAMEWORK_FACTS _ARCH_CHECKLIST
       [ "$(cat "${CHUNK_DIR}/chunk-${_gi}.stop" 2>/dev/null)" = "max_tokens" ] && _geffort=$(_lower_effort high)
       ( DIFFHOUND_STAGE="primary-review-retry"
         DIFFHOUND_STOP_REASON_FILE="${CHUNK_DIR}/chunk-${_gi}.stop" \
-          _call_api "claude-opus-5" 32000 600 "$_geffort" < "${CHUNK_DIR}/chunk-${_gi}.prompt" > "${CHUNK_DIR}/chunk-${_gi}.out" 2>>"${CHUNK_DIR}/chunk-${_gi}.err" \
+          _call_api "claude-opus-5" 128000 900 "$_geffort" < "${CHUNK_DIR}/chunk-${_gi}.prompt" > "${CHUNK_DIR}/chunk-${_gi}.out" 2>>"${CHUNK_DIR}/chunk-${_gi}.err" \
           || echo "CHUNK_${_gi}_FAILED" > "${CHUNK_DIR}/chunk-${_gi}.out" ) &
       _retry_pids+=($!)
     done
@@ -2971,20 +2973,14 @@ cat "$_CONTEXT_FILE" >> "$PROMPT_FILE"
 rm -f "$_CONTEXT_FILE"
 
 # Non-agentic pass: no tools needed, all context is inline
-# Scale timeout with prompt size: base 180s + 1s per 300 chars, capped at 900s
-# v0.7.32: cap was 480s. Opus 5 thinks before answering, so the same prompt takes
-# longer wall-clock than Opus 4.6 did. A cap that fires mid-generation costs a
-# full retry, which is far more expensive than waiting.
-# Non-agentic is faster than agentic but large prompts (50KB+) still need 3-5 min
+# Allow thinking plus the larger output budget to finish even for a small diff.
 _PROMPT_BYTES=$(wc -c < "$PROMPT_FILE" 2>/dev/null || echo "0")
-_CLAUDE_TIMEOUT=$(( 180 + _PROMPT_BYTES / 300 ))
-[ "$_CLAUDE_TIMEOUT" -gt 900 ] && _CLAUDE_TIMEOUT=900
-[ "$_CLAUDE_TIMEOUT" -lt 180 ] && _CLAUDE_TIMEOUT=180
+_CLAUDE_TIMEOUT=900
 echo "  [debug] prompt=${_PROMPT_BYTES}B, timeout=${_CLAUDE_TIMEOUT}s" >&2
 DIFFHOUND_STAGE="primary-review"
 _MONO_STOP=$(mktemp -t "pr-${PR_NUMBER}-mono-stop.XXXXXX")
 export DIFFHOUND_STOP_REASON_FILE="$_MONO_STOP"
-if ! _call_api "claude-opus-5" 32000 "$_CLAUDE_TIMEOUT" high < "$PROMPT_FILE" > "$CLAUDE_OUT" 2>"${CLAUDE_OUT}.stderr"; then
+if ! _call_api "claude-opus-5" 128000 "$_CLAUDE_TIMEOUT" high < "$PROMPT_FILE" > "$CLAUDE_OUT" 2>"${CLAUDE_OUT}.stderr"; then
   echo "  [debug] claude failed — out=$(wc -c < "$CLAUDE_OUT" 2>/dev/null)B stderr=$(cat "${CLAUDE_OUT}.stderr" 2>/dev/null | head -3)" >&2
   # Check if partial output is usable (timeout may kill mid-write but JSON is complete)
   _partial_json=$(_extract_json "$CLAUDE_OUT" 2>/dev/null || true)
@@ -2993,7 +2989,7 @@ if ! _call_api "claude-opus-5" 32000 "$_CLAUDE_TIMEOUT" high < "$PROMPT_FILE" > 
     spinner_fail "Analysis timed out but output is usable — continuing"
   else
     spinner_fail "Primary pass failed — retrying"
-    if ! _call_api "claude-opus-5" 32000 480 medium < "$PROMPT_FILE" > "$CLAUDE_OUT" 2>&1; then
+    if ! _call_api "claude-opus-5" 128000 900 medium < "$PROMPT_FILE" > "$CLAUDE_OUT" 2>&1; then
       _partial_json=$(_extract_json "$CLAUDE_OUT" 2>/dev/null || true)
       if [ -z "$_partial_json" ] || ! echo "$_partial_json" | jq -e '.findings' >/dev/null 2>&1; then
         spinner_fail "Analysis failed"
@@ -3413,7 +3409,7 @@ PEER_EOF
     cat "$PEER_PROMPT_FILE"
   } > "$_CLAUDE_PEER_PROMPT"
   DIFFHOUND_STAGE="peer-review"
-  ( _call_api "claude-sonnet-5" 8192 240 medium < "$_CLAUDE_PEER_PROMPT" > "$CODEX_OUT" 2>&1; \
+  ( _call_api "claude-sonnet-5" 128000 900 medium < "$_CLAUDE_PEER_PROMPT" > "$CODEX_OUT" 2>&1; \
     [ -s "$CODEX_OUT" ] || echo "CODEX_UNAVAILABLE" > "$CODEX_OUT" ) &
   CODEX_PID=$!
 
@@ -3425,7 +3421,7 @@ PEER_EOF
   # 14 KB (under the observed cliff with buffer) with a brief note appended
   # so Gemini knows context was clipped and won't hallucinate "I see only
   # part of the diff" as a finding.
-  _PEER_TIMEOUT=240
+  _PEER_TIMEOUT=1820
   _GEMINI_PROMPT_FILE=$(mktemp -t "pr-${PR_NUMBER}-gemini-prompt.XXXXXX")
   if [ "$(wc -c < "$PEER_PROMPT_FILE" 2>/dev/null || echo 0)" -gt 14000 ]; then
     head -c 14000 "$PEER_PROMPT_FILE" > "$_GEMINI_PROMPT_FILE"
@@ -3452,7 +3448,7 @@ PEER_EOF
   # EMPTY, and the gemini child is ORPHANED and keeps burning CPU on a VM shared
   # with Temporal, Kafka and four runners. Self-terminating exits 124 cleanly,
   # writes the marker, and reaps the child. The watchdog stays as a backstop.
-  _GEMINI_TIMEOUT=$(( _PEER_TIMEOUT - 20 ))
+  _GEMINI_TIMEOUT=900
   _gemini_once() {
     timeout "$_GEMINI_TIMEOUT" gemini -o text \
       < "$_GEMINI_PROMPT_FILE" > "$GEMINI_OUT" 2>"$_GEMINI_ERR"
@@ -3476,15 +3472,7 @@ PEER_EOF
   GEMINI_PID=$!
   echo "1" > "${GEMINI_OUT}.calls"
 
-  # Wait with 240s timeout — v0.7.7 bumped from 90s. Gemini-CLI does a chunk
-  # of pre-flight setup on first call (auth refresh, model handshake) that
-  # can take 30-60s before the real generation starts. Codex is faster (<60s)
-  # but still benefits from the buffer when nova-dev-shubham is under load.
-  # The watchdog kills both peers if either hangs past the deadline.
-  #
-  # v0.7.33 measurement, 4 consecutive real runs on this VM: 89s, 113s, 134s,
-  # 138s. 240s is ~1.7x the worst observed.
-  #
+  # Allow two bounded model attempts to finish before the watchdog backstop.
   # v0.7.34: this watchdog is now a BACKSTOP for the Sonnet peer only — gemini
   # self-terminates at _GEMINI_TIMEOUT above. That matters because `kill` here
   # signals the SUBSHELL, so the `|| marker` fallback never runs, the output file
@@ -3632,7 +3620,7 @@ Evidence: \(.value.evidence // "none")
       # Cross-verification pass. v0.7.29: single backend, no duplicate curl.
       _verify_resp=""
       DIFFHOUND_STAGE="cross-verify"
-      _verify_resp=$(_call_api "claude-sonnet-5" 8192 180 medium < "$VERIFY_PROMPT" 2>/dev/null || true)
+      _verify_resp=$(_call_api "claude-sonnet-5" 128000 900 medium < "$VERIFY_PROMPT" 2>/dev/null || true)
 
       # Parse verification results and filter findings
       if [ -n "$_verify_resp" ]; then
@@ -4435,32 +4423,23 @@ REREVIEW_BLOCK
 # whose result (_KEY_HAS_CREDITS) was never read by anything. Both are gone.
 _SYS_TMP=$(mktemp -t "pr-${PR_NUMBER}-sys.XXXXXX")
 printf '%s' "$_STATIC_SYSTEM" > "$_SYS_TMP"
-DIFFHOUND_STAGE="voice-rewrite"
-_call_api_system "claude-sonnet-5" 32000 300 "$_SYS_TMP" medium < "$_USER_TMP" > "$REVIEW_STRUCTURED" 2>/dev/null || true
-# The voice pass writes the human comments and the scorecard. One retry for a
-# blip; if the model still gives nothing, post nothing: raw primary-pass output
-# is not a review (monorepo #7642, 29 Sep: a 197k-char dump during a 503).
-# Also retry when the pass answered but wrote no COMMENT: lines although the
-# primary pass had findings (it sometimes returns free text).
-_dh_primary_n=$(grep -c '^FINDING:' "$CLAUDE_OUT" 2>/dev/null || true)
-[ "${_dh_primary_n:-0}" -gt 0 ] || _dh_primary_n=$({ _extract_json "$CLAUDE_OUT" 2>/dev/null || cat "$CLAUDE_OUT"; } | jq '.findings | length' 2>/dev/null || echo 0)
-if [ -s "$REVIEW_STRUCTURED" ] && [ "${_dh_primary_n:-0}" -gt 0 ] 2>/dev/null; then
-  _dh_probe=$(mktemp -t "voice-probe.XXXXXX")
-  parse_comments "$REVIEW_STRUCTURED" "$_dh_probe" 2>/dev/null || true
-  grep -q '^COMMENT:' "$_dh_probe" 2>/dev/null || : > "$REVIEW_STRUCTURED"
-  rm -f "$_dh_probe" "${REVIEW_STRUCTURED}.json.probe" 2>/dev/null
-fi
-if [ ! -s "$REVIEW_STRUCTURED" ]; then
-  echo "  Voice rewrite returned nothing usable; retrying once" >&2
-  sleep "${DIFFHOUND_VOICE_RETRY_SECS:-20}"
-  _call_api_system "claude-sonnet-5" 32000 300 "$_SYS_TMP" medium < "$_USER_TMP" > "$REVIEW_STRUCTURED" 2>/dev/null || true
-fi
-rm -f "$_SYS_TMP"
-if [ ! -s "$REVIEW_STRUCTURED" ]; then
-  spinner_fail "Voice rewrite failed twice; not posting"
-  DIFFHOUND_FAIL_REASON="The model did not answer the wording step, so nothing was posted. The next push or the sweep retries."
+_voice_expected=$(dh_voice_findings_expected "$CLAUDE_OUT" "${_VALIDATOR_FINDING_COUNT:-}" "${_MERGED_FINDINGS_FILE:-}")
+if ! dh_write_voice "$_SYS_TMP" "$_USER_TMP" "$REVIEW_STRUCTURED" "$_voice_expected"; then
+  spinner_fail "Voice rewrite incomplete; not posting"
+  DIFFHOUND_FAIL_REASON="The wording step did not produce a complete review, scorecard and verdict. Nothing was posted."
+  _voice_logs="$(_run_log_dir)"
+  mkdir -p "$_voice_logs"
+  cp "$REVIEW_STRUCTURED".attempt-* "$_voice_logs/"
   exit 1
 fi
+# Archive formatting evidence before cleanup, including the API stop reason.
+_voice_logs="$(_run_log_dir)"
+mkdir -p "$_voice_logs"
+cp "$_USER_TMP" "$_voice_logs/voice-prompt.txt"
+cp "$_SYS_TMP" "$_voice_logs/voice-system.txt"
+cp "$REVIEW_STRUCTURED" "$_voice_logs/voice-output.txt"
+cp "$REVIEW_STRUCTURED".attempt-* "$_voice_logs/"
+rm -f "$_SYS_TMP"
 
 rm -f "$_USER_TMP"
 
@@ -4475,7 +4454,7 @@ rm -f "${SYNTH_FINDINGS:-}" "${VOICE_EXAMPLES_FILE:-}" "${_MERGED_FINDINGS_FILE:
 # PARSE OUTPUT
 # ============================================================
 parse_comments "$REVIEW_STRUCTURED" "${REVIEW_STRUCTURED}.comments"
-parse_summary "$REVIEW_STRUCTURED" "$REVIEW_SUMMARY"
+parse_summary "$REVIEW_STRUCTURED" "$REVIEW_SUMMARY" || exit 1
 
 # Fallback: if voice rewrite produced 0 comments but Claude's JSON has findings,
 # use Claude's output directly. This catches cases where Haiku outputs free text

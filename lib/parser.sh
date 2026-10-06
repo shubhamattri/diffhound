@@ -504,6 +504,15 @@ parse_summary() {
   local structured_file="$1"
   local summary_file="$2"
 
+  # Incomplete voice output must never become the review body verbatim.
+  if grep -qE '^### (INLINE_COMMENTS|SUMMARY)_(START|END)' "$structured_file"; then
+    if ! grep -qx '### SUMMARY_START' "$structured_file" || ! grep -qx '### SUMMARY_END' "$structured_file"; then
+      : > "$summary_file"
+      echo "Incomplete voice summary; refusing raw-output fallback" >&2
+      return 1
+    fi
+  fi
+
   # Try JSON parsing first
   local json_content
   json_content=$(_extract_json "$structured_file")

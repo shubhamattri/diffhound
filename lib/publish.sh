@@ -396,7 +396,7 @@ dh_semantic_dedup() {
 # section markers and bodies too long for anyone to read.  Args: summary_file
 dh_summary_leak_reason() {
   local f="$1" reason
-  if grep -qE '^### (CHUNK_FILES|FINDINGS_START|FINDINGS_END|THREAD_STATUS|CROSS_FILE_NOTES|REQUIREMENT_COVERAGE)|^(FINDING|WHAT|EVIDENCE|IMPACT): ' "$f" 2>/dev/null; then
+  if grep -qE '^### (INLINE_COMMENTS_START|INLINE_COMMENTS_END|SUMMARY_START|SUMMARY_END|CHUNK_FILES|FINDINGS_START|FINDINGS_END|THREAD_STATUS|CROSS_FILE_NOTES|REQUIREMENT_COVERAGE)|^(COMMENT|REPLY|FINDING|WHAT|EVIDENCE|IMPACT): ' "$f" 2>/dev/null; then
     echo "summary contains the reviewers' internal notes, not a review"; return 0
   fi
   if ! reason=$(python3 "$_DH_PUBLISH_DIR/review_body.py" check "$f" 2>&1); then
