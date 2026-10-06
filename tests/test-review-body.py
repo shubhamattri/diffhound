@@ -67,9 +67,9 @@ test "$_DH_POSTED" = true
             self.assertEqual((tmp / "calls").read_text(), "POST\n")
             self.assertEqual(json.loads((tmp / "sent.json").read_text())["body"], marked)
 
-    def test_builder_refuses_bodies_between_old_conflicting_limits(self):
+    def test_builder_refuses_bodies_over_default_limit(self):
         plan = state.reconcile([], [], [], "me", "b" * 40,
-                               ["COMMENT: example.py:1:SHOULD-FIX — " + "Known concern with supporting context. " * 850])
+                               ["COMMENT: example.py:1:SHOULD-FIX — " + "Known concern with supporting context. " * 5000])
         with self.assertRaisesRegex(ValueError, "byte"):
             state.complete_summary(plan, "Generated review evidence for this change. " * 20)
 
@@ -89,8 +89,22 @@ test "$_DH_POSTED" = true
             with self.assertRaises(ValueError):
                 budget.require_fits(wrapped)
 
+    def test_default_budget_accepts_150000_utf8_bytes(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(budget.max_bytes(), 150000)
+            budget.require_fits("x" * 74529)
+            budget.require_fits("界" * 50000)
+            with self.assertRaisesRegex(ValueError, "150003 bytes"):
+                budget.require_fits("界" * 50001)
+
+    def test_configured_budget_accepts_150000_and_refuses_next_byte(self):
+        with patch.dict(os.environ, {"DIFFHOUND_MAX_BODY_CHARS": "150000"}):
+            budget.require_fits("x" * 150000)
+            with self.assertRaisesRegex(ValueError, "150001 bytes"):
+                budget.require_fits("x" * 150001)
+
     def test_invalid_configuration_fails_closed(self):
-        for value in ["", "0", "-1", "oops", "60001", "3.5"]:
+        for value in ["", "0", "-1", "oops", "150001", "3.5"]:
             with self.subTest(value=value), patch.dict(os.environ, {"DIFFHOUND_MAX_BODY_CHARS": value}):
                 with self.assertRaises(ValueError):
                     budget.require_fits("hello")
