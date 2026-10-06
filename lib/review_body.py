@@ -5,8 +5,8 @@ from pathlib import Path
 import re
 import sys
 
-DEFAULT_MAX_BYTES = 30000
-MAX_CONFIGURED_BYTES = 60000
+DEFAULT_MAX_BYTES = 150000
+MAX_CONFIGURED_BYTES = 150000
 SUMMARY_MARKER = "<!-- diffhound-summary v1 -->"
 REVIEW_MARKER = re.compile(r"<!-- diffhound-review v1 sha=[0-9a-f]+ -->")
 

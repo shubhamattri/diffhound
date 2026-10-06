@@ -150,7 +150,7 @@ class Lifecycle(unittest.TestCase):
                 state.complete_summary(plan, generated)
 
     def test_oversized_history_is_not_silently_truncated(self):
-        plan = self.run_round([self.finding("concern " * 10000)])
+        plan = self.run_round([self.finding("concern " * 20000)])
         with self.assertRaises(ValueError):
             state.complete_summary(plan, "Review evidence " * 30)
 

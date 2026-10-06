@@ -66,6 +66,17 @@ brew install coreutils gawk jq gh
 sudo apt-get install jq gh
 ```
 
+Review generation allows up to 128,000 output tokens for Opus/Sonnet and 64,000
+for chunk merging with Haiku. Review and formatting calls have 900-second
+timeouts (merge: 600 seconds). Large full reviews can exceed 25 minutes; callers
+should allow 60 minutes for the complete job. These ceilings do not force longer
+answers. The final body remains limited to 150,000 UTF-8 bytes.
+
+The voice pass must finish with `end_turn` and complete comment/summary sections,
+a scorecard, verdict, and checklist. Both attempts are validated; incomplete
+output fails without publication. Voice prompts, outputs, stop reasons, and errors
+are archived with each run for diagnosis.
+
 ## Usage
 
 ```bash
@@ -111,7 +122,7 @@ export REVIEW_LOGIN="your-github-username"
 | `DIFFHOUND_MAX_INLINE` | `8` | Initial-review nonblocking inline limit; remaining findings go in the review body. |
 | `DIFFHOUND_MAX_INLINE_REREVIEW` | `3` | Subsequent-review nonblocking inline limit. Blockers remain uncapped. |
 | `DIFFHOUND_MAX_REPLIES` | `3` | Thread replies per review; overflow is included in the body. |
-| `DIFFHOUND_MAX_BODY_CHARS` | `30000` | Legacy name for the final UTF-8 **byte** budget (1–60000), including hidden state and markers. Shared by assembly, review publishing, fallback bodies, and sticky summaries. Earlier findings stay in linked reviews; a single oversized round still fails without truncation. |
+| `DIFFHOUND_MAX_BODY_CHARS` | `150000` | Legacy name for the final UTF-8 **byte** budget (1–150000), including hidden state and markers. Shared by assembly, review publishing, fallback bodies, and sticky summaries. Earlier findings stay in linked reviews; a single oversized round still fails without truncation. |
 | `DIFFHOUND_DEDUP_MODEL` | `claude-haiku-4-5-20251001` | Judge for reworded repeats of known open, nonblocking findings. |
 | `DIFFHOUND_COMMAND_MODEL` | `claude-sonnet-5` | Model for explicit PR commands. Each command makes one generation call. |
 | `DIFFHOUND_LOCK_DIR` | `~/.cache/diffhound/locks` | Shared host directory for per-PR review locks. All processes on a host must use the same directory. |
