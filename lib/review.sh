@@ -1009,6 +1009,11 @@ _archive_chunk_outputs() {
 
 cleanup() {
   local exit_code=$?
+  if [ -n "${_WATCHDOG_PID:-}" ]; then
+    kill "$_WATCHDOG_PID" 2>/dev/null || true
+    wait "$_WATCHDOG_PID" 2>/dev/null || true
+    _WATCHDOG_PID=""
+  fi
   [ -n "${_spinner_pid:-}" ] && kill "$_spinner_pid" 2>/dev/null && wait "$_spinner_pid" 2>/dev/null || true
   _spinner_pid=""
   dh_abandon_pending
@@ -3480,7 +3485,9 @@ PEER_EOF
   # empty branch of _validate_peer_output warns precisely because this path
   # exists. If you ever add another peer here, give it its own `timeout` too
   # rather than trusting this kill.
-  ( sleep "$_PEER_TIMEOUT" && kill $CODEX_PID $GEMINI_PID 2>/dev/null ) &
+  # Sleep inside the watchdog process: killing a shell around `sleep` orphaned
+  # that child with the SSH output pipes and PR lock still open for 30 minutes.
+  python3 "${LIB_DIR}/peer_watchdog.py" "$_PEER_TIMEOUT" "$CODEX_PID" "$GEMINI_PID" &
   _WATCHDOG_PID=$!
 
   wait $CODEX_PID 2>/dev/null || true
@@ -3489,6 +3496,7 @@ PEER_EOF
   # Kill the watchdog if peers finished before timeout
   kill $_WATCHDOG_PID 2>/dev/null || true
   wait $_WATCHDOG_PID 2>/dev/null || true
+  _WATCHDOG_PID=""
 
   # Surface WHY Gemini failed, if it did. Without this the only signal is a
   # 19-byte marker, which is how the markdown-fence bug stayed hidden.
