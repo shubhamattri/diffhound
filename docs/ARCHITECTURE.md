@@ -1,121 +1,93 @@
 # Architecture
 
-## Pipeline Overview
+Diffhound is a Bash/Python review pipeline with GitHub-backed finding history.
+The CLI, Docker Action, and shared-server workflow converge on the same review
+entry point. Explicit PR commands use a separate, smaller pipeline.
 
-```
-PR Number
-    │
-    ▼
-┌────────────────────────────────────────────────────────────────┐
-│  STEP 0: Metadata + Re-review Detection                       │
-│  ├── Fetch PR metadata (title, author, files, HEAD SHA)       │
-│  ├── Fetch existing review comments + reviews                  │
-│  ├── Detect re-review mode (previous comments from reviewer)   │
-│  └── Extract last-reviewed commit SHA for incremental diff     │
-└────────────────────────────────────────────────────────────────┘
-    │
-    ▼
-┌────────────────────────────────────────────────────────────────┐
-│  STEP 0.6: Diff Fetch                                          │
-│  ├── Full PR diff (always)                                     │
-│  ├── Incremental diff: LAST_SHA...HEAD_SHA (re-reviews only)   │
-│  └── Edge case: no new commits → skip entirely                 │
-└────────────────────────────────────────────────────────────────┘
-    │
-    ▼
-┌────────────────────────────────────────────────────────────────┐
-│  STEP 1: RAG Context Enrichment                                │
-│  └── Retrieves sibling files, git history, past comments       │
-└────────────────────────────────────────────────────────────────┘
-    │
-    ▼
-┌────────────────────────────────────────────────────────────────┐
-│  STEP 2: Build Review Prompt                                   │
-│  ├── 25 engineering principles (SOLID, security, perf, etc.)   │
-│  ├── Severity definitions + anchor table                       │
-│  ├── Re-review: thread context + incremental diff focus        │
-│  └── Output format: FINDING blocks + SCORECARD                 │
-└────────────────────────────────────────────────────────────────┘
-    │
-    ▼
-┌────────────────────────────────────────────────────────────────┐
-│  PASS 1: Claude Agentic Review                                 │
-│  ├── Uses Claude Code CLI with Read + Bash tools               │
-│  ├── Reads actual codebase (not just diff)                     │
-│  ├── Verifies findings before flagging                         │
-│  └── Output: FINDING blocks with file:line:severity            │
-└────────────────────────────────────────────────────────────────┘
-    │
-    ▼ (skipped with --fast)
-┌────────────────────────────────────────────────────────────────┐
-│  PASS 2: Peer Review (Codex + Gemini)                          │
-│  ├── Runs in parallel                                          │
-│  ├── Cross-checks Claude's findings                            │
-│  ├── Finds gaps Claude missed                                  │
-│  └── Output: additional FINDING blocks                         │
-└────────────────────────────────────────────────────────────────┘
-    │
-    ▼
-┌────────────────────────────────────────────────────────────────┐
-│  STEP 5: Voice RAG                                             │
-│  ├── Retrieves matching examples from voice JSONL              │
-│  ├── Category-based matching (security, data-bug, etc.)        │
-│  └── Falls back to canonical examples if no JSONL              │
-└────────────────────────────────────────────────────────────────┘
-    │
-    ▼
-┌────────────────────────────────────────────────────────────────┐
-│  PASS 3+4: Merge + Voice Rewrite (Haiku)                       │
-│  ├── Merges findings from all models (if multi-model)          │
-│  ├── Rewrites in reviewer's voice (from examples)              │
-│  ├── Outputs COMMENT:/REPLY: blocks + SUMMARY                  │
-│  └── Uses prompt caching for cost efficiency                   │
-└────────────────────────────────────────────────────────────────┘
-    │
-    ▼
-┌────────────────────────────────────────────────────────────────┐
-│  POST: GitHub API                                              │
-│  ├── Parse verdict (3-method fallback)                         │
-│  ├── Snap line numbers to valid diff lines                     │
-│  ├── Post review + inline comments (with fallback)             │
-│  ├── Post thread replies (re-review mode)                      │
-│  └── Index posted comments to voice JSONL                      │
-└────────────────────────────────────────────────────────────────┘
-```
+## Review lifecycle
 
-## Module Structure
+1. **Lock and identify.** `bin/diffhound` dispatches reviews to `lib/review.sh`.
+   `lib/run_locked.py` serializes reviews by GitHub host, repository, and PR on
+   one executor. The lock survives process replacement and is released when its
+   holders exit.
+2. **Capture repository state.** Fetch PR metadata, including base/head SHAs,
+   prior submitted reviews, and thread state. Materialize the head in a separate
+   worktree so context extraction can inspect the reviewed code. Set
+   `DIFFHOUND_REQUIRE_HEAD=1` to make materialization failure fatal.
+3. **Acquire the diff.** `lib/pr-diff.sh` normally uses GitHub's PR diff.
+   An explicit patch-size rejection selects a local three-dot diff from the
+   captured base/head commits. Missing commits are fetched and shallow ancestry
+   is completed. Other API errors remain failures; failed output is removed.
+4. **Prepare context.** `lib/rag.sh` retrieves bounded code, callers, types,
+   sibling patterns, history, and prior comments. `extract-context.py` prefers
+   Tree-sitter extraction and falls back to line windows. Static analysis and
+   repository guidance add evidence before generation.
+5. **Route and analyze.** The cleaned diff determines the route below. Opus
+   receives a prepared prompt through `lib/api.sh`; the primary API request
+   does not have repository tools.
+6. **Challenge findings.** Validators check repository evidence. Sonnet and
+   Gemini run peer passes in parallel, followed by finding verification where
+   applicable. Fast mode scopes peer context rather than disabling this stage.
+   The final review reports how many peer responses were usable.
+7. **Write and validate.** Sonnet rewrites findings using voice examples.
+   `lib/voice.sh` and `voice_output.py` require completed generation and valid
+   comment/summary sections. One further attempt is allowed after validation
+   failure; invalid output never becomes the published review body.
+8. **Reconcile and publish.** Finding history, inline/reply limits, body bytes,
+   and the current PR head are checked before submission. Overflow findings
+   enter the body. A successful review updates the persistent summary.
+9. **Archive and clean up.** Save available run artifacts and remove temporary
+   worktrees/files. The peer watchdog is cancelled and reaped on normal and
+   exit cleanup paths. An optional advisory design check runs after publication
+   only when the configured runtime budget allows it.
 
-```
-lib/
-├── review.sh      Main orchestration — runs the full pipeline
-├── spinner.sh     Terminal spinner (start/stop/fail)
-├── platform.sh    OS detection, dependency checks
-├── parser.sh      LLM output parsing, comment extraction, line-snapping
-└── github.sh      GitHub API posting, fallback logic, voice indexing
-```
+## Diff routing
 
-## Key Design Decisions
+Thresholds apply to the cleaned diff, after generated-file and configured
+exclusions. Deletion-only hunks remain in the active review path.
 
-### Oversized GitHub diffs
+| Tier | Size | Strategy |
+| --- | --- | --- |
+| Small | Up to 30 KiB | Single primary review prompt. |
+| Medium | Above 30 KiB, up to 80 KiB | Reduce unchanged context before the primary review. |
+| Large | Above 80 KiB, up to 200 KiB | File triage, parallel chunks, and findings merge. |
+| Huge | Above 200 KiB | File triage, parallel chunks, and findings merge. |
 
-When GitHub rejects a patch above its line limit, `lib/pr-diff.sh` builds the
-complete three-dot diff from the base and head SHAs captured in PR metadata.
-It fetches missing commits and complete ancestry for shallow clones. This also
-applies to design-only reviews. Missing history or unrelated API failures stop
-the fetch; error text and partial patches never become review input. Each Git
-fetch/diff command has a 300-second timeout. No diff content is truncated.
+Chunks receive shared PR context and file-specific evidence. Triage suggestions
+to skip a file are demoted to low priority. Model context remains bounded;
+Gemini's peer prompt is currently capped at 14 KB. Chunk stop reasons and
+coverage checks expose incomplete primary analysis.
 
-### Why agentic (not just diff)?
-The diff alone causes false positives. Claude reads the full file, checks git history, and greps sibling files before flagging anything. This eliminates ~40% of bad findings.
+Re-reviews use ancestry-checked incremental information where available. The
+large-diff route retains full-diff chunks for context and supplies the changed
+file list to focus feedback. `--force-full` removes that incremental baseline.
 
-### Why multi-model?
-Each model has different blind spots. Running Codex + Gemini in parallel catches things Claude misses (and vice versa). Consensus findings are high confidence.
+## Publication and history
 
-### Why voice rewrite?
-AI review comments sound robotic. The voice pass rewrites them to match the reviewer's actual writing style, making reviews indistinguishable from human-written ones.
+`review_state.py` stores finding transitions in submitted review bodies.
+History v2 records deltas linked to earlier submitted reviews, allowing fresh
+workers to reconstruct state without a separate database. Invalid history
+stops publication. Thread-status failure retains findings; edits near an old
+comment do not establish resolution. Exact matches are deterministic; semantic
+deduplication uses a model and keeps findings when uncertain.
 
-### Why incremental diff for re-reviews?
-Re-reviewing a 50-file PR when only 2 files changed is wasteful. The incremental diff focuses analysis on what's new, while still checking if previous comments were addressed.
+`review_body.py` owns the shared UTF-8 byte budget for review and summary
+envelopes. `publish.sh` and `lifecycle.sh` handle submission, recovery, overflow,
+and the persistent summary. A quiet rerun can refresh an earlier review.
+These are publication rules, not a guarantee of a particular notification count.
 
-### Why line-snapping?
-GitHub's review API rejects comments on lines not in the diff. The snap function finds the nearest valid diff line, preventing API errors without losing the finding.
+Locks coordinate processes sharing one lock directory. Independent hosts need
+external coordination. Individual model timeouts and watchdogs do not replace
+a deadline and process cleanup for the whole executor job.
+
+## Other entry points
+
+| Module | Responsibility |
+| --- | --- |
+| `commands.py`, `command-model.sh` | `/ask`, `/describe`, `/labels`, and `/changelog`; preview/apply and permission-checked event handling. |
+| `design.sh` | Advisory UX checks from UI diffs and supported GitHub-hosted screenshots; separate from the code-review verdict. |
+| `bin/diffhound-sweep` | Poll open PRs, consult GitHub review identity and local state, and invoke the normal review entry point. |
+| `cost.sh` | Record Anthropic response usage and estimate cost from the local rate table; Gemini is counted separately. |
+
+See the [README](../README.md) for current model defaults, budgets, setup, and
+operational limitations; [Sweep](SWEEP.md) covers scheduling and state.
