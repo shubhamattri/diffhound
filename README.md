@@ -1,174 +1,215 @@
-# diffhound
+# Diffhound
 
-AI-powered PR code review that actually finds bugs — not just style nits.
+**Self-hosted pull request review with repository context, peer cross-checks, and persistent finding history.**
 
-Multi-model pipeline: Claude reviews the diff and retrieved code context, Codex + Gemini cross-check findings, and a voice rewrite prepares one batched GitHub review. Uses the existing reviewer's GitHub account.
+Diffhound turns a pull request into a structured GitHub review: actionable findings, inline comments, a scorecard, and a verification checklist. It follows findings across new commits, checks proposed issues against repository evidence, and publishes through the GitHub account you configure.
 
-## What it does
+Run it from the CLI, Docker, GitHub Actions, or a shared review server. This README describes the current `main` branch; older tags may have different behavior.
 
-```
-$ diffhound 7030 --fast
+[Quick start](#quick-start) · [Review pipeline](#review-pipeline) · [Configuration](#configuration) · [Automation](#automation) · [Operations](#operations)
 
-🔍 PR #7030
-──────────────────────────────────────────
-  ✓ PR metadata fetched
-  ✓ Re-review mode — 6 comments, last reviewed at e866dd2f
-  ↻ Re-review: 2 files changed since last review (4KB)
-  ↻ Skipping 8 unchanged files (already reviewed)
-  ✓ Pass 1 complete
-  ✓ Fast review complete
+## Capabilities
 
-──────────────────────────────────────────
-  Re-review: 2 new comments, 3 thread replies
-──────────────────────────────────────────
-```
+| Capability | What it provides |
+| --- | --- |
+| Context-aware review | Changed code, enclosing functions, callers, related types, sibling files, Git history, and earlier review comments, within context budgets. |
+| Peer cross-checks | A Claude Sonnet adversarial pass and a Gemini pass, with actual peer coverage reported in the review. |
+| Large-PR support | Size-based routing, file triage, parallel review chunks, shared cross-file context, and a Git fallback for oversized GitHub patches. |
+| Review continuity | Ancestry-aware re-reviews, finding deduplication, reopened/escalated findings, and one persistent PR summary. |
+| Controlled publication | Bounded review bodies, complete-output validation, stale-head checks, and per-PR locks on a shared host. |
+| Reviewer voice | Comment rewriting guided by examples and feedback from earlier reviews. |
+| Explicit PR commands | Questions, descriptions, labels, and changelog entries, with CLI previews before applying changes. |
+| Advisory design review | A separate UX review of changed UI files and available PR screenshots, when the runtime budget permits. |
 
-- **Code context** — Review prompts include retrieved repository context alongside the diff; the primary API call does not have repository tools
-- **Multi-model peer review** — Codex + Gemini cross-check Claude's findings. Consensus = high confidence
-- **Re-review mode** — Detects previous reviews, fetches only the incremental diff, checks if your comments were addressed
-- **Thread tracking** — Knows which comments are resolved, which are still open, which the author got wrong
-- **Voice rewrite** — Posts comments in your voice, not robotic AI-speak. Configurable via example JSONL
-- **Inline comments** — Posts directly to GitHub with line-accurate placement (auto-snaps to valid diff lines)
-- **Zero lint nits** — Trailing newlines, blank lines, import order? Banned. Only real bugs and design issues
-- **Persistent summary and finding history** — One summary comment is updated after successful reviews. Submitted reviews store recoverable finding state, including overflow findings
-- **Explicit commands** — `/ask`, `/describe`, `/labels`, and `/changelog`, with local previews before applying changes
+Reviews focus on correctness, security, reliability, performance, and test gaps. Findings and model agreement are evidence to assess; they do not replace human review or running the project's tests.
 
-## Quick Install
+## Quick start
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/shubhamattri/diffhound/main/install.sh | bash
-```
+### Requirements
 
-Or manually:
+- Linux or macOS with Bash, Git, Python 3.9+, curl, jq, GNU awk, and GNU coreutils.
+- An authenticated [GitHub CLI](https://github.com/cli/cli), with repository access and permission to publish reviews and comments.
+- An exported, funded `ANTHROPIC_API_KEY` for the configured Anthropic backend.
+- An installed and authenticated [Gemini CLI](https://github.com/google-gemini/gemini-cli) for both peer slots to be available. Without it, the review reports reduced peer coverage.
 
-```bash
-git clone https://github.com/shubhamattri/diffhound.git ~/.diffhound
-ln -s ~/.diffhound/bin/diffhound ~/.local/bin/diffhound
-```
+The current review pipeline calls Anthropic directly. Claude Code and Codex CLI are not required for its primary, peer, or formatting stages.
 
-## Prerequisites
-
-- A funded `ANTHROPIC_API_KEY` for Diffhound's API backend
-- [GitHub CLI](https://cli.github.com/) (`gh`) — authenticated
-- `jq`, Python 3.9+, Bash, Git, curl and timeout (`gtimeout` on macOS)
-- **Optional:** [Codex CLI](https://github.com/openai/codex) (`codex`) + [Gemini CLI](https://github.com/google-gemini/gemini-cli) (`gemini`) for multi-model peer review
-
-### macOS
+On macOS:
 
 ```bash
 brew install coreutils gawk jq gh
+# Make both timeout and gtimeout available to the pipeline.
+export PATH="$(brew --prefix coreutils)/libexec/gnubin:$PATH"
 ```
 
-### Linux
+On Debian/Ubuntu, with the GitHub CLI package source available:
 
 ```bash
-# jq, gh, awk, timeout are typically available by default
-sudo apt-get install jq gh
+sudo apt-get update
+sudo apt-get install bash git python3 curl jq gawk coreutils gh
 ```
 
-Review generation allows up to 128,000 output tokens for Opus/Sonnet and 64,000
-for chunk merging with Haiku. Review and formatting calls have 900-second
-timeouts (merge: 600 seconds). Large full reviews can exceed 25 minutes; callers
-should allow 60 minutes for the complete job. These ceilings do not force longer
-answers. The final body remains limited to 150,000 UTF-8 bytes.
-
-The voice pass must finish with `end_turn` and complete comment/summary sections,
-a scorecard, verdict, and checklist. Both attempts are validated; incomplete
-output fails without publication. Voice prompts, outputs, stop reasons, and errors
-are archived with each run for diagnosis.
-
-## Usage
+### Install and review
 
 ```bash
-# Fast review (Claude only — no peer review)
-diffhound 1234 --fast
+mkdir -p "$HOME/.local/share"
+git clone https://github.com/shubhamattri/diffhound.git "$HOME/.local/share/diffhound"
+export PATH="$HOME/.local/share/diffhound/bin:$PATH"
 
-# Full review (Claude + Codex + Gemini peer review)
-diffhound 1234
+gh auth login
+gh auth setup-git
 
-# Auto-post without confirmation prompt
-diffhound 1234 --auto-post
-
-# Fast + auto-post
-diffhound 1234 --fast --auto-post
-
-# Learn from GitHub feedback (edited/deleted comments update voice JSONL)
-diffhound 1234 --learn
+# Export ANTHROPIC_API_KEY from your secret manager or shell environment first.
+# Generate a review; publication asks for confirmation.
+diffhound 123 --repo owner/repo
 ```
 
-### Fallback sweep
+Persist the PATH setting in your shell configuration. `--repo` creates or reuses a checkout under `~/repos/owner/repo` and derives the reviewer login from `gh`. To use an existing checkout, set `REVIEW_REPO_PATH` and `REVIEW_LOGIN` instead.
 
-`bin/diffhound-sweep` polls open PRs via the GitHub REST API and invokes
-diffhound on anything that hasn't been reviewed yet. Independent of
-GitHub Actions — use it as a safety net when event-driven workflows drop
-events or get throttled. See [`docs/SWEEP.md`](docs/SWEEP.md).
+```bash
+# Publish without the interactive confirmation step.
+diffhound 123 --repo owner/repo --auto-post
+
+# Use fast mode for a follow-up review.
+diffhound 123 --repo owner/repo --fast
+
+# Re-examine the full PR, including previously reviewed files.
+diffhound 123 --repo owner/repo --force-full
+
+# Process feedback from edited/deleted comments and developer replies.
+diffhound 123 --repo owner/repo --learn
+
+# Run only the advisory UI design check.
+diffhound 123 --repo owner/repo --design-only
+```
+
+**Fast mode still runs peer review.** When an incremental diff is available, the peer prompts focus on it. A large PR may still require full-context chunk analysis. `--force-full` ignores the previous review baseline while retaining existing threads as context.
+
+`--learn` can update learned state and post thread replies; it is not a preview mode.
+
+## Review pipeline
+
+```mermaid
+flowchart LR
+    A[Capture context] --> B[Analyze]
+    B --> C[Cross-check]
+    C --> D[Validate and write]
+    D --> E[Publish]
+```
+
+| Stage | Current implementation |
+| --- | --- |
+| Prepare | Acquire a host-local PR lock, fetch metadata/history, and materialize the PR head in an isolated worktree. |
+| Retrieve | Assemble bounded code context, static-analysis evidence, and any configured repository guidance. |
+| Analyze | Claude Opus (`claude-opus-5`) reviews the supplied evidence. Large diffs use parallel chunks with shared PR context. |
+| Cross-check | Claude Sonnet (`claude-sonnet-5`) challenges findings; Gemini runs in parallel through its CLI. |
+| Verify and write | Validators and model verification filter findings; Sonnet prepares the final review in the configured voice. Haiku supports triage, chunk merging, and deduplication. |
+| Publish | Reconcile finding history, validate the body budget and current head, then submit the review and update the persistent summary. |
+
+The primary Anthropic request receives prepared code context; it does not have repository-browsing tools. Tree-sitter can improve enclosing-function extraction, with a line-window fallback when unavailable. The Gemini peer currently receives a bounded 14 KB prompt, so peer coverage does not mean every model read the entire PR.
+
+### Large diffs and output limits
+
+When GitHub refuses a patch above its 20,000-line limit, Diffhound builds the full three-dot diff from the base and head commits captured in PR metadata. It fetches missing commits and complete ancestry for shallow clones. Unrelated API failures and missing history remain errors.
+
+Diff acquisition and model input have different budgets. Generated files, lockfiles, configured exclusions, context limits, and size-based routing affect what reaches the models. Deleted guards and other deletion-only hunks are retained by the active review path.
+
+| Budget | Default |
+| --- | --- |
+| Primary, Sonnet peer/verification, and voice output | Up to 128,000 tokens per call |
+| Haiku chunk-merge output | Up to 64,000 tokens per call |
+| Primary, Sonnet peer/verification, and voice call timeout | 900 seconds |
+| Chunk-merge call timeout | 600 seconds |
+| Final review body | 150,000 UTF-8 bytes, including embedded history and markers |
+
+Token ceilings are maximums, not target lengths. Large full reviews can exceed 25 minutes; allow 60 minutes at the job level and configure the executor's own process deadline and cleanup. Raising an Actions timeout alone does not configure the remote server.
+
+The final voice response must finish with `end_turn` and contain complete comment/summary sections, a scorecard, verdict, and checklist. A failed validation gets one further attempt. Incomplete output or a body that cannot fit is rejected before publication, rather than silently trimmed.
+
+### Re-reviews and finding history
+
+- Use a previous reviewed commit as the incremental baseline when ancestry is valid; fall back to the full PR when it is not.
+- Keep the full diff available for cross-file context. Large re-reviews may still analyze all chunks while focusing feedback on changes.
+- Reconcile findings by full path and concern. Deterministic matching handles exact repeats; a model judge can link reworded, nonblocking findings.
+- Use explicit thread-resolution evidence. A nearby edit or a finding's absence from the next review does not close it; recurrence and severity increases can reopen or escalate it.
+- Put inline overflow into the review body and preserve it in finding history. Unchanged reruns may refresh an earlier review instead of creating another.
+
+History v2 stores changed finding records in submitted review bodies and links earlier rounds. Fresh workers can reconstruct state from GitHub without a separate database. Unreadable history stops publication; unavailable thread status retains findings. Once v2 history exists, rollback requires a v2-aware build.
 
 ## Configuration
 
-```bash
-# Add to ~/.zshrc or ~/.bashrc
-export REVIEW_REPO_PATH="$HOME/path/to/your/repo"
-export REVIEW_LOGIN="your-github-username"
+### Runtime settings
+
+| Variable | Default / requirement | Purpose |
+| --- | --- | --- |
+| `ANTHROPIC_API_KEY` | Required | Funded API credential for Anthropic model calls. |
+| `GH_TOKEN` | Existing `gh` authentication | GitHub identity and permissions used by the process. |
+| `REVIEW_REPO_PATH` | Required without `--repo` | Existing local repository checkout. |
+| `REVIEW_LOGIN` | Derived with `--repo`; otherwise required | Reviewer identity for history and publication. |
+| `ANTHROPIC_API_URL` | Anthropic Messages endpoint | Backend override; the API credential is sent to this endpoint. |
+| `DIFFHOUND_REQUIRE_HEAD` | `0` | Set to `1` to abort if the PR-head worktree cannot be materialized. Recommended for automation. |
+| `DIFFHOUND_MAX_INLINE` | `8` | Initial-review nonblocking inline limit. Blockers are uncapped; overflow goes into the body. |
+| `DIFFHOUND_MAX_INLINE_REREVIEW` | `3` | Nonblocking inline limit for subsequent reviews. |
+| `DIFFHOUND_MAX_REPLIES` | `3` | Thread-reply limit; overflow goes into the body. |
+| `DIFFHOUND_MAX_BODY_CHARS` | `150000` | Legacy variable name; the budget is **UTF-8 bytes**, allowed range 1–150000. |
+| `DIFFHOUND_LOCK_DIR` | `~/.cache/diffhound/locks` | Shared directory for per-PR locks on one host. |
+| `REVIEW_RAG_SCRIPT` | Bundled `lib/rag.sh` | Override the code-context retriever. |
+| `DIFFHOUND_DEDUP_MODEL` | `claude-haiku-4-5-20251001` | Judge for reworded nonblocking findings. |
+| `DIFFHOUND_COMMAND_MODEL` | `claude-sonnet-5` | Model used by explicit PR commands. |
+| `DIFFHOUND_SKIP_PEER` | `0` | Explicit opt-out from peer review. |
+| `DIFFHOUND_DESIGN` | `1` | Set to `0` to disable the advisory design check. |
+| `DIFFHOUND_OFFLINE` | `0` | Test mode for model-calling validators; explicit commands are disabled. |
+
+Review invocations load `~/.profile`; explicit commands require their environment to be exported by the caller. The model backend does not use `CLAUDE_CODE_OAUTH_TOKEN`.
+
+### Repository guidance and voice
+
+Place `.diffhound.yml` or `.diffhound.yaml` in the reviewed repository. YAML configuration requires PyYAML or a compatible `yq` installation. A `.diffhound.md` file can supply plain-text context when no YAML configuration is present.
+
+```yaml
+review:
+  priorities:
+    - Authentication and authorization boundaries
+    - Data integrity and failure recovery
+  skip_files:
+    - "docs/generated/**"
+  context: |
+    Background jobs must tolerate duplicate delivery.
+    User-visible errors must not expose sensitive data.
 ```
 
-| Env Var | Default | Description |
-|---------|---------|-------------|
-| `REVIEW_REPO_PATH` | _(required)_ | Path to your local git repo |
-| `REVIEW_LOGIN` | _(required)_ | Your GitHub username (for re-review detection) |
-| `ANTHROPIC_API_KEY` | _(required)_ | Funded Diffhound API key. The runtime does not use personal Claude subscription credentials. |
-| `GH_TOKEN` | `gh` authentication | Token for the existing reviewer account, with access to read code and write PR reviews and issue comments. |
-| `ANTHROPIC_API_URL` | `https://api.anthropic.com/v1/messages` | API endpoint override; credentials are sent to this endpoint. |
-| `DIFFHOUND_OFFLINE` | `0` | Set to `1` to force model-calling validators onto their passthrough branch. The test suite sets this. |
-| `DIFFHOUND_MAX_INLINE` | `8` | Initial-review nonblocking inline limit; remaining findings go in the review body. |
-| `DIFFHOUND_MAX_INLINE_REREVIEW` | `3` | Subsequent-review nonblocking inline limit. Blockers remain uncapped. |
-| `DIFFHOUND_MAX_REPLIES` | `3` | Thread replies per review; overflow is included in the body. |
-| `DIFFHOUND_MAX_BODY_CHARS` | `150000` | Legacy name for the final UTF-8 **byte** budget (1–150000), including hidden state and markers. Shared by assembly, review publishing, fallback bodies, and sticky summaries. Earlier findings stay in linked reviews; a single oversized round still fails without truncation. |
-| `DIFFHOUND_DEDUP_MODEL` | `claude-haiku-4-5-20251001` | Judge for reworded repeats of known open, nonblocking findings. |
-| `DIFFHOUND_COMMAND_MODEL` | `claude-sonnet-5` | Model for explicit PR commands. Each command makes one generation call. |
-| `DIFFHOUND_LOCK_DIR` | `~/.cache/diffhound/locks` | Shared host directory for per-PR review locks. All processes on a host must use the same directory. |
-| `DIFFHOUND_BIN` | `/opt/diffhound/bin/diffhound` | Entrypoint executable override; also supported by the fallback sweep. |
+Voice examples live at `~/.diffhound/voice-examples.jsonl`. Add representative comments with `category`, `subcategory`, `file_type`, and `comment` fields. Posted comments and `--learn` feedback help maintain those examples. See [Customization](docs/CUSTOMIZATION.md).
 
-Reviews and commands use the funded API key. `CLAUDE_CODE_OAUTH_TOKEN` is explicitly
-unset in model processes. Commands require exported environment variables; they
-do not load interactive shell profiles.
-
-### Explicit commands
+## Explicit PR commands
 
 ```bash
-diffhound /ask 123 --repo owner/repo --question 'Why does this change affect authentication?'
+diffhound /ask 123 --repo owner/repo --question 'What changes in the authorization flow?'
 diffhound /describe 123 --repo owner/repo
 diffhound /labels 123 --repo owner/repo
 diffhound /changelog 123 --repo owner/repo
 
-# Apply a reviewed result instead of printing a draft:
+# Generate from current evidence and apply in the same invocation.
 diffhound /describe 123 --repo owner/repo --apply
 ```
 
-Each command returns JSON with the reviewed SHA, result, and whether it was applied.
-`--apply` regenerates from current evidence and applies the result in the same invocation.
-`/describe` and `/changelog` update separate marked sections of the PR description,
-preserving human text. Changelog generation produces a PR release-note section;
-it does not commit a repository CHANGELOG. Labels are additive and must already
-exist in the repository. `/ask --apply` maintains one answer for CLI invocations;
-comment-triggered questions each have their own answer, updated on retry.
-Empty, invalid, truncated model output, or a changed PR head prevents writes.
-Commands reject diffs over 200,000 characters instead of silently omitting code.
+CLI commands preview JSON by default, including the reviewed SHA and application status. Each makes one generation call. `/describe` and `/changelog` maintain separate marked sections of the PR description while preserving human text; `/changelog` does not edit a repository file. Labels are additive and must already exist.
 
-For comment-triggered commands, copy [the consumer workflow](examples/diffhound-workflow.yml)
-and configure `DIFFHOUND_GITHUB_TOKEN` (your existing account), `ANTHROPIC_API_KEY`,
-plus the existing SSH workflow's `DIFFHOUND_HOST` and `DIFFHOUND_SSH_KEY` secrets.
-An explicit `/ask question`, `/describe`, `/labels`, or `/changelog` comment from a
-repository writer applies that command. Other comments, bots, and read-only users
-cannot trigger writes. The command workflow runs trusted Diffhound code, not PR code.
-The consumer workflow includes `synchronize`, so pushes continue to trigger reviews.
+`--apply` regenerates the result; it does not submit a saved preview. Invalid/truncated output and a changed head prevent writes. Commands have a separate 200,000-character diff ceiling and use GitHub's diff endpoint; they do not use the review pipeline's oversized-patch Git fallback.
 
-### GitHub Action and Docker
+In the comment-triggered workflow, an explicit command from a repository writer applies immediately. Bots and readers cannot trigger it. `/ask` maintains one answer per triggering comment, or one CLI answer per PR.
 
-The Docker Action accepts `pr-number`, `mode`, `auto-post`, and `repo-path` for
-reviews. It also accepts `command`, `question`, and `apply` for explicit commands.
-Pass `GH_TOKEN` for the existing account and `ANTHROPIC_API_KEY` through the step's
-environment. `GITHUB_TOKEN` would post as the Actions bot, so use your account token
-when retaining your reviewer identity.
+## Automation
+
+| Option | Setup |
+| --- | --- |
+| Shared review server | Run `bin/diffhound` with the server's authenticated GitHub/model environment. Schedule the fallback sweep if required. |
+| Reusable GitHub workflows | Copy the [consumer workflow](examples/diffhound-workflow.yml). Reviews run on the SSH server; explicit commands run on GitHub-hosted runners. |
+| Docker Action | Use [action.yml](action.yml) with `pr-number`, `mode`, `auto-post`, and optionally `repo-path`. Commands also accept `command`, `question`, and `apply`. |
+| Direct Docker | Build the image below or use an appropriate published tag from the [container package](https://github.com/shubhamattri/diffhound/pkgs/container/diffhound). |
+
+The reusable review workflow expects `DIFFHOUND_HOST` and `DIFFHOUND_SSH_KEY`, with Diffhound installed at `/home/ubuntu/diffhound` for the `ubuntu` user. Configure GitHub access, the funded API key, and Gemini on that server. The command workflow separately requires `DIFFHOUND_GITHUB_TOKEN` and `ANTHROPIC_API_KEY` repository secrets.
+
+For the Docker Action and direct Docker, pass `GH_TOKEN` and `ANTHROPIC_API_KEY` through the environment. The token's account is the publishing identity; use the existing reviewer's token when that identity matters. Configure Gemini credentials for the container separately if both peer slots are required.
 
 ```bash
 docker build -t diffhound:local .
@@ -178,280 +219,53 @@ docker run --rm -e GH_TOKEN -e ANTHROPIC_API_KEY diffhound:local \
   123 --repo owner/repo --auto-post
 ```
 
-Use `bin/diffhound` for CLI, SSH, and sweep invocations so the per-PR lock applies.
-Locks serialize reviews on a shared host; they are not distributed locks between
-independent runners. Use one review executor per repository. A review whose head
-changes during generation is rejected before publishing and picked up by the next
-push run or sweep.
+Keep `synchronize` enabled to review new commits. Host-local locks serialize workflow and sweep reviews only when they share the same lock directory. Use a shared review executor for each repository, or provide external coordination across independent hosts.
 
-## How it works
+### Fallback sweep
 
-```
-┌─────────────┐    ┌──────────────────┐    ┌─────────────────┐    ┌──────────────┐
-│  Pass 1      │    │  Pass 2          │    │  Pass 3+4       │    │  Post        │
-│  Claude      │ →  │  Codex + Gemini  │ →  │  Haiku          │ →  │  GitHub API  │
-│  (agentic)   │    │  (peer review)   │    │  (voice rewrite)│    │  (inline)    │
-│              │    │  --fast skips     │    │                 │    │              │
-│  Reads code  │    │  Runs parallel   │    │  Merges + rewrites   │  Posts review │
-│  Uses tools  │    │  Finds gaps      │    │  in your voice  │    │  + comments  │
-└─────────────┘    └──────────────────┘    └─────────────────┘    └──────────────┘
-```
+`bin/diffhound-sweep` polls configured repositories for unreviewed PR heads independently of Actions. It checks submitted GitHub reviews as well as local state, applies a grace window, and retries a failed head up to three times by default. After those attempts, a new commit or an operator reset is needed. See [Sweep setup and operations](docs/SWEEP.md).
 
-### RAG context retrieval
+## Operations
 
-Before the AI sees the diff, diffhound gathers surrounding codebase context (5 sections, 4 in parallel):
+### Evidence and troubleshooting
 
-| Section | What | How |
-|---------|------|-----|
-| Function context | Complete function/method around each changed hunk | Tree-sitter AST extraction (falls back to ±35 line window) |
-| Sibling files | Other files in the same directory | `find` for pattern propagation checks |
-| Git history | Last 5 commits per changed file | `git log --oneline` |
-| Past comments | Previous review comments on these files | GitHub API |
-| Enums & constants | Definitions of constants referenced in the diff | `git grep` |
+Run artifacts are stored under `~/.diffhound/logs/<owner-repo>/pr-<number>/<timestamp>-<sha>/`. Available artifacts include chunk outputs and stop reasons, validator actions, peer responses, voice prompts/output, the summary, a run manifest, and token/cost reports. The pipeline prunes archives older than 30 days.
 
-**Optional:** Install `tree-sitter` for precise function extraction (60-70% fewer tokens vs file headers):
+| Symptom | First check |
+| --- | --- |
+| API preflight refuses auto-post | Verify the configured endpoint, key, provider quota, and billing. The preflight tests whether the backend answers. |
+| Large patch cannot be fetched | Inspect the Git fallback error, origin access, pinned commits, and available ancestry. |
+| No fresh review | Check the latest PR head, Actions events, sweep log, grace window, and per-head attempt count. |
+| A run exceeds its time budget | Check both caller and server deadlines, then the current model stage. Increasing only the caller's timeout may leave the server unchanged. |
+| Reduced peer coverage | Inspect peer output and Gemini authentication/timeouts. Coverage is reported with the published review. |
+| Review generation finishes but publication fails | Check final-output validation, body bytes, current-head checks, history reads, and GitHub permissions. |
+
+An oversized patch, provider quota failure, missing trigger, and held lock require different remedies. Retain the run evidence before retrying. Preserve learned blocklists and runtime configuration during upgrades.
+
+### Data and cost
+
+Self-hosting controls the executor and local state; review content still goes to the configured model providers. Prompts can contain source code, PR descriptions, review history, retrieved context, and design screenshots. Logs can retain the same material. Configure credentials, access, and retention for the repositories being reviewed.
+
+Anthropic calls use a funded API key. `usage.tsv` records returned token usage and `cost.txt` estimates Anthropic spend using the repository's rate table. Gemini usage is reported as a separate call count and is not included in that cost total. Actual cost depends on diff size, context, model output, chunk count, and retries.
+
+## Development and documentation
 
 ```bash
-pip3 install tree-sitter tree-sitter-typescript tree-sitter-javascript tree-sitter-python
+# Run from the Diffhound checkout.
+DIFFHOUND_OFFLINE=1 bash tests/run.sh
 ```
 
-Without tree-sitter, falls back to showing the first 80 lines of each changed file.
+The suite includes validator fixtures and standalone tests for history, publication, command handling, locks, watchdog cleanup, voice validation, and oversized Git diffs. Offline tests verify pipeline contracts; live integration checks are needed for credentials, provider availability, and GitHub publication.
 
-### Re-review optimization
-
-When you've already reviewed a PR and the author pushes fixes:
-
-1. Detects your previous review via GitHub API
-2. Extracts the commit SHA your last review was against
-3. Fetches only the incremental diff (changes since your last review)
-4. Checks each existing thread — resolved? still open? author wrong?
-5. Focuses analysis on new/changed files only
-6. Reconciles finding history using full paths and complete concern text. Exact repeats survive line movement; a judge can link reworded, nonblocking repeats to known open findings
-7. Reads resolution from GitHub threads. A nearby edit or absence from an incremental review does not prove a fix. Rediscovered resolved findings and severity increases are reported again
-8. Falls back to a full PR diff after force pushes or when ancestry cannot be established
-
-One batched review contains new inline findings and substantive thread replies;
-position failures move findings into its body. The initial successful run also
-creates one persistent summary comment. Later runs edit that summary. Clean
-COMMENT reruns with nothing new refresh the previous review in place. This is an
-API publication contract, not a guarantee of exactly one GitHub email.
-
-History is stored in submitted review bodies, so fresh Actions/Docker workers can
-recover it. An unreadable history stops publication; an unavailable thread-status
-read keeps findings rather than hiding them. Body-only findings stay open until
-there is explicit resolution evidence; incremental silence never closes them.
-A single oversized round fails visibly instead of dropping findings.
-Exact matching is deterministic; semantic matching remains model-dependent and
-keeps findings when the judge fails or is uncertain. It never suppresses a new
-BLOCKING finding. See [the adoption matrix](docs/OSS-ADOPTION.md).
-
-History format v2 stores only changed finding records and points to the prior submitted
-review. A new round shows its selected/new/reopened findings in full and links to earlier
-rounds; it does not copy the PR's complete history into every comment. Reading all review
-pages reconstructs the full state, including older v1 snapshots. Missing, corrupt, foreign,
-or unsubmitted parent reviews stop publication instead of resetting deduplication.
-Quiet refreshes keep the replaced review's original parent and visible findings.
-
-After v2 reviews have been published, use a v2-aware build when rolling back. Version
-v0.7.60 and older cannot reconstruct v2 history. A legacy-reader guard makes them
-stop rather than silently reuse stale state; pause publishing or use a v2-aware build. There is no database migration or runtime-secret change.
-
-### 25 engineering principles
-
-The review checks for real issues across 5 categories:
-
-- **Design** — SOLID violations, DRY, KISS, YAGNI
-- **Security** — STRIDE, secrets in code, SQL injection, PII in logs
-- **Performance** — N+1 queries, missing pagination, no timeouts
-- **Reliability** — Race conditions, swallowed errors, missing transactions
-- **Domain-specific** — Copy-paste bugs, enum completeness, timezone mismatches
-
-### What it won't flag
-
-Lint nits are banned. Trailing newlines, extra blank lines, whitespace, import ordering — these are linter concerns, not review concerns.
-
-
-## Project Structure
-
-```
-diffhound/
-├── bin/
-│   └── diffhound              # CLI entry point
-├── lib/
-│   ├── review.sh              # Main review pipeline
-│   ├── spinner.sh             # Terminal spinner utilities
-│   ├── platform.sh            # OS detection + dependency checks
-│   ├── parser.sh              # LLM output parsing + line-snapping
-│   ├── github.sh              # GitHub API posting + voice indexer + learning
-│   ├── rag.sh                 # RAG context retrieval (parallel sections)
-│   └── extract-context.py     # AST-based function extraction (tree-sitter)
-├── config/
-│   └── diffhound.example.yml  # Example configuration
-├── docs/
-│   ├── ARCHITECTURE.md        # Pipeline deep-dive
-│   └── CUSTOMIZATION.md       # Voice, principles, config
-├── install.sh                 # One-command installer
-├── CHANGELOG.md
-├── LICENSE                    # MIT
-└── README.md
-```
-
-## Voice customization
-
-diffhound rewrites review comments to match your writing style. Provide examples via a JSONL file:
-
-```jsonl
-{"category":"security","subcategory":"token-leak","file_type":"ts","comment":"🔴 this is the user's full login token right? passing it to an external embed means..."}
-{"category":"data-bug","subcategory":"wrong-column","file_type":"ts","comment":"🔴 benefits.end_date is NULL for every benefit in prod..."}
-```
-
-See [docs/CUSTOMIZATION.md](docs/CUSTOMIZATION.md) for full details.
-
-## Architecture Deep Dive
-
-### RAG — What it is and why it matters
-
-**RAG (Retrieval-Augmented Generation)** means giving the AI relevant context _before_ it generates a response. Without RAG, the model only sees the diff — 3 changed lines with no idea what the surrounding function does, what other files exist, or what was reviewed before. With RAG, it sees the full picture.
-
-There are several RAG architectures, each with different tradeoffs:
-
-| Type | How it works | Tradeoff |
-|------|-------------|----------|
-| **Naive RAG** | Fixed retrieval strategy → stuff into prompt | Simple, predictable, but can't adapt to what the model actually needs |
-| **Advanced RAG** | Pre-retrieval query rewriting + post-retrieval re-ranking and compression | Better relevance, but more complex pipeline |
-| **Graph RAG** | Builds a knowledge graph (e.g., call graph), retrieves subgraphs | Captures relationships ("A calls B which uses table C"), expensive to build |
-| **Agentic RAG** | The LLM decides what to retrieve, evaluates, retrieves more if needed | Most flexible — self-correcting, iterative. Slower, less predictable |
-| **Hybrid RAG** | Keyword search (BM25) + semantic/vector search combined | Best of both — exact matches AND conceptual matches |
-
-#### What diffhound uses: Naive + Agentic hybrid
-
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│                        RAG PIPELINE                                  │
-│                                                                      │
-│  ┌─────────────────────┐     ┌────────────────────────────────────┐  │
-│  │  LAYER 1: Naive RAG │     │  LAYER 2: Agentic RAG             │  │
-│  │  (rag.sh — fixed)   │     │  (Claude Pass 1 — adaptive)       │  │
-│  │                     │     │                                    │  │
-│  │  • Function context │────▶│  • Reads additional files on demand│  │
-│  │  • Sibling files    │     │  • Follows import chains           │  │
-│  │  • Git history      │     │  • Greps for patterns              │  │
-│  │  • Past comments    │     │  • Checks test coverage            │  │
-│  │  • Enums/constants  │     │  • Verifies findings before posting│  │
-│  │                     │     │                                    │  │
-│  │  Deterministic,     │     │  Adaptive, self-correcting,        │  │
-│  │  5-10 seconds       │     │  follows the code wherever it leads│  │
-│  └─────────────────────┘     └────────────────────────────────────┘  │
-└──────────────────────────────────────────────────────────────────────┘
-```
-
-**Why this combination?**
-- Layer 1 (Naive) guarantees a baseline context floor — every review sees function bodies, sibling files, and history regardless of what the model decides to do
-- Layer 2 (Agentic) lets Claude go deeper where needed — if it spots a suspicious pattern, it can read the actual implementation, check callers, verify test coverage
-- Neither layer alone is sufficient. Naive RAG misses adaptive exploration. Pure agentic RAG has no guaranteed baseline and may skip obvious context.
-
-**Why not the others?**
-- **Graph RAG** — would need to build and maintain a call graph for the entire codebase. High build cost, marginal gain over agentic exploration for PR-sized reviews
-- **Vector/semantic search** — useful for large doc collections, overkill for code review where you know exactly which files changed and can deterministically retrieve their context
-- **Chunking** — not needed. A large PR diff (~150KB) + RAG context (~44KB) is ~48K tokens, well within Claude's 200K context window. Chunking would _degrade_ review quality by losing cross-file context
-
-### Tree-sitter AST extraction
-
-Most code review tools dump the first N lines of each file as context. This wastes tokens on imports, license headers, and unrelated functions.
-
-Diffhound uses **tree-sitter** (a concrete syntax tree parser) to extract only the enclosing function/method around each changed hunk:
-
-```
-Traditional:               Tree-sitter:
-┌─────────────────────┐    ┌─────────────────────┐
-│ import ...          │    │                     │
-│ import ...          │    │                     │
-│ import ...          │    │                     │
-│ const CONFIG = ...  │    │                     │
-│                     │    │                     │
-│ function unrelated  │    │                     │
-│   ...50 lines...    │    │                     │
-│                     │    ├─────────────────────┤
-│ function changed()  │    │ function changed()  │
-│   line A            │    │   line A            │
-│   line B  ← diff    │    │   line B  ← diff    │
-│   line C            │    │   line C            │
-│   line D            │    │   line D            │
-├─────────────────────┤    ├─────────────────────┤
-│ ... truncated ...   │    │                     │
-└─────────────────────┘    └─────────────────────┘
-   ~100 lines, 30%            ~20 lines, 100%
-   relevant                    relevant
-```
-
-Result: **60-70% fewer tokens** with higher signal density. Falls back to a ±35 line window if tree-sitter isn't installed.
-
-### Multi-model peer review
-
-On new PRs, diffhound doesn't trust a single model. It runs three independent reviewers in parallel:
-
-```
-                    ┌──────────┐
-              ┌────▶│  Codex   │────┐
-              │     └──────────┘    │
-┌──────────┐  │     ┌──────────┐    │     ┌───────────────┐
-│  Claude   │──┼────▶│  Gemini  │────┼────▶│  Merge + Post │
-│  Pass 1-2 │  │     └──────────┘    │     └───────────────┘
-└──────────┘  │                      │
-              └──────────────────────┘
-                   (parallel)
-```
-
-- **Agreements** across models = high confidence findings
-- **Unique findings** = things one model caught that others missed
-- **Disagreements** = presented as-is for the developer to judge
-
-Skipped with `--fast` (re-reviews use Claude only for speed).
-
-### Voice rewrite system
-
-AI review comments sound robotic by default. Diffhound rewrites every comment to match the reviewer's natural writing style using a JSONL file of real examples as style reference.
-
-The system also **learns continuously**:
-- If you edit a posted comment on GitHub → the voice file updates
-- If you delete a comment (it was wrong) → the example is removed
-- If a developer replies with "this is intentional" → recorded as feedback
-
-This creates a feedback loop where reviews get more natural and more accurate over time.
-
-### Auto-resolve on re-review
-
-When a developer pushes fixes, diffhound detects which previous comments are addressed:
-
-1. Parses the incremental diff **line-by-line** (not hunk ranges — avoids false positives from unchanged context lines)
-2. Matches each previous comment to actually-changed lines with ±2 line tolerance
-3. Resolves matched threads via GitHub's GraphQL API
-
-This eliminates the manual "Resolve conversation" clicking that adds friction to the review cycle.
-
-### Design decisions and why
-
-| Decision | Alternative considered | Why we chose this |
-|----------|----------------------|-------------------|
-| **No chunking** | Split large diffs into file-level chunks | Cross-file bugs are the highest-value findings. Chunking kills them. Context window isn't a bottleneck. |
-| **Naive + Agentic RAG** | Pure agentic, vector DB, graph RAG | Guaranteed baseline + adaptive depth. No infrastructure to maintain. |
-| **Tree-sitter over regex** | Regex-based function extraction, head -N | AST-aware extraction is language-agnostic and precise. 60-70% token reduction. |
-| **Explicit thread resolution** | Resolve after a nearby edit | A changed line does not prove the reported defect is fixed. GitHub resolution and recurrence drive the finding ledger. |
-| **GraphQL for thread resolution** | REST API | REST doesn't expose thread IDs. GraphQL is the only way to resolve review threads programmatically. |
-| **Line-by-line diff parsing** | Hunk range matching | Hunk ranges include context lines (unchanged). Line-by-line only counts actual `+`/`-` lines as changed. |
-| **Parallel RAG sections** | Sequential retrieval | 4 sections run in parallel with 15s timeouts each. Total RAG time: ~5-10s instead of ~40s. |
-| **Voice JSONL over fine-tuning** | Fine-tune a model on past comments | JSONL is transparent, editable, version-controllable. Fine-tuning is a black box. |
-
-## Cost
-
-| Pass | What | Cost |
-|------|------|------|
-| Pass 1 | Claude agentic review | Free (Max subscription) or API |
-| Pass 2 | Codex + Gemini peer review | API costs. Skipped with `--fast` |
-| Pass 3+4 | Haiku voice rewrite | Free (Max) or ~$0.01/review |
-
-With `--fast` and Claude Max: **$0 per review.**
+| Resource | Contents |
+| --- | --- |
+| [Architecture](docs/ARCHITECTURE.md) | Pipeline stages, modules, and publication boundaries. |
+| [Customization](docs/CUSTOMIZATION.md) | Repository guidance, review voice, and context retrieval. |
+| [Sweep](docs/SWEEP.md) | Fallback scheduling, state, and troubleshooting. |
+| [Adoption notes](docs/OSS-ADOPTION.md) | Finding-lifecycle and integration mechanisms. |
+| [Source history](https://github.com/shubhamattri/diffhound/commits/main/) | Recent changes on `main`. |
+| [Changelog](CHANGELOG.md) | Recorded release notes. |
 
 ## License
 
-MIT
+[MIT](LICENSE) · Shubham Attri

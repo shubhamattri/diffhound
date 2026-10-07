@@ -5,10 +5,8 @@ of GitHub Actions. Complements the event-driven workflow, not a replacement.
 
 ## When to install this
 
-- Your event-driven `pull_request` workflow occasionally misses pushes
-  (GitHub Actions drops webhooks a few times a year even in healthy orgs).
-- Repo-side throttling has previously paused Actions for an extended window
-  (reference: monorepo 2026-04-23 incident).
+- An expected event-driven review did not start.
+- Runner availability or repo-side throttling has delayed Actions.
 - Your runner crashes mid-review leaving no comment on the PR.
 - The diffhound binary itself crashed on a specific commit — a new push
   should automatically retry.
@@ -22,37 +20,38 @@ Every N minutes (you pick via cron/systemd timer), sweep:
    - `isDraft == false`
    - `author.is_bot != true` — covers Dependabot, Renovate, GitHub App actors
    - Title does not contain `[skip review]`
-3. For each qualifying PR, checks a per-`(repo, pr, sha)` state file.
-4. If not reviewed and not within the grace window, invokes
+3. Checks per-`(repo, pr, sha)` state and submitted GitHub reviews for coverage.
+4. If not reviewed, not within the grace window, and below the attempt limit, invokes
    `diffhound <pr> --repo <owner/name> --auto-post`.
-5. Writes `.done` on success, increments `.attempts` on failure.
+5. Records an attempt before invocation and writes `.done` on success.
 6. Stops retrying the same SHA after `DIFFHOUND_SWEEP_MAX_ATTEMPTS` (default 3) —
    a new push will reset state because state key includes SHA.
 
 ## What it does not do
 
-- It does not detect whether the event-driven workflow already posted a
-  review. It relies on the grace window to dodge that race; see
-  `DIFFHOUND_SWEEP_GRACE_MIN`. Worst case: one duplicate review comment.
+- It is sequential: a slow review delays later PRs in the batch. A service
+  timeout must cover the whole batch, not just one review. Configure executor
+  deadlines and process cleanup separately from the timer interval.
+- Its default grace window uses PR `updatedAt`, so comment/review activity can
+  delay eligibility even without a new commit.
 - It does not handle `pull_request_review_comment` (--learn) replies.
   Those still require the event-driven workflow.
-- It does not guard against API rate limits. At default cadence
-  (every 15 min × 3 repos × ~10 PRs) you are not close to rate limits.
+- It does not provide distributed locking across hosts or quota management for
+  GitHub/model providers. Inspect failed attempts and provider errors before retrying.
 
 ## Install
 
 Assumes diffhound is already installed under `$DIFFHOUND_ROOT` on a host
-where `gh` is authenticated and `$ANTHROPIC_API_KEY` (plus any Codex/Gemini
-keys you use) are available to the invoking user.
+where `gh` is authenticated, `$ANTHROPIC_API_KEY` is exported, and Gemini CLI
+authentication is available to the invoking user if both peer slots are needed.
 
 ```bash
 # 1. List the repos to sweep
 mkdir -p ~/.diffhound-sweep
 cat > ~/.diffhound-sweep/repos.txt <<EOF
-# Nova diffhound-consumer repos
-NovaBenefits/monorepo
-NovaBenefits/reco
-NovaBenefits/domain-setup-tool
+# Repositories to review
+owner/backend
+owner/frontend
 EOF
 
 # 2. Pick one of: systemd timer (preferred) or cron
@@ -119,7 +118,7 @@ Cron inherits a minimal `PATH` and no login shell env — `bash -lc` loads
 | `DIFFHOUND_SWEEP_HOME`            | `$HOME/.diffhound-sweep`   | Config + state + log root |
 | `DIFFHOUND_SWEEP_MAX_ATTEMPTS`    | `3`                        | Stop retrying a SHA after N failures |
 | `DIFFHOUND_SWEEP_PR_LIMIT`        | `30`                       | `gh pr list --limit` per repo |
-| `DIFFHOUND_SWEEP_GRACE_MIN`       | `10`                       | Skip commits younger than N min (lets the event-driven path win) |
+| `DIFFHOUND_SWEEP_GRACE_MIN`       | `10`                       | Skip PRs updated within N minutes (lets the event-driven path start first) |
 | `DIFFHOUND_BIN`                   | `<repo>/bin/diffhound`     | Path to the diffhound binary |
 
 `repos.txt` supports blank lines and `#` comments.
@@ -134,8 +133,8 @@ Cron inherits a minimal `PATH` and no login shell env — `bash -lc` loads
 ├── sweep.lock/                        # single-instance guard (dir)
 │   └── pid
 └── state/
-    ├── NovaBenefits_monorepo_pr7054_3a25dd7...attempts
-    ├── NovaBenefits_monorepo_pr7054_3a25dd7...done
+    ├── owner_backend_pr123_3a25dd7...attempts
+    ├── owner_backend_pr123_3a25dd7...done
     └── ...
 ```
 
@@ -152,9 +151,11 @@ and merged PRs don't accumulate.
 
 **Sweep says "another sweep is running" forever.**
 
-The single-instance guard self-heals: if the recorded pid is gone it
-breaks the lock. If the holder is truly alive and stuck, bounce it:
-`rm -rf ~/.diffhound-sweep/sweep.lock`.
+The single-instance guard recovers when the recorded PID is gone. Inspect that
+PID and its current review before intervening. Do not delete the lock directory
+while a sweep is alive: that would allow a second sweep to run concurrently.
+Use the configured service's stop/cleanup procedure for a confirmed stuck run,
+then verify its processes have exited before starting another.
 
 **Every PR fails with `diffhound exit=1`.**
 
@@ -165,6 +166,14 @@ The sweep's own log captures stderr of each invocation.
 **Diffhound ran via both sweep and the event-driven workflow — two comments
 on the same commit.**
 
-Increase `DIFFHOUND_SWEEP_GRACE_MIN` (e.g. to `20` or `30`). The grace
-window is deliberately conservative because it's the only defence against
-the race; raising it trades fallback latency for fewer duplicates.
+Check that both paths use the same reviewer identity and `DIFFHOUND_LOCK_DIR`
+on the same executor. The sweep recognizes submitted reviews, and host-local
+PR locks serialize overlapping runs. Separate hosts need external coordination.
+Increasing the grace window delays fallback but does not replace coordination.
+
+**A head remains unreviewed after failures stop appearing in the log.**
+
+Inspect its `.attempts` file and earlier errors. After the configured attempt
+limit, the sweep stops retrying that SHA. Fix the cause, then either run a
+targeted review or back up and reset only that head's attempt marker while the
+sweep is stopped. Preserve submitted review history and other PR state.
