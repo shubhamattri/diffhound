@@ -96,6 +96,15 @@ lib/
 
 ## Key Design Decisions
 
+### Oversized GitHub diffs
+
+When GitHub rejects a patch above its line limit, `lib/pr-diff.sh` builds the
+complete three-dot diff from the base and head SHAs captured in PR metadata.
+It fetches missing commits and complete ancestry for shallow clones. This also
+applies to design-only reviews. Missing history or unrelated API failures stop
+the fetch; error text and partial patches never become review input. Each Git
+fetch/diff command has a 300-second timeout. No diff content is truncated.
+
 ### Why agentic (not just diff)?
 The diff alone causes false positives. Claude reads the full file, checks git history, and greps sibling files before flagging anything. This eliminates ~40% of bad findings.
 

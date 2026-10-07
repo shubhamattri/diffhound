@@ -34,6 +34,7 @@ LIB_DIR="${DIFFHOUND_ROOT}/lib"
 # ── Source modules ───────────────────────────────────────────
 source "${LIB_DIR}/spinner.sh"
 source "${LIB_DIR}/platform.sh"
+source "${LIB_DIR}/pr-diff.sh"
 source "${LIB_DIR}/parser.sh"
 source "${LIB_DIR}/github.sh"
 source "${LIB_DIR}/publish.sh"
@@ -889,7 +890,7 @@ echo "────────────────────────�
 spinner_start "Fetching PR metadata..."
 REPO_OWNER=$(gh repo view --json owner --jq '.owner.login')
 REPO_NAME=$(gh repo view --json name --jq '.name')
-if ! PR_DATA=$($_TIMEOUT_CMD 300 gh pr view "$PR_NUMBER" --json title,body,author,files,additions,deletions,headRefOid,headRefName 2>&1); then
+if ! PR_DATA=$($_TIMEOUT_CMD 300 gh pr view "$PR_NUMBER" --json title,body,author,files,additions,deletions,headRefOid,headRefName,baseRefOid 2>&1); then
   spinner_fail "Failed to fetch PR #${PR_NUMBER}"
   exit 1
 fi
@@ -901,6 +902,7 @@ FILE_COUNT=$(echo "$PR_DATA" | jq -r '.files | length')
 ADDITIONS=$(echo "$PR_DATA" | jq -r '.additions')
 DELETIONS=$(echo "$PR_DATA" | jq -r '.deletions')
 HEAD_SHA=$(echo "$PR_DATA" | jq -r '.headRefOid')
+BASE_SHA=$(echo "$PR_DATA" | jq -r '.baseRefOid')
 HEAD_REF_NAME=$(echo "$PR_DATA" | jq -r '.headRefName // empty')
 
 spinner_stop "PR metadata fetched"
@@ -1077,7 +1079,7 @@ _run_design_check_capped() {
 # Posts only with --auto-post. Never exits non-zero, so the EXIT trap cannot
 # post a "review failed" comment for it.
 if [ "$DESIGN_ONLY" = true ]; then
-  if ! $_TIMEOUT_CMD 300 gh pr diff "$PR_NUMBER" > "$DIFF_FILE" 2>/dev/null; then
+  if ! dh_fetch_pr_diff "$PR_NUMBER" "$REPO_PATH" "$BASE_SHA" "$HEAD_SHA" "$DIFF_FILE"; then
     echo "  Design check: could not fetch the diff, skipped" >&2
     exit 0
   fi
@@ -1950,7 +1952,7 @@ if [ "$IS_REREVIEW" = true ] && [ -n "$LAST_REVIEWED_SHA" ] && [ "$LAST_REVIEWED
 fi
 
 spinner_start "Fetching diff..."
-if ! $_TIMEOUT_CMD 300 gh pr diff "$PR_NUMBER" > "$DIFF_FILE" 2>&1; then
+if ! dh_fetch_pr_diff "$PR_NUMBER" "$REPO_PATH" "$BASE_SHA" "$HEAD_SHA" "$DIFF_FILE"; then
   spinner_fail "Failed to fetch diff"
   exit 1
 fi
