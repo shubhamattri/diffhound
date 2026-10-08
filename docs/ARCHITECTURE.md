@@ -25,11 +25,16 @@ entry point. Explicit PR commands use a separate, smaller pipeline.
 5. **Route and analyze.** The cleaned diff determines the route below. Opus
    receives a prepared prompt through `lib/api.sh`; the primary API request
    does not have repository tools.
-6. **Challenge findings.** Validators check repository evidence. Sonnet and
-   Gemini run peer passes in parallel, followed by finding verification where
-   applicable. Fast mode scopes peer context rather than disabling this stage.
-   The final review reports how many peer responses were usable.
-7. **Write and validate.** Sonnet rewrites findings using voice examples.
+6. **Challenge findings.** Mechanical validators check repository evidence.
+   Sonnet and Gemini run peer passes in parallel. `system-review.sh` then normalizes
+   JSON and chunked candidates from all three models and verifies them against
+   immutable source collected by `repo_context.py`. This replaces the older
+   fail-open model verifier and JSON-only cross-check. Complete decisions and
+   exact evidence quotes are mandatory; insufficient evidence is reported as
+   aggregate coverage, not posted as an inline defect. Fast mode retains this gate.
+7. **Write and validate.** The evidence gate uses the existing voice examples.
+   Sonnet formats the review; `verified_voice.py` preserves checked bodies,
+   constrains the comment set, rebuilds summary claims, and withholds unchecked replies.
    `lib/voice.sh` and `voice_output.py` require completed generation and valid
    comment/summary sections. One further attempt is allowed after validation
    failure; invalid output never becomes the published review body.
@@ -55,7 +60,7 @@ exclusions. Deletion-only hunks remain in the active review path.
 
 Chunks receive shared PR context and file-specific evidence. Triage suggestions
 to skip a file are demoted to low priority. Model context remains bounded;
-Gemini's peer prompt is currently capped at 14 KB. Chunk stop reasons and
+Gemini's peer prompt is capped at 14 KB with separate section budgets. Chunk stop reasons and
 coverage checks expose incomplete primary analysis.
 
 Re-reviews use ancestry-checked incremental information where available. The
@@ -91,3 +96,11 @@ a deadline and process cleanup for the whole executor job.
 
 See the [README](../README.md) for current model defaults, budgets, setup, and
 operational limitations; [Sweep](SWEEP.md) covers scheduling and state.
+
+The source collector reads at most 6,000 tracked source/configuration files,
+32 MiB total, and 500 KB per file. It excludes symlinks, build/vendor trees and
+untracked files. Candidate packets contain at most 10 KB of source references;
+primary context includes at most 12 hunk packets. These limits are included in
+the evidence; absence from a packet is never proof of absence from the system.
+Private `system-review/` archives retain candidates, source packets, decisions,
+stop reasons and aggregate counts. Keep these archives out of public artifacts.

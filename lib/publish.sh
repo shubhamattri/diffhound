@@ -269,8 +269,11 @@ dh_abandon_pending() {
 # place instead of posting: a re-review, not forced, verdict COMMENT that was
 # not a capped REQUEST_CHANGES, every file reviewed, no inline comment, no reply,
 # and a previous diffhound review to refresh.
-# Args: is_rereview force_full event model_event chunk_gaps n_inline n_replies last_review_id
+# Args: is_rereview force_full event model_event chunk_gaps n_inline n_replies last_review_id [source_checked]
 dh_quiet_rerun_ok() {
+  # Old visible history was not source-checked in this round. Refreshing would
+  # copy it into the new head's body and could resurrect an explicitly rejected claim.
+  [ "${9:-}" != source_checked ] || return 1
   [ "$1" = true ] && [ "$2" != true ] && [ "$3" = COMMENT ] && [ "$4" != REQUEST_CHANGES ] \
     && [ -z "$5" ] && [ "${6:-0}" -eq 0 ] && [ "${7:-0}" -eq 0 ] && [ -n "$8" ]
 }

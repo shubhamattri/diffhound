@@ -16,7 +16,7 @@ dh_voice_findings_expected() {
 }
 
 dh_write_voice() {
-  local system="$1" prompt="$2" output="$3" findings_expected="$4"
+  local system="$1" prompt="$2" output="$3" findings_expected="$4" verified="${5:-}"
   local attempt candidate stop effort=medium
   for attempt in 1 2; do
     candidate="${output}.attempt-${attempt}"
@@ -27,6 +27,13 @@ dh_write_voice() {
          < "$prompt" > "$candidate" 2>"${candidate}.stderr"; then
       if python3 "$_DH_VOICE_DIR/voice_output.py" "$candidate" "$stop" "$findings_expected" \
            2>>"${candidate}.stderr"; then
+        if [ -n "$verified" ]; then
+          python3 "$_DH_VOICE_DIR/verified_voice.py" "$candidate" "$verified" \
+            2>>"${candidate}.stderr" || continue
+          python3 "$_DH_VOICE_DIR/voice_output.py" "$candidate" "$stop" "$findings_expected" \
+            2>>"${candidate}.stderr" || continue
+          cp "${candidate}.withheld-replies" "${output}.withheld-replies"
+        fi
         cp "$candidate" "$output"
         return 0
       fi

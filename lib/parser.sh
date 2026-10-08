@@ -440,6 +440,8 @@ _reconcile_summary_verdict() {
 # Extract JSON block from LLM output (between ```json and ```)
 _extract_json() {
   local file="$1"
+  # A fenced JSON example inside a completed review is data, not its envelope.
+  if grep -qE '^### (INLINE_COMMENTS|SUMMARY)_(START|END)' "$file"; then return 0; fi
   sed -n '/^```json/,/^```/{/^```/d;p;}' "$file" 2>/dev/null
 }
 

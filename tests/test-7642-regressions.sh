@@ -204,12 +204,20 @@ printf 'diff --git a/f0.ts b/f0.ts\n+x\n' > "$CD/chunk-0.diff"; printf 'f0.ts\tS
 printf 'THREAD at f0.ts:1\n  REVIEWER: concern\n  AUTHOR_REPLY (dev): answered with evidence\n' > "$TMP/fthreads.txt"
 printf 'f1.ts\n' > "$TMP/incr.txt"
 LIB_DIR="$ROOT/lib"; _filter_rag_for_files() { : > "$3"; }; _trim_rag() { :; }; _call_api() { cat > /dev/null; }
-FORCE_FULL=true _review_chunks_parallel "$CD" 1 "S" "" "$TMP" "" true "$TMP/fthreads.txt" "$TMP/incr.txt"; wait
+CONTEXT_REPO="$TMP/context-repo"; mkdir -p "$CONTEXT_REPO"
+git -C "$CONTEXT_REPO" init -q
+printf 'export const capturedValue = 42;\n' > "$CONTEXT_REPO/f0.ts"
+git -C "$CONTEXT_REPO" add f0.ts
+git -C "$CONTEXT_REPO" -c user.name=Fixture -c user.email=fixture@example.invalid commit -qm fixture
+HEAD_SHA=$(git -C "$CONTEXT_REPO" rev-parse HEAD)
+printf 'diff --git a/f0.ts b/f0.ts\n+++ b/f0.ts\n@@ -0,0 +1 @@\n+export const capturedValue = 42;\n' > "$CD/chunk-0.diff"
+FORCE_FULL=true _review_chunks_parallel "$CD" 1 "S" "" "$CONTEXT_REPO" "" true "$TMP/fthreads.txt" "$TMP/incr.txt"; wait
 got=$(cat "$CD/chunk-0.prompt")
 has   "force-full chunk: full scrutiny header"     "$got" "EVERY FILE GETS FULL SCRUTINY"
 has   "force-full chunk: author answer in context" "$got" "answered with evidence"
 lacks "force-full chunk: no re-review blinders"     "$got" "# RE-REVIEW MODE"
-FORCE_FULL=false _review_chunks_parallel "$CD" 1 "S" "" "$TMP" "" true "$TMP/fthreads.txt" "$TMP/incr.txt"; wait
+has "chunk source context: pinned revision" "$got" "$HEAD_SHA"
+FORCE_FULL=false _review_chunks_parallel "$CD" 1 "S" "" "$CONTEXT_REPO" "" true "$TMP/fthreads.txt" "$TMP/incr.txt"; wait
 has   "plain re-review chunk: blinders kept"       "$(cat "$CD/chunk-0.prompt")" "# RE-REVIEW MODE"
 unset -f _call_api
 

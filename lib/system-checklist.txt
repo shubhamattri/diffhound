@@ -1,0 +1,14 @@
+## System understanding, architectural fit, reuse and maintainability
+Before proposing a change, trace the existing caller, guards, state, consumer and later lifecycle.
+Use the repository context supplied here; you cannot run tools or invent search/test results.
+Look for existing helpers and settings. A reuse suggestion must name the implementation and
+show compatible behavior, authorization, side effects and lifecycle, not just a similar name.
+Identify misplaced responsibility by a concrete consequence and an existing boundary.
+Check unused functions/imports/branches, duplicate implementations, redundant state,
+speculative abstractions, misleading comments and tests that do not exercise the changed path.
+For dead code, consider exports, decorators, registration, reflection and external consumers;
+zero search hits in bounded context is insufficient. For ineffective tests, trace the assertions
+through the changed function; do not equate sleeps or mocks with a vacuous test.
+Prefer removal or reuse when it preserves behavior. Do not invent layers or style complaints.
+Show the source evidence and the counterexample you ruled out. If evidence is incomplete,
+mark the claim UNVERIFIABLE. Do not claim execution, production state or mutation results.
