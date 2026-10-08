@@ -564,12 +564,53 @@ print(json.dumps({"decisions":[{"id":i["id"],"status":"UNVERIFIED","reason":"bou
         self.assertEqual(audit["not_actionable"], 1)
         for invalid in (
             dict(refs[1], text="    room_tone_db: float = 0"),
-            dict(refs[1], line=99),
             dict(refs[1], path="not_supplied.py"),
         ):
             response["decisions"][0]["evidence"] = [refs[0], invalid]
             with self.assertRaisesRegex(ValueError, "exact supplied source evidence"):
                 reconcile(items, packets, response)
+
+    def test_citation_line_repair_requires_one_exact_source_match(self):
+        item = {"file": "capacity.py", "line": 2, "severity": "NIT", "body": "claim"}
+        ref = {"path": "capacity.py", "line": 2, "text": "    await store.claim(key)"}
+        packet = {"references": [ref, dict(ref)]}
+        decision = {
+            "id": 0,
+            "status": "SUPPORTED",
+            "reason": "source",
+            "body": "checked concern",
+            "evidence": [dict(ref, line=99)],
+        }
+        response = {"decisions": [decision]}
+        kept, audit = reconcile([item], [packet], response)
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(audit["citation_locations_corrected"], 1)
+        directory = self.root / "repaired-gate"
+        directory.mkdir()
+        (directory / "count").write_text("1")
+        (directory / "batch-000.json").write_text(
+            json.dumps({"items": [item], "packets": [packet]})
+        )
+        (directory / "batch-000.response").write_text(json.dumps(response))
+        (directory / "batch-000.stop").write_text("end_turn")
+        apply(str(directory))
+        self.assertEqual(
+            json.loads((directory / "audit.json").read_text())["supported"], 1
+        )
+        self.assertEqual(response["decisions"][0]["evidence"][0]["line"], 99)
+        for invalid in (
+            dict(ref, line=0),
+            dict(ref, line=True),
+            dict(ref, line=99, extra="untrusted"),
+            dict(ref, line=99, text="invented"),
+        ):
+            decision["evidence"] = [invalid]
+            with self.assertRaisesRegex(ValueError, "exact supplied source evidence"):
+                reconcile([item], [packet], response)
+        decision["evidence"] = [dict(ref, line=99)]
+        packet["references"].append(dict(ref, line=3))
+        with self.assertRaisesRegex(ValueError, "exact supplied source evidence"):
+            reconcile([item], [packet], response)
 
     def test_invalid_or_missing_decisions_never_pass_through(self):
         item = {
@@ -804,10 +845,41 @@ invented summary defect
         from voice_output import validate
 
         validate(result, "end_turn", True)
-        with self.assertRaises(ValueError):
-            constrain(voice, [])
-        with self.assertRaises(ValueError):
-            constrain(voice.replace("consent.py:2", "other.py:2"), findings)
+        empty = constrain(voice, [])
+        self.assertNotIn("COMMENT:", empty)
+        self.assertNotIn("unsupported impact", empty)
+        moved = constrain(voice.replace("consent.py:2", "other.py:2"), findings)
+        self.assertNotIn("other.py", moved)
+        self.assertEqual(moved, result)
+        omitted = voice.replace(
+            "COMMENT: consent.py:2:SHOULD-FIX — unsupported impact that never happens\n",
+            "",
+        )
+        self.assertEqual(constrain(omitted, findings), result)
+        raw = self.root / "raw-voice"
+        raw.write_text(omitted)
+        checked = self.root / "checked.json"
+        checked.write_text(json.dumps(findings))
+        output = self.root / "written-voice"
+        lib = Path(__file__).resolve().parents[1] / "lib"
+        subprocess.run(
+            [
+                "bash",
+                "-c",
+                'source "$1/voice.sh"; _call_api_system() { cat "$MOCK_VOICE"; printf end_turn > "$DIFFHOUND_STOP_REASON_FILE"; }; dh_write_voice "$2" "$2" "$3" true "$4"',
+                "test",
+                str(lib),
+                str(raw),
+                str(output),
+                str(checked),
+            ],
+            env=dict(os.environ, MOCK_VOICE=str(raw)),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertEqual(output.read_text(), result)
+        self.assertFalse(Path(str(output) + ".attempt-2").exists())
         self.assertIn("**Total**", result)
         with self.assertRaises(ValueError):
             constrain(voice.replace("| Tests | 20/20 | invented |", ""), findings)

@@ -18,6 +18,8 @@ dh_voice_findings_expected() {
 dh_write_voice() {
   local system="$1" prompt="$2" output="$3" findings_expected="$4" verified="${5:-}"
   local attempt candidate stop effort=medium
+  local raw_findings_expected="$findings_expected"
+  [ -z "$verified" ] || raw_findings_expected=false
   for attempt in 1 2; do
     candidate="${output}.attempt-${attempt}"
     stop="${candidate}.stop"
@@ -25,7 +27,7 @@ dh_write_voice() {
     if DIFFHOUND_STAGE=voice-rewrite DIFFHOUND_STOP_REASON_FILE="$stop" \
          _call_api_system "claude-sonnet-5" 128000 900 "$system" "$effort" \
          < "$prompt" > "$candidate" 2>"${candidate}.stderr"; then
-      if python3 "$_DH_VOICE_DIR/voice_output.py" "$candidate" "$stop" "$findings_expected" \
+      if python3 "$_DH_VOICE_DIR/voice_output.py" "$candidate" "$stop" "$raw_findings_expected" \
            2>>"${candidate}.stderr"; then
         if [ -n "$verified" ]; then
           python3 "$_DH_VOICE_DIR/verified_voice.py" "$candidate" "$verified" \
