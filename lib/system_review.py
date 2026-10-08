@@ -77,13 +77,15 @@ def reconcile(items, packets, response):
         )
     }
     kept = []
+    # Every packet in this batch was supplied together from the same Git head.
+    supplied = [ref for packet in packets for ref in packet["references"]]
     for item, packet, decision in zip(items, packets, decisions):
         status = decision.get("status", "").lower()
         if status not in counts or not decision.get("reason"):
             raise ValueError("invalid finding decision")
         evidence = decision.get("evidence", [])
         if status != "unverified" and (
-            not evidence or any(ref not in packet["references"] for ref in evidence)
+            not evidence or any(ref not in supplied for ref in evidence)
         ):
             raise ValueError("decision lacks exact supplied source evidence")
         counts[status] += 1

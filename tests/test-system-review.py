@@ -343,6 +343,49 @@ print(json.dumps({"decisions":[{"id":i["id"],"status":"UNVERIFIED","reason":"bou
         self.assertNotIn("never", out[0]["body"])
         self.assertEqual(audit["corrected"], 1)
 
+    def test_cross_finding_citations_use_exact_source_from_same_batch(self):
+        items = [
+            {"file": "capacity.py", "line": 2, "severity": "NIT", "body": "claim"},
+            {"file": "settings.py", "line": 2, "severity": "NIT", "body": "claim"},
+        ]
+        refs = [
+            {"path": "capacity.py", "line": 2, "text": "    await store.claim(key)"},
+            {
+                "path": "settings.py",
+                "line": 2,
+                "text": "    room_tone_db: float = -42.0",
+            },
+        ]
+        packets = [{"references": [ref]} for ref in refs]
+        response = {
+            "decisions": [
+                {
+                    "id": 0,
+                    "status": "SUPPORTED",
+                    "body": "precise concern",
+                    "reason": "source",
+                    "evidence": refs,
+                },
+                {
+                    "id": 1,
+                    "status": "NOT_ACTIONABLE",
+                    "reason": "default supplied",
+                    "evidence": [refs[1]],
+                },
+            ]
+        }
+        findings, audit = reconcile(items, packets, response)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(audit["not_actionable"], 1)
+        for invalid in (
+            dict(refs[1], text="    room_tone_db: float = 0"),
+            dict(refs[1], line=99),
+            dict(refs[1], path="not_supplied.py"),
+        ):
+            response["decisions"][0]["evidence"] = [refs[0], invalid]
+            with self.assertRaisesRegex(ValueError, "exact supplied source evidence"):
+                reconcile(items, packets, response)
+
     def test_invalid_or_missing_decisions_never_pass_through(self):
         item = {
             "file": "capacity.py",

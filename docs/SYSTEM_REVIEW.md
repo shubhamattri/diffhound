@@ -19,6 +19,8 @@ Legacy notes without an unambiguous file, numeric line and severity are archived
 as UNVERIFIED, counted in coverage and withheld; locations are never guessed.
 Raw inputs are retained before parsing. Up to four verification calls run together,
 each bounded to 180 seconds within the 600-second stage deadline. Every child is reaped.
+Exact citations may refer to any source packet supplied in the same batch and Git head;
+fabricated text, paths or line numbers remain invalid.
 Keep unverified candidates in the private archive and report aggregate coverage publicly.
 Reserve peer prompt space for instructions, findings, actual diff, and repository context.
 Peer completion is transport coverage, not proof that every finding is correct.
