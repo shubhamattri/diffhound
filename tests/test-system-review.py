@@ -420,6 +420,8 @@ time.sleep(0.15)
 change(-1)
 assert sys.argv[1] == "128000"
 assert 0 < int(sys.argv[2]) <= 900
+schema = json.loads(pathlib.Path(sys.argv[3]).read_text())
+assert schema["properties"]["decisions"]["items"]["properties"]["status"]["enum"] == ["SUPPORTED", "CORRECTED", "CONTRADICTED", "NOT_ACTIONABLE", "UNVERIFIED"]
 if os.environ["MODE"] == "fail" and "candidate 0" in items[0]["finding"]["body"]:
     sys.exit(1)
 cutoff = os.environ["MODE"] == "cutoff" and "candidate 0" in items[0]["finding"]["body"]
@@ -455,7 +457,7 @@ print(json.dumps({"decisions":[{"id":i["id"],"status":"UNVERIFIED","reason":"bou
                 [
                     "/bin/bash",
                     "-c",
-                    'set -uo pipefail; source "$LIB_DIR/platform.sh"; source "$LIB_DIR/system-review.sh"; _call_api() { python3 "$MOCK" "$2" "$3"; }; dh_system_review "$1" "$2" "$3" "$4" "$5" "$5"',
+                    'set -uo pipefail; source "$LIB_DIR/platform.sh"; source "$LIB_DIR/system-review.sh"; _call_api() { python3 "$MOCK" "$2" "$3" "$5"; }; dh_system_review "$1" "$2" "$3" "$4" "$5" "$5"',
                     "test",
                     str(self.root),
                     self.sha,
@@ -488,6 +490,57 @@ print(json.dumps({"decisions":[{"id":i["id"],"status":"UNVERIFIED","reason":"bou
             complete = mode not in {"fail", "cutoff"}
             self.assertEqual(result.returncode == 0, complete, result.stderr)
             self.assertEqual((directory / "findings.json").exists(), complete)
+
+    def test_source_schema_reaches_api_without_changing_other_requests(self):
+        lib = Path(__file__).resolve().parents[1] / "lib"
+        schema = lib / "system-review-schema.json"
+        for mode, schema_path in (
+            ("structured", str(schema)),
+            ("ordinary", ""),
+            ("missing", str(self.root / "missing.json")),
+        ):
+            captured = self.root / f"{mode}-request.json"
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    """source "$1/api.sh"
+_TIMEOUT_CMD=mock_timeout
+mock_timeout() { shift; "$@"; }
+curl() {
+  for arg in "$@"; do case "$arg" in @*) cp "${arg#@}" "$CAPTURE";; esac; done
+  printf '%s' '{"stop_reason":"end_turn","content":[{"type":"text","text":"{\\"decisions\\":[]}"}]}'
+}
+_cost_record() { cat >/dev/null; }
+_api_empty_is_failure() { [ -n "$1" ]; }
+_call_api claude-sonnet-5 128000 900 medium "$2" </dev/null
+""",
+                    "test",
+                    str(lib),
+                    schema_path,
+                ],
+                env=dict(
+                    os.environ, CAPTURE=str(captured), ANTHROPIC_API_KEY="fixture"
+                ),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if mode == "missing":
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(captured.exists())
+                continue
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout), {"decisions": []})
+            request = json.loads(captured.read_text())
+            self.assertEqual(request["output_config"]["effort"], "medium")
+            if mode == "structured":
+                self.assertEqual(
+                    request["output_config"]["format"],
+                    {"type": "json_schema", "schema": json.loads(schema.read_text())},
+                )
+            else:
+                self.assertNotIn("format", request["output_config"])
 
     def test_apply_preserves_legacy_prepared_runs_but_requires_new_metadata(self):
         primary = self.root / "empty.txt"
