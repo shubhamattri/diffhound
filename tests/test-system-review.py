@@ -581,6 +581,63 @@ _call_api claude-sonnet-5 128000 900 medium "$2" </dev/null
         self.assertNotIn("never", out[0]["body"])
         self.assertEqual(audit["corrected"], 1)
 
+    def test_severity_escalation_is_withheld_without_losing_valid_neighbors(self):
+        items = [
+            {"file": "capacity.py", "line": 2, "severity": severity, "body": "claim"}
+            for severity in ("OPEN_QUESTION", "SHOULD-FIX", "SHOULD-FIX")
+        ]
+        packets = [self.repo.packet(item) for item in items]
+        ref = next(
+            r
+            for r in packets[0]["references"]
+            if r["path"] == "capacity.py" and r["line"] == 2
+        )
+        decisions = [
+            {
+                "id": i,
+                "status": "SUPPORTED",
+                "body": "Checked claim.",
+                "reason": "Source evidence.",
+                "evidence": [ref],
+                "severity": severity,
+            }
+            for i, severity in enumerate(("NIT", "BLOCKING", "NIT"))
+        ]
+        response = {"decisions": decisions}
+        out, audit = reconcile(items, packets, response)
+        self.assertEqual(
+            out,
+            [
+                {
+                    "file": "capacity.py",
+                    "line": 2,
+                    "severity": "NIT",
+                    "body": "Checked claim.",
+                }
+            ],
+        )
+        self.assertEqual(
+            audit,
+            {
+                "supported": 1,
+                "corrected": 0,
+                "contradicted": 0,
+                "not_actionable": 0,
+                "unverified": 2,
+                "severity_escalations_withheld": 2,
+            },
+        )
+        self.assertEqual(decisions[0]["severity"], "NIT")
+        decisions[0]["severity"] = "UNKNOWN"
+        with self.assertRaisesRegex(ValueError, "invalid verification severity"):
+            reconcile(items, packets, response)
+        decisions[0]["severity"] = "NIT"
+        decisions[0]["evidence"] = [
+            {"path": "capacity.py", "line": 2, "text": "invented source"}
+        ]
+        with self.assertRaisesRegex(ValueError, "exact supplied source evidence"):
+            reconcile(items, packets, response)
+
     def test_cross_finding_citations_use_exact_source_from_same_batch(self):
         items = [
             {"file": "capacity.py", "line": 2, "severity": "NIT", "body": "claim"},

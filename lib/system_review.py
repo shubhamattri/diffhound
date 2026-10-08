@@ -141,8 +141,16 @@ def reconcile(items, packets, response):
                 raise ValueError("finding location is not in captured source")
             severity = decision.get("severity", item["severity"])
             ranks = {"OPEN_QUESTION": 0, "NIT": 1, "SHOULD-FIX": 2, "BLOCKING": 3}
-            if severity not in ranks or ranks[severity] > ranks[item["severity"]]:
-                raise ValueError("verification cannot escalate severity")
+            if severity not in ranks:
+                raise ValueError("invalid verification severity")
+            if ranks[severity] > ranks[item["severity"]]:
+                # A disputed classification cannot become a published finding.
+                counts[status] -= 1
+                counts["unverified"] += 1
+                counts["severity_escalations_withheld"] = (
+                    counts.get("severity_escalations_withheld", 0) + 1
+                )
+                continue
             kept.append(
                 {
                     "file": item["file"],
