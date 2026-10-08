@@ -356,14 +356,18 @@ def change(delta):
 change(1)
 time.sleep(0.15)
 change(-1)
+assert sys.argv[1] == "128000"
+assert 0 < int(sys.argv[2]) <= 900
 if os.environ["MODE"] == "fail" and "candidate 0" in items[0]["finding"]["body"]:
     sys.exit(1)
-pathlib.Path(os.environ["DIFFHOUND_STOP_REASON_FILE"]).write_text("end_turn")
+cutoff = os.environ["MODE"] == "cutoff" and "candidate 0" in items[0]["finding"]["body"]
+pathlib.Path(os.environ["DIFFHOUND_STOP_REASON_FILE"]).write_text("max_tokens" if cutoff else "end_turn")
 print(json.dumps({"decisions":[{"id":i["id"],"status":"UNVERIFIED","reason":"bounded evidence","evidence":[]} for i in items]}))
 """)
         for mode, candidate_count, calls in (
             ("good", 40, 5),
             ("fail", 40, 4),
+            ("cutoff", 40, 4),
             ("empty", 0, 0),
             ("wave", 32, 4),
         ):
@@ -389,7 +393,7 @@ print(json.dumps({"decisions":[{"id":i["id"],"status":"UNVERIFIED","reason":"bou
                 [
                     "/bin/bash",
                     "-c",
-                    'set -uo pipefail; source "$LIB_DIR/platform.sh"; source "$LIB_DIR/system-review.sh"; _call_api() { python3 "$MOCK"; }; dh_system_review "$1" "$2" "$3" "$4" "$5" "$5"',
+                    'set -uo pipefail; source "$LIB_DIR/platform.sh"; source "$LIB_DIR/system-review.sh"; _call_api() { python3 "$MOCK" "$2" "$3"; }; dh_system_review "$1" "$2" "$3" "$4" "$5" "$5"',
                     "test",
                     str(self.root),
                     self.sha,
@@ -419,8 +423,9 @@ print(json.dumps({"decisions":[{"id":i["id"],"status":"UNVERIFIED","reason":"bou
             self.assertLessEqual(counts["maximum"], 4)
             self.assertEqual(counts["started"], counts["finished"])
             self.assertEqual(counts["started"], calls)
-            self.assertEqual(result.returncode == 0, mode != "fail", result.stderr)
-            self.assertEqual((directory / "findings.json").exists(), mode != "fail")
+            complete = mode not in {"fail", "cutoff"}
+            self.assertEqual(result.returncode == 0, complete, result.stderr)
+            self.assertEqual((directory / "findings.json").exists(), complete)
 
     def test_apply_preserves_legacy_prepared_runs_but_requires_new_metadata(self):
         primary = self.root / "empty.txt"

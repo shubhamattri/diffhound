@@ -15,10 +15,16 @@ dh_system_review() {
       failed=1
       break
     fi
-    [ "$remaining" -le 180 ] || remaining=180
-    _DIFFHOUND_EFFORT_RETRY=1 DIFFHOUND_STAGE=system-review DIFFHOUND_STOP_REASON_FILE="${base}.stop" \
-      _call_api "claude-sonnet-5" 16000 "$remaining" medium \
-      < "$prompt" > "${base}.response" 2>"${base}.stderr" &
+    [ "$remaining" -le 900 ] || remaining=900
+    (
+      _DIFFHOUND_EFFORT_RETRY=1 DIFFHOUND_STAGE=system-review DIFFHOUND_STOP_REASON_FILE="${base}.stop" \
+        _call_api "claude-sonnet-5" 128000 "$remaining" medium \
+        < "$prompt" > "${base}.response" 2>"${base}.stderr" || exit 1
+      [ "$(cat "${base}.stop" 2>/dev/null)" = end_turn ] || {
+        echo 'Source verification output incomplete; stopping this wave' >> "${base}.stderr"
+        exit 1
+      }
+    ) &
     pids+=("$!")
     if [ "${#pids[@]}" -eq 4 ]; then
       for pid in "${pids[@]}"; do wait "$pid" || failed=1; done
