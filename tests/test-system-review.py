@@ -201,6 +201,124 @@ class SystemReviewTests(unittest.TestCase):
         self.assertNotIn("Total", withheld[0]["body"])
         self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
 
+    def test_large_candidate_set_is_fully_batched_without_a_count_cliff(self):
+        primary = self.root / "large.txt"
+        primary.write_text(
+            json.dumps(
+                {
+                    "findings": [
+                        {
+                            "file": "capacity.py",
+                            "line": 2,
+                            "severity": "NIT",
+                            "body": f"candidate {i}",
+                        }
+                        for i in range(121)
+                    ]
+                }
+            )
+        )
+        peer = self.root / "peer.txt"
+        peer.write_text("UNAVAILABLE")
+        directory = self.root / "large-gate"
+        prepare(
+            str(self.root),
+            self.sha,
+            str(directory),
+            [str(primary), str(peer), str(peer)],
+        )
+        batches = sorted(directory.glob("batch-*.json"))
+        self.assertEqual(len(batches), 16)
+        self.assertEqual((directory / "count").read_text(), "121")
+        for batch in batches:
+            items = json.loads(batch.read_text())["items"]
+            self.assertLessEqual(len(items), 8)
+            batch.with_suffix(".stop").write_text("end_turn")
+            batch.with_suffix(".response").write_text(
+                json.dumps(
+                    {
+                        "decisions": [
+                            {
+                                "id": i,
+                                "status": "UNVERIFIED",
+                                "reason": "insufficient evidence",
+                                "evidence": [],
+                            }
+                            for i in range(len(items))
+                        ]
+                    }
+                )
+            )
+        apply(str(directory))
+        self.assertEqual(
+            json.loads((directory / "audit.json").read_text())["unverified"], 121
+        )
+        self.assertEqual(json.loads((directory / "findings.json").read_text()), [])
+        batches[-1].with_suffix(".response").write_text('{"decisions": []}')
+        with self.assertRaisesRegex(ValueError, "incomplete"):
+            apply(str(directory))
+
+    def test_preparation_timeout_prevents_provider_calls(self):
+        lib = Path(__file__).resolve().parents[1] / "lib"
+        timeout = self.root / "timeout"
+        timeout.write_text('#!/bin/bash\nprintf "%s" "$1" > "$BUDGET"\nexit 124\n')
+        timeout.chmod(0o755)
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                """source "$LIB_DIR/system-review.sh"
+_call_api() { touch "$CALLED"; }
+dh_system_review unused unused unused unused unused unused
+""",
+            ],
+            env=dict(
+                os.environ,
+                LIB_DIR=str(lib),
+                _TIMEOUT_CMD=str(timeout),
+                BUDGET=str(self.root / "budget"),
+                CALLED=str(self.root / "called"),
+            ),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue((self.root / "budget").exists())
+        self.assertLessEqual(int((self.root / "budget").read_text()), 1200)
+        self.assertFalse((self.root / "called").exists())
+
+    def test_expired_preparation_budget_cannot_apply_even_an_empty_review(self):
+        lib = Path(__file__).resolve().parents[1] / "lib"
+        primary = self.root / "empty.txt"
+        primary.write_text('{"findings": []}')
+        directory = self.root / "expired-gate"
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                """source "$LIB_DIR/system-review.sh"
+fake_timeout() { shift; "$@"; SECONDS=$((SECONDS + 1201)); }
+_TIMEOUT_CMD=fake_timeout
+_call_api() { return 99; }
+dh_system_review "$1" "$2" "$3" "$4" "$4" "$4"
+""",
+                "test",
+                str(self.root),
+                self.sha,
+                str(directory),
+                str(primary),
+            ],
+            env=dict(os.environ, LIB_DIR=str(lib)),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("deadline exceeded", result.stderr)
+        self.assertTrue((directory / "count").exists())
+        self.assertFalse((directory / "audit.json").exists())
+
     def test_gate_batches_are_bounded_and_reaped_on_provider_failure(self):
         lib = Path(__file__).resolve().parents[1] / "lib"
         primary = self.root / "many.txt"
@@ -271,7 +389,7 @@ print(json.dumps({"decisions":[{"id":i["id"],"status":"UNVERIFIED","reason":"bou
                 [
                     "/bin/bash",
                     "-c",
-                    'set -uo pipefail; source "$LIB_DIR/system-review.sh"; _call_api() { python3 "$MOCK"; }; dh_system_review "$1" "$2" "$3" "$4" "$5" "$5"',
+                    'set -uo pipefail; source "$LIB_DIR/platform.sh"; source "$LIB_DIR/system-review.sh"; _call_api() { python3 "$MOCK"; }; dh_system_review "$1" "$2" "$3" "$4" "$5" "$5"',
                     "test",
                     str(self.root),
                     self.sha,
@@ -469,7 +587,8 @@ else:
                 [
                     "bash",
                     "-c",
-                    """source "$LIB_DIR/system-review.sh"
+                    """source "$LIB_DIR/platform.sh"
+source "$LIB_DIR/system-review.sh"
 _call_api() { python3 "$MOCK"; }
 dh_system_review "$1" "$2" "$3" "$4" "$5" "$5"
 """,

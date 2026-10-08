@@ -161,10 +161,6 @@ def prepare(repo, sha, directory, paths):
             }
             if item not in items:
                 items.append(item)
-    if len(items) > 120:
-        raise ValueError(
-            "system review exceeds 120-candidate budget; refusing partial publication"
-        )
     instructions = Path(__file__).with_name("system-review-prompt.txt").read_text()
     voice_file = os.environ.get("DIFFHOUND_VERIFICATION_VOICE_FILE")
     if voice_file:

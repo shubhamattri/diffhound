@@ -18,7 +18,10 @@ Missing responses or malformed decisions fail publication; no fail-open fallback
 Legacy notes without an unambiguous file, numeric line and severity are archived
 as UNVERIFIED, counted in coverage and withheld; locations are never guessed.
 Raw inputs are retained before parsing. Up to four verification calls run together,
-each bounded to 180 seconds within the 600-second stage deadline. Every child is reaped.
+each bounded to 180 seconds within the 1,200-second stage deadline. Every child is reaped.
+All located candidates are batched without a separate count limit. Exhausting the deadline
+or missing a candidate decision stops publication; a partial review never passes the gate.
+Preparation and final reconciliation use the same remaining timeout budget.
 Exact citations may refer to any source packet supplied in the same batch and Git head;
 fabricated text, paths or line numbers remain invalid.
 Keep unverified candidates in the private archive and report aggregate coverage publicly.

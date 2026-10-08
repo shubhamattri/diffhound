@@ -123,7 +123,7 @@ Diff acquisition and model input have different budgets. Generated files, lockfi
 | Budget | Default |
 | --- | --- |
 | Primary, Sonnet peer, and voice output | Up to 128,000 tokens per call |
-| Repository evidence gate | 16,000 output tokens per batch of 8 candidates, up to 4 concurrent calls; 180 seconds per call, 600 seconds total; at most 120 candidates with valid locations |
+| Repository evidence gate | 16,000 output tokens per batch of 8 candidates, up to 4 concurrent calls; 180 seconds per call, 1,200 seconds total; every located candidate must receive a decision |
 | Haiku chunk-merge output | Up to 64,000 tokens per call |
 | Primary, Sonnet peer, and voice call timeout | 900 seconds |
 | Chunk-merge call timeout | 600 seconds |
