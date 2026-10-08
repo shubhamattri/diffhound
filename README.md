@@ -139,7 +139,7 @@ The final voice response must finish with `end_turn` and contain complete commen
 - Keep the full diff available for cross-file context. Large re-reviews may still analyze all chunks while focusing feedback on changes.
 - Reconcile findings by full path and concern. Deterministic matching handles exact repeats; a model judge can link reworded, nonblocking findings.
 - Use explicit thread-resolution evidence. A nearby edit or a finding's absence from the next review does not close it; recurrence and severity increases can reopen or escalate it.
-- Put inline overflow into the review body and preserve it in finding history. Unchanged reruns may refresh an earlier review instead of creating another.
+- Put inline overflow into the review body and preserve it in finding history. Source-checked rounds link prior reviews and keep current assertions within the checked finding set.
 
 History v2 stores changed finding records in submitted review bodies and links earlier rounds. Fresh workers can reconstruct state from GitHub without a separate database. Unreadable history stops publication; unavailable thread status retains findings. Once v2 history exists, rollback requires a v2-aware build.
 
@@ -168,6 +168,8 @@ History v2 stores changed finding records in submitted review bodies and links e
 | `DIFFHOUND_OFFLINE` | `0` | Test mode for model-calling validators; explicit commands are disabled. |
 
 Review invocations load `~/.profile`; explicit commands require their environment to be exported by the caller. The model backend does not use `CLAUDE_CODE_OAUTH_TOKEN`.
+
+The runtime sets `DIFFHOUND_SOURCE_CHECK_ENABLED=1` internally when it owns the final evidence gate. Older running processes retain their legacy verifier during an upgrade; this handshake is not a user configuration option.
 
 ### Repository guidance and voice
 

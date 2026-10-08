@@ -93,6 +93,33 @@ class SystemReviewTests(unittest.TestCase):
         )
         self.assertIn("_REFUSAL_WORDS = {'dont', 'no'}", json.dumps(packet))
 
+    def test_running_legacy_review_keeps_its_verifier_during_upgrade(self):
+        lib = Path(__file__).resolve().parents[1] / "lib"
+        verifier = self.root / "verifier.sh"
+        verifier.write_text("#!/bin/bash\ncat >/dev/null\nprintf 'legacy checked\\n'\n")
+        verifier.chmod(0o755)
+        for mode, expected in (("0", "legacy checked"), ("1", "candidate")):
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'eval "$(sed -n \'/^dh_legacy_verifier() {/,/^}/p\' "$1/validators/run-all.sh")"; '
+                    'export V="$2" DIFFHOUND_SOURCE_CHECK_ENABLED="$3"; '
+                    "printf candidate | dh_legacy_verifier",
+                    "test",
+                    str(lib),
+                    str(self.root),
+                    mode,
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertEqual(result.stdout.strip(), expected)
+        self.assertIn(
+            "export DIFFHOUND_SOURCE_CHECK_ENABLED=1", (lib / "review.sh").read_text()
+        )
+
     def test_dead_code_search_is_not_reachability_proof(self):
         packet = self.repo.packet(
             {"file": "helpers.py", "line": 2, "body": "`registered` has no callers"}

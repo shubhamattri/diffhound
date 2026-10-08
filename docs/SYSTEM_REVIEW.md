@@ -21,3 +21,5 @@ Peer completion is transport coverage, not proof that every finding is correct.
 Tests use synthetic repositories; no private source or review content belongs in this repo.
 Acceptance includes mutation checks, neighboring true defects, bounded retrieval, and live publication.
 Deploy only after personal PR checks pass; preserve learned runtime data and active reviews.
+The internal `DIFFHOUND_SOURCE_CHECK_ENABLED` handshake skips the old verifier only
+for processes that run the final source gate; older running reviews keep their verifier.
