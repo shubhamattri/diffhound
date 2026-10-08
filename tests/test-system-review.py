@@ -7,10 +7,11 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 from repo_context import Repository, balanced_peer
-from system_review import candidates, reconcile
+from system_review import apply, candidates, prepare, reconcile
 from verified_voice import constrain
 
 
@@ -77,6 +78,28 @@ class SystemReviewTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             Repository(self.root, "0" * 40)
 
+    def test_repeated_evidence_queries_parse_each_immutable_file_once(self):
+        import ast
+
+        with patch("repo_context.ast.parse", wraps=ast.parse) as parse:
+            original = self.repo.window("consent.py", 2)
+            for _ in range(20):
+                self.assertEqual(self.repo.window("consent.py", 2), original)
+                self.repo.window("consent.py", 6)
+            self.assertEqual(parse.call_count, 1)
+
+    def test_symbol_search_preserves_line_numbers_and_unique_lines(self):
+        (self.root / "symbols.py").write_text(
+            "shared_name = 'shared_name'\n\nprint(shared_name)\nlonger_shared_name = 1\n"
+        )
+        self.git("add", "symbols.py")
+        self.git("commit", "-qm", "repeated references")
+        repository = Repository(self.root, self.git("rev-parse", "HEAD").strip())
+        self.assertEqual(
+            repository.occurrences("shared_name"),
+            [("symbols.py", 1), ("symbols.py", 3)],
+        )
+
     def test_referenced_constant_is_retrieved_outside_function_window(self):
         (self.root / "policy.py").write_text(
             "_REFUSAL_WORDS = {'dont', 'no'}\n"
@@ -103,9 +126,11 @@ class SystemReviewTests(unittest.TestCase):
                 [
                     "bash",
                     "-c",
-                    'eval "$(sed -n \'/^dh_legacy_verifier() {/,/^}/p\' "$1/validators/run-all.sh")"; '
-                    'export V="$2" DIFFHOUND_SOURCE_CHECK_ENABLED="$3"; '
-                    "printf candidate | dh_legacy_verifier",
+                    (
+                        'eval "$(sed -n \'/^dh_legacy_verifier() {/,/^}/p\' "$1/validators/run-all.sh")"; '
+                        'export V="$2" DIFFHOUND_SOURCE_CHECK_ENABLED="$3"; '
+                        "printf candidate | dh_legacy_verifier"
+                    ),
                     "test",
                     str(lib),
                     str(self.root),
@@ -145,8 +170,153 @@ class SystemReviewTests(unittest.TestCase):
         self.assertEqual(len(candidates(text)), 2)
         self.assertNotIn("FINDINGS_END", candidates(text)[1]["body"])
         self.assertEqual(candidates('```json\n{"findings": []}\n```'), [])
-        with self.assertRaises(ValueError):
-            candidates(text + "FINDING: other.py:bad:BLOCKING\nWHAT: second issue")
+        mixed = candidates(text + "FINDING: other.py:bad:BLOCKING\nWHAT: second issue")
+        self.assertEqual(len(mixed), 3)
+        self.assertIn("unverified", mixed[-1])
+        self.assertEqual(
+            candidates("FINDING: a.py:12 — NIT\nWHAT: exact cite")[0]["line"], 12
+        )
+
+    def test_unlocatable_notes_are_archived_counted_and_withheld(self):
+        primary = self.root / "primary.txt"
+        primary.write_text(
+            "## FINDINGS_START\nFINDING: helpers.py:CROSS-FILE:NIT\nWHAT: possible reuse\n## FINDINGS_END\n## SCORECARD_START\nTotal: 100/100\n## SCORECARD_END\n"
+        )
+        peer = self.root / "peer.txt"
+        peer.write_text("GEMINI_UNAVAILABLE")
+        directory = self.root / "gate"
+        prepare(
+            str(self.root),
+            self.sha,
+            str(directory),
+            [str(primary), str(peer), str(peer)],
+        )
+        apply(str(directory))
+        self.assertEqual(
+            json.loads((directory / "audit.json").read_text()), {"unverified": 1}
+        )
+        self.assertEqual(json.loads((directory / "findings.json").read_text()), [])
+        self.assertEqual((directory / "input-0.txt").read_text(), primary.read_text())
+        withheld = json.loads((directory / "withheld.json").read_text())
+        self.assertNotIn("Total", withheld[0]["body"])
+        self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+
+    def test_gate_batches_are_bounded_and_reaped_on_provider_failure(self):
+        lib = Path(__file__).resolve().parents[1] / "lib"
+        primary = self.root / "many.txt"
+        primary.write_text(
+            json.dumps(
+                {
+                    "findings": [
+                        {
+                            "file": "consent.py",
+                            "line": 2,
+                            "severity": "NIT",
+                            "body": f"candidate {i}",
+                        }
+                        for i in range(40)
+                    ]
+                }
+            )
+        )
+        peer = self.root / "peer.txt"
+        peer.write_text("GEMINI_UNAVAILABLE")
+        mock = self.root / "parallel-mock.py"
+        mock.write_text("""import fcntl, json, os, pathlib, sys, time
+text = sys.stdin.read()
+items = json.loads(text[text.index("\\n[{")+1:])
+root = pathlib.Path(os.environ["COUNTERS"])
+def change(delta):
+    with (root / "lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        p = root / "counts"
+        d = json.loads(p.read_text()) if p.exists() else {"active":0,"maximum":0,"started":0,"finished":0}
+        d["active"] += delta
+        d["maximum"] = max(d["maximum"], d["active"])
+        d["started" if delta > 0 else "finished"] += 1
+        p.write_text(json.dumps(d))
+change(1)
+time.sleep(0.15)
+change(-1)
+if os.environ["MODE"] == "fail" and "candidate 0" in items[0]["finding"]["body"]:
+    sys.exit(1)
+pathlib.Path(os.environ["DIFFHOUND_STOP_REASON_FILE"]).write_text("end_turn")
+print(json.dumps({"decisions":[{"id":i["id"],"status":"UNVERIFIED","reason":"bounded evidence","evidence":[]} for i in items]}))
+""")
+        for mode, candidate_count, calls in (
+            ("good", 40, 5),
+            ("fail", 40, 4),
+            ("empty", 0, 0),
+            ("wave", 32, 4),
+        ):
+            primary.write_text(
+                json.dumps(
+                    {
+                        "findings": [
+                            {
+                                "file": "consent.py",
+                                "line": 2,
+                                "severity": "NIT",
+                                "body": f"candidate {i}",
+                            }
+                            for i in range(candidate_count)
+                        ]
+                    }
+                )
+            )
+            counters = self.root / (mode + "-counts")
+            counters.mkdir()
+            directory = self.root / mode
+            result = subprocess.run(
+                [
+                    "/bin/bash",
+                    "-c",
+                    'set -uo pipefail; source "$LIB_DIR/system-review.sh"; _call_api() { python3 "$MOCK"; }; dh_system_review "$1" "$2" "$3" "$4" "$5" "$5"',
+                    "test",
+                    str(self.root),
+                    self.sha,
+                    str(directory),
+                    str(primary),
+                    str(peer),
+                ],
+                env=dict(
+                    os.environ,
+                    LIB_DIR=str(lib),
+                    MOCK=str(mock),
+                    COUNTERS=str(counters),
+                    MODE=mode,
+                ),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            counts = (
+                json.loads((counters / "counts").read_text())
+                if calls
+                else {"active": 0, "maximum": 0, "started": 0, "finished": 0}
+            )
+            self.assertEqual(counts["active"], 0)
+            if calls:
+                self.assertGreater(counts["maximum"], 1)
+            self.assertLessEqual(counts["maximum"], 4)
+            self.assertEqual(counts["started"], counts["finished"])
+            self.assertEqual(counts["started"], calls)
+            self.assertEqual(result.returncode == 0, mode != "fail", result.stderr)
+            self.assertEqual((directory / "findings.json").exists(), mode != "fail")
+
+    def test_apply_preserves_legacy_prepared_runs_but_requires_new_metadata(self):
+        primary = self.root / "empty.txt"
+        primary.write_text('{"findings": []}')
+        directory = self.root / "versioned"
+        prepare(str(self.root), self.sha, str(directory), [str(primary)] * 3)
+        (directory / "withheld.json").unlink()
+        with self.assertRaises(FileNotFoundError):
+            apply(str(directory))
+        (directory / "format-version").unlink()
+        apply(str(directory))
+        self.assertEqual(
+            json.loads((directory / "audit.json").read_text()), {"unverified": 0}
+        )
 
     def test_gate_preserves_real_core_and_removes_unsupported_impact(self):
         item = {
