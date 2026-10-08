@@ -18,7 +18,9 @@ Missing responses or malformed decisions fail publication; no fail-open fallback
 Legacy notes without an unambiguous file, numeric line and severity are archived
 as UNVERIFIED, counted in coverage and withheld; locations are never guessed.
 Raw inputs are retained before parsing. Up to four verification calls run together,
-each bounded to 180 seconds within the 1,200-second stage deadline. Every child is reaped.
+each capped at 128,000 output tokens and 900 seconds within the remaining
+1,200-second stage budget. Every child is reaped. A truncated generation stops
+the wave before more batches are launched, even if the provider returned some text.
 All located candidates are batched without a separate count limit. Exhausting the deadline
 or missing a candidate decision stops publication; a partial review never passes the gate.
 Preparation and final reconciliation use the same remaining timeout budget.
