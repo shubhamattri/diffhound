@@ -27,6 +27,8 @@
 #                                                  so the event-driven path wins
 #                                                  the race when it's healthy
 #   DIFFHOUND_BIN                 (default: <repo>/bin/diffhound)
+#   DIFFHOUND_SWEEP_CYCLE_BUDGET_SECONDS  (default: 900) stop starting new reviews
+#   DIFFHOUND_SWEEP_REVIEW_TIMEOUT_SECONDS (default: 3300) includes lock waiting
 
 set -uo pipefail
 
@@ -38,14 +40,29 @@ LOCK_FILE="$SWEEP_HOME/sweep.lock"
 MAX_ATTEMPTS="${DIFFHOUND_SWEEP_MAX_ATTEMPTS:-3}"
 PR_LIMIT="${DIFFHOUND_SWEEP_PR_LIMIT:-30}"
 GRACE_MIN="${DIFFHOUND_SWEEP_GRACE_MIN:-10}"
+CYCLE_BUDGET="${DIFFHOUND_SWEEP_CYCLE_BUDGET_SECONDS:-900}"
+REVIEW_TIMEOUT="${DIFFHOUND_SWEEP_REVIEW_TIMEOUT_SECONDS:-3300}"
 
 DIFFHOUND_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$DIFFHOUND_ROOT/lib/platform.sh"
 DIFFHOUND_BIN="${DIFFHOUND_BIN:-$DIFFHOUND_ROOT/bin/diffhound}"
 
 mkdir -p "$STATE_DIR"
 
 _log() {
   printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" | tee -a "$LOG_FILE" >&2
+}
+
+if ! [[ "$CYCLE_BUDGET" =~ ^[1-9][0-9]*$ && "$REVIEW_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
+  _log "cycle and review budgets must be positive integer seconds"
+  exit 1
+fi
+command -v "$_TIMEOUT_CMD" >/dev/null 2>&1 || { _log "timeout command unavailable"; exit 1; }
+CYCLE_DEADLINE=$((SECONDS + CYCLE_BUDGET))
+_within_cycle_budget() {
+  [ "$SECONDS" -lt "$CYCLE_DEADLINE" ] && return 0
+  _log "cycle budget spent; remaining PRs wait for the next sweep"
+  return 1
 }
 
 if [ ! -x "$DIFFHOUND_BIN" ]; then
@@ -92,10 +109,12 @@ _iso_to_epoch() {
 }
 
 NOW_EPOCH=$(date -u +%s)
-REVIEWER="${REVIEW_LOGIN:-$(gh api user --jq .login 2>/dev/null || true)}"
+REVIEWER="${REVIEW_LOGIN:-$("$_TIMEOUT_CMD" 30 gh api user --jq .login 2>/dev/null || true)}"
+[ -n "$REVIEWER" ] || { _log "reviewer identity unavailable; not starting reviews"; exit 1; }
 GRACE_SEC=$((GRACE_MIN * 60))
 
 while IFS= read -r LINE || [ -n "$LINE" ]; do
+  _within_cycle_budget || break
   # Skip blank/comment lines
   REPO="${LINE%%#*}"
   REPO="${REPO//[[:space:]]/}"
@@ -108,8 +127,11 @@ while IFS= read -r LINE || [ -n "$LINE" ]; do
 
   _log "repo=$REPO scanning"
 
-  PRS=$(gh pr list --repo "$REPO" --state open --limit "$PR_LIMIT" \
-    --json number,isDraft,title,author,headRefOid,updatedAt 2>/dev/null)
+  PRS=$("$_TIMEOUT_CMD" 30 gh pr list --repo "$REPO" --state open --limit "$PR_LIMIT" \
+    --json number,isDraft,title,author,headRefOid,updatedAt 2>/dev/null) || {
+      _log "repo=$REPO PR metadata unavailable; skipping this cycle"
+      continue
+    }
 
   if [ -z "$PRS" ]; then
     _log "repo=$REPO gh pr list returned empty — check auth / repo access"
@@ -127,6 +149,7 @@ while IFS= read -r LINE || [ -n "$LINE" ]; do
 
   while IFS=$'\t' read -r PR SHA UPDATED; do
     [ -z "$PR" ] && continue
+    _within_cycle_budget || break 2
 
     KEY_BASE="$STATE_DIR/$(echo "$REPO" | tr / _)_pr${PR}_${SHA}"
 
@@ -151,7 +174,11 @@ while IFS= read -r LINE || [ -n "$LINE" ]; do
     # (monorepo #6882: 7 reviews at one commit). A diffhound review covering
     # this commit, or one edited in place to cover it, means done. Shubham's own
     # manual reviews (no marker, no scorecard) and drafts do not count.
-    if [ -n "$REVIEWER" ] && gh api --paginate "/repos/${REPO}/pulls/${PR}/reviews?per_page=100" 2>/dev/null \
+    REVIEWS=$("$_TIMEOUT_CMD" 30 gh api --paginate "/repos/${REPO}/pulls/${PR}/reviews?per_page=100" 2>/dev/null) || {
+      _log "repo=$REPO pr=$PR review metadata unavailable; skipping this cycle"
+      continue
+    }
+    if printf '%s' "$REVIEWS" \
          | jq -L "$DIFFHOUND_ROOT/lib" -s -e --arg sha "$SHA" --arg login "$REVIEWER" \
              'include "review-identity"; add // [] | any(.[]; dh_covers($login; $sha))' >/dev/null 2>&1; then
       touch "${KEY_BASE}.done"
@@ -164,11 +191,12 @@ while IFS= read -r LINE || [ -n "$LINE" ]; do
       continue
     fi
 
+    _within_cycle_budget || break 2
     NEXT=$((ATTEMPTS + 1))
     echo "$NEXT" > "${KEY_BASE}.attempts"
     _log "repo=$REPO pr=$PR sha=${SHA:0:7} — invoking diffhound (attempt ${NEXT}/${MAX_ATTEMPTS})"
 
-    if "$DIFFHOUND_BIN" "$PR" --repo "$REPO" --auto-post >>"$LOG_FILE" 2>&1; then
+    if "$_TIMEOUT_CMD" --kill-after=60 "$REVIEW_TIMEOUT" "$DIFFHOUND_BIN" "$PR" --repo "$REPO" --auto-post >>"$LOG_FILE" 2>&1; then
       touch "${KEY_BASE}.done"
       _log "repo=$REPO pr=$PR sha=${SHA:0:7} — ok"
     else

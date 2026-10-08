@@ -236,6 +236,8 @@ Keep `synchronize` enabled to review new commits. Host-local locks serialize wor
 
 `bin/diffhound-sweep` polls configured repositories for unreviewed PR heads independently of Actions. It checks submitted GitHub reviews as well as local state, applies a grace window, and retries a failed head up to three times by default. After those attempts, a new commit or an operator reset is needed. See [Sweep setup and operations](docs/SWEEP.md).
 
+The sweep stops starting new reviews after `DIFFHOUND_SWEEP_CYCLE_BUDGET_SECONDS` (default 900). Each invocation has `DIFFHOUND_SWEEP_REVIEW_TIMEOUT_SECONDS` (default 3,300), including lock waiting, plus a 60-second termination grace. Use the supplied 75-minute systemd timeout and control-group cleanup with these defaults; an older 30-minute service timeout can terminate a healthy invocation early. Cron needs equivalent supervision to clean up nested process groups. GitHub metadata reads are bounded to 30 seconds and failures do not consume review attempts.
+
 ## Operations
 
 ### Evidence and troubleshooting

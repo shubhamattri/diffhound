@@ -21,7 +21,7 @@ Every N minutes (you pick via cron/systemd timer), sweep:
    - `author.is_bot != true` — covers Dependabot, Renovate, GitHub App actors
    - Title does not contain `[skip review]`
 3. Checks per-`(repo, pr, sha)` state and submitted GitHub reviews for coverage.
-4. If not reviewed, not within the grace window, and below the attempt limit, invokes
+4. If not reviewed, not within the grace window, below the attempt limit and within the cycle budget, invokes
    `diffhound <pr> --repo <owner/name> --auto-post`.
 5. Records an attempt before invocation and writes `.done` on success.
 6. Stops retrying the same SHA after `DIFFHOUND_SWEEP_MAX_ATTEMPTS` (default 3) —
@@ -30,8 +30,11 @@ Every N minutes (you pick via cron/systemd timer), sweep:
 ## What it does not do
 
 - It is sequential: a slow review delays later PRs in the batch. A service
-  timeout must cover the whole batch, not just one review. Configure executor
-  deadlines and process cleanup separately from the timer interval.
+  timeout must allow the cycle's launch window plus one invocation deadline and cleanup.
+  The defaults stop launching after 15 minutes, bound each invocation to 55 minutes
+  plus a 60-second termination grace, and use a 75-minute outer service timeout.
+  Lock waiting is part of the invocation deadline and can still consume an attempt.
+  GitHub metadata calls have 30-second timeouts; failed reads do not start a review.
 - Its default grace window uses PR `updatedAt`, so comment/review activity can
   delay eligibility even without a new commit.
 - It does not handle `pull_request_review_comment` (--learn) replies.
@@ -71,6 +74,9 @@ User=ubuntu
 EnvironmentFile=/home/ubuntu/.diffhound-sweep/env
 ExecStart=/home/ubuntu/diffhound/bin/diffhound-sweep
 Nice=10
+TimeoutStartSec=75min
+TimeoutStopSec=60s
+KillMode=control-group
 ```
 
 ```ini
@@ -101,6 +107,13 @@ sudo systemctl enable --now diffhound-sweep.timer
 systemctl list-timers diffhound-sweep.timer
 ```
 
+For an existing service, install `config/diffhound-sweep-runtime.conf` as
+`/etc/systemd/system/diffhound-sweep.service.d/runtime-budget.conf`, then run
+`sudo systemctl daemon-reload`. Preserve existing environment/configuration files.
+The next sweep uses the updated cycle logic; do not restart a healthy active review.
+If you override the cycle or invocation budget, increase the outer service timeout
+to cover their sum, termination grace and metadata overhead.
+
 ### Option B: cron
 
 ```bash
@@ -110,6 +123,10 @@ systemctl list-timers diffhound-sweep.timer
 
 Cron inherits a minimal `PATH` and no login shell env — `bash -lc` loads
 `~/.profile` / `~/.bash_profile` so `ANTHROPIC_API_KEY` etc. are in scope.
+The invocation timeout alone cannot kill descendants that create separate process groups,
+including nested model timeouts. Use the systemd service with `KillMode=control-group`
+for complete descendant cleanup when a sweep exits, or provide equivalent supervision
+for cron. The shell wrapper's termination grace is not a process-tree guarantee.
 
 ## Configuration
 
@@ -120,6 +137,8 @@ Cron inherits a minimal `PATH` and no login shell env — `bash -lc` loads
 | `DIFFHOUND_SWEEP_PR_LIMIT`        | `30`                       | `gh pr list --limit` per repo |
 | `DIFFHOUND_SWEEP_GRACE_MIN`       | `10`                       | Skip PRs updated within N minutes (lets the event-driven path start first) |
 | `DIFFHOUND_BIN`                   | `<repo>/bin/diffhound`     | Path to the diffhound binary |
+| `DIFFHOUND_SWEEP_CYCLE_BUDGET_SECONDS` | `900` | Stop starting more work after this many seconds; let an active invocation finish |
+| `DIFFHOUND_SWEEP_REVIEW_TIMEOUT_SECONDS` | `3300` | Per-invocation deadline, including lock wait; followed by a 60-second termination grace |
 
 `repos.txt` supports blank lines and `#` comments.
 
