@@ -16,7 +16,7 @@ def read_json(text):
     return json.loads(match[1] if match else text)
 
 
-def candidates(text):
+def candidates(text, *, primary=False):
     """Accept both primary formats; embedded evidence JSON cannot shadow FINDING blocks."""
     matches = list(re.finditer(r"^[ \t]*FINDING:[^\n]*", text, re.MULTILINE))
     if matches:
@@ -51,13 +51,33 @@ def candidates(text):
                 }
             )
         return result
+    if re.search(
+        r"^#{1,6}\s+FINDINGS_START\s*\n\s*#{1,6}\s+FINDINGS_END\s*$", text, re.MULTILINE
+    ):
+        return []
     try:
         value = read_json(text)
     except json.JSONDecodeError:
+        if primary:
+            raise ValueError("unrecognized primary finding format") from None
         if re.search(r"FINDING:|\"findings\"", text):
             raise ValueError("unparseable candidate findings")
         return []  # Peer challenges and scorecards are context, not new findings.
-    return value if isinstance(value, list) else value.get("findings", [])
+    if isinstance(value, list):
+        result = value
+    elif isinstance(value, dict):
+        result = value.get("findings")
+    else:
+        result = None
+    if result is None and not primary:
+        return []
+    if not isinstance(result, list) or any(
+        not isinstance(item, dict) for item in result
+    ):
+        raise ValueError(
+            "invalid primary finding format" if primary else "invalid peer findings"
+        )
+    return result
 
 
 def reconcile(items, packets, response):
@@ -126,8 +146,8 @@ def prepare(repo, sha, directory, paths):
     for i, text in enumerate(texts):
         (root / f"input-{i}.txt").write_text(text)
     repository = Repository(repo, sha)
-    for text in texts:
-        for item in candidates(text):
+    for index, text in enumerate(texts):
+        for item in candidates(text, primary=index == 0):
             if (
                 item.get("unverified")
                 or not isinstance(item.get("file"), str)
