@@ -18,11 +18,7 @@ def read_json(text):
 
 def candidates(text):
     """Accept both primary formats; embedded evidence JSON cannot shadow FINDING blocks."""
-    matches = list(
-        re.finditer(r"^\s*FINDING: (.+?):(\d+):([A-Z_-]+)\s*$", text, re.MULTILINE)
-    )
-    if len(matches) != len(re.findall(r"^\s*FINDING:", text, re.MULTILINE)):
-        raise ValueError("malformed finding header")
+    matches = list(re.finditer(r"^[ \t]*FINDING:[^\n]*", text, re.MULTILINE))
     if matches:
         result = []
         for i, match in enumerate(matches):
@@ -32,13 +28,25 @@ def candidates(text):
                 else len(text)
             ]
             body = re.split(
-                r"^### \w+_(?:START|END)", body, maxsplit=1, flags=re.MULTILINE
+                r"^#{1,6}\s+[\w-]+_(?:START|END)", body, maxsplit=1, flags=re.MULTILINE
             )[0].strip()
+            header = re.fullmatch(
+                r"[ \t]*FINDING:\s+([^\s:]+):(\d+)(?::|\s+—\s+)([A-Z_-]+)\s*",
+                match[0],
+            )
+            if not header or header[3] not in SEVERITIES or int(header[2]) < 1:
+                result.append(
+                    {
+                        "unverified": "No unambiguous source location and severity",
+                        "body": match[0] + "\n" + body,
+                    }
+                )
+                continue
             result.append(
                 {
-                    "file": match[1],
-                    "line": int(match[2]),
-                    "severity": match[3],
+                    "file": header[1],
+                    "line": int(header[2]),
+                    "severity": header[3],
                     "body": body,
                 }
             )
@@ -109,18 +117,25 @@ def reconcile(items, packets, response):
 
 def prepare(repo, sha, directory, paths):
     root = Path(directory)
-    root.mkdir(parents=True, exist_ok=False)
-    repository = Repository(repo, sha)
-    items = []
+    root.mkdir(parents=True, exist_ok=False, mode=0o700)
+    (root / "format-version").write_text("2")
+    items, withheld = [], []
     texts = [Path(path).read_text() for path in paths]
+    for i, text in enumerate(texts):
+        (root / f"input-{i}.txt").write_text(text)
+    repository = Repository(repo, sha)
     for text in texts:
         for item in candidates(text):
             if (
-                item.get("severity") not in SEVERITIES
+                item.get("unverified")
+                or not isinstance(item.get("file"), str)
+                or not item.get("file")
+                or item.get("severity") not in SEVERITIES
                 or type(item.get("line")) is not int
                 or item["line"] < 1
             ):
-                raise ValueError("invalid candidate metadata")
+                withheld.append(item)
+                continue
             item = {
                 "file": item["file"],
                 "line": item["line"],
@@ -173,6 +188,7 @@ def prepare(repo, sha, directory, paths):
         name.with_suffix(".prompt").write_text(
             instructions + "\n" + json.dumps(findings, ensure_ascii=False)
         )
+    (root / "withheld.json").write_text(json.dumps(withheld))
     (root / "count").write_text(str(len(items)))
 
 
@@ -205,6 +221,16 @@ def apply(directory):
             totals[key] = totals.get(key, 0) + count
     if sum(totals.values()) != int((root / "count").read_text()):
         raise ValueError("system review batch coverage mismatch")
+    version = root / "format-version"
+    if version.exists():
+        if version.read_text().strip() != "2":
+            raise ValueError("unknown system review archive format")
+        withheld = json.loads((root / "withheld.json").read_text())
+    else:
+        # Pre-upgrade prepare had no withheld-candidate path or version file.
+        # All its candidate IDs were already checked against count above.
+        withheld = []
+    totals["unverified"] = totals.get("unverified", 0) + len(withheld)
     (root / "audit.json").write_text(json.dumps(totals))
     (root / "findings.json").write_text(json.dumps(kept))
 

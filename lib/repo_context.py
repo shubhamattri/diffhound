@@ -5,6 +5,7 @@ import ast
 import json
 import re
 import subprocess
+from bisect import bisect_right
 from pathlib import Path
 
 SOURCE = {
@@ -100,6 +101,8 @@ class Repository:
         raw = self.git("cat-file", "--batch", data=request)
         self.files = {}
         self.hits = {}
+        self.scopes = {}
+        self.search_index = {}
         position = 0
         for path, _ in entries:
             end = raw.index(b"\n", position)
@@ -123,12 +126,20 @@ class Repository:
     def occurrences(self, symbol):
         if symbol not in self.hits:
             pattern = re.compile(r"\b" + re.escape(symbol) + r"\b")
-            self.hits[symbol] = [
-                (p, i + 1)
-                for p, lines in self.files.items()
-                for i, text in enumerate(lines)
-                if pattern.search(text)
-            ]
+            matches = []
+            for path, lines in self.files.items():
+                if path not in self.search_index:
+                    text = "\n".join(lines)
+                    starts = [0] + [m.end() for m in re.finditer("\n", text)]
+                    self.search_index[path] = (text, starts)
+                text, starts = self.search_index[path]
+                previous = 0
+                for match in pattern.finditer(text):
+                    line = bisect_right(starts, match.start())
+                    if line != previous:
+                        matches.append((path, line))
+                        previous = line
+            self.hits[symbol] = matches
         return self.hits[symbol]
 
     def window(self, path, line):
@@ -145,29 +156,28 @@ class Repository:
         lines = self.files.get(path, [])
         start, end = max(0, line - 31), min(len(lines), line + 30)
         if path.endswith(".py"):
-            try:
-                tree = ast.parse("\n".join(lines))
-            except SyntaxError:
-                tree = (
-                    None  # The line window still exposes syntax; no invented AST facts.
+            if path not in self.scopes:
+                try:
+                    tree = ast.parse("\n".join(lines))
+                except SyntaxError:
+                    tree = None  # Retain line evidence without inventing AST facts.
+                self.scopes[path] = (
+                    [
+                        (n.lineno, n.end_lineno)
+                        for n in ast.walk(tree)
+                        if isinstance(
+                            n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+                        )
+                    ]
+                    if tree
+                    else []
                 )
-            scopes = (
-                [
-                    n
-                    for n in ast.walk(tree)
-                    if isinstance(
-                        n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
-                    )
-                    and n.lineno <= line <= n.end_lineno
-                ]
-                if tree
-                else []
-            )
+            scopes = [(a, b) for a, b in self.scopes[path] if a <= line <= b]
             if scopes:
-                node = min(scopes, key=lambda n: n.end_lineno - n.lineno)
-                if node.end_lineno - node.lineno <= 100:
-                    start = max(0, node.lineno - 3)
-                    end = min(len(lines), node.end_lineno + 8)
+                first, last = min(scopes, key=lambda scope: scope[1] - scope[0])
+                if last - first <= 100:
+                    start = max(0, first - 3)
+                    end = min(len(lines), last + 8)
         indices = sorted(
             range(start, end), key=lambda i: (abs(i + 1 - line) > 4, abs(i + 1 - line))
         )

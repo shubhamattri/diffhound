@@ -123,7 +123,7 @@ Diff acquisition and model input have different budgets. Generated files, lockfi
 | Budget | Default |
 | --- | --- |
 | Primary, Sonnet peer, and voice output | Up to 128,000 tokens per call |
-| Repository evidence gate | 16,000 output tokens per batch of 8 candidates; 180 seconds per call, 600 seconds total; at most 120 candidates |
+| Repository evidence gate | 16,000 output tokens per batch of 8 candidates, up to 4 concurrent calls; 180 seconds per call, 600 seconds total; at most 120 candidates with valid locations |
 | Haiku chunk-merge output | Up to 64,000 tokens per call |
 | Primary, Sonnet peer, and voice call timeout | 900 seconds |
 | Chunk-merge call timeout | 600 seconds |
@@ -170,6 +170,8 @@ History v2 stores changed finding records in submitted review bodies and links e
 Review invocations load `~/.profile`; explicit commands require their environment to be exported by the caller. The model backend does not use `CLAUDE_CODE_OAUTH_TOKEN`.
 
 The runtime sets `DIFFHOUND_SOURCE_CHECK_ENABLED=1` internally when it owns the final evidence gate. Older running processes retain their legacy verifier during an upgrade; this handshake is not a user configuration option.
+
+The evidence gate withholds and counts legacy notes that lack an unambiguous source location. It runs at most four bounded verification calls together; malformed provider decisions still stop publication.
 
 ### Repository guidance and voice
 
