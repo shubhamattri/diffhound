@@ -8,10 +8,13 @@ Report search limits explicitly; zero textual references never proves dead code.
 Use the same collector for primary context and final finding verification.
 Normalize primary and peer candidates before a single mandatory pre-wording gate.
 The gate distinguishes supported, corrected, contradicted, non-actionable and unverified claims.
+Primary output requires a valid findings envelope; unknown prose cannot become a clean empty review.
+Legacy mechanical filters do not discard candidates before this gate.
 Retain a valid core while removing unsupported impact; never infer execution from source.
 Accept model decisions only with complete IDs and exact quotes in the supplied evidence.
 Pass the existing voice examples into this gate, then preserve its final bodies verbatim.
 Constrain formatting to the checked finding set; reconstruct summary claims from that set.
+Final verdicts follow surviving checked severities; low advisory scores alone cannot request changes.
 Withhold formatting-generated thread replies until their assertions are source-checked too.
 Do not refresh old visible history into a new source-checked review; link earlier rounds.
 Missing responses or malformed decisions fail publication; no fail-open fallback.

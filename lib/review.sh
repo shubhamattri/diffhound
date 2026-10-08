@@ -3552,8 +3552,9 @@ cp "$CLAUDE_OUT" "$SYNTH_FINDINGS"
 # STEP 4.7: MECHANICAL VERIFICATION (grep/test to drop false positives)
 # ============================================================
 # After LLM outputs findings, before posting, verify claims against the repo.
-# Only DROP findings that are clearly contradicted by grep/test. If uncertain, KEEP.
-if [ -s "$CLAUDE_OUT" ]; then
+# Source-checked runs preserve candidates for the repository evidence gate below.
+# Legacy runs retain their mechanical checks.
+if [ "${DIFFHOUND_SOURCE_CHECK_ENABLED:-0}" != 1 ] && [ -s "$CLAUDE_OUT" ]; then
   _json_for_verify=$(_extract_json "$CLAUDE_OUT" 2>/dev/null || true)
   if [ -n "$_json_for_verify" ] && echo "$_json_for_verify" | jq -e '.findings' >/dev/null 2>&1; then
     _finding_count=$(echo "$_json_for_verify" | jq '.findings | length')

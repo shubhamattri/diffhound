@@ -367,7 +367,8 @@ _claim_verify_comments() {
   return 0
 }
 
-# Make the **Total** row's VERDICT cohere with BOTH the surviving findings AND the
+# Source-checked reviews derive verdicts only from surviving finding severities;
+# their numeric scores are advisory. Legacy reviews still reconcile BOTH findings AND the
 # score, so "58/100 APPROVE" can never happen. Rules (one rubric, no second source
 # of truth):
 #   - any surviving BLOCKER bullet            -> REQUEST_CHANGES  (hard gate)
@@ -399,6 +400,8 @@ _reconcile_summary_verdict() {
   total=$(grep -iE '\*\*Total\*\*' "$sf" | grep -oE '[0-9]+/100' | grep -oE '^[0-9]+' | head -1)
   if [ "${nb:-0}" -gt 0 ]; then
     v=REQUEST_CHANGES
+  elif [ "${DIFFHOUND_SOURCE_CHECK_ENABLED:-0}" = 1 ]; then
+    if [ "${ns:-0}" -gt 0 ]; then v=COMMENT; else v=APPROVE; fi
   elif [ -n "$total" ]; then
     if   [ "$total" -ge 85 ]; then v=APPROVE
     elif [ "$total" -ge 70 ]; then v=COMMENT
@@ -415,11 +418,11 @@ _reconcile_summary_verdict() {
   # (it's score-driven), where the model's reason still cites a now-dropped
   # "blocker" — rewrite so the reason matches reality (Shubham's "REQUEST_CHANGES —
   # one blocker" with an empty Blockers section).
-  if [ -n "$cur" ] && [ "$cur" = "$v" ]; then
+  if [ "${DIFFHOUND_SOURCE_CHECK_ENABLED:-0}" != 1 ] && [ -n "$cur" ] && [ "$cur" = "$v" ]; then
     { [ "$v" != "REQUEST_CHANGES" ] || [ "${nb:-0}" -gt 0 ]; } && return 0
   fi
   local tmp; tmp=$(mktemp -t "diffhound-rv.XXXXXX")
-  awk -v V="$v" -v NB="${nb:-0}" -v T="${total:-}" '
+  awk -v V="$v" -v NB="${nb:-0}" -v T="${total:-}" -v SOURCE="${DIFFHOUND_SOURCE_CHECK_ENABLED:-0}" '
     /\*\*Total\*\*/ {
       n=split($0, a, "|")
       if (n >= 4) {
@@ -428,6 +431,7 @@ _reconcile_summary_verdict() {
         else if (NB+0 > 0)     reason = "blocking issue(s) must be fixed before merge"
         else                   reason = "score " T "/100 below the approval bar — address quality gaps (e.g. test coverage)"
         a[4] = " **" V "** \xe2\x80\x94 " reason " "
+        if (SOURCE == 1) a[4] = " " V " "
         out=a[1]; for(i=2;i<=n;i++) out=out "|" a[i]
         print out; next
       }

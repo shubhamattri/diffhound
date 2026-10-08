@@ -201,6 +201,68 @@ class SystemReviewTests(unittest.TestCase):
         self.assertNotIn("Total", withheld[0]["body"])
         self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
 
+    def test_unknown_primary_cannot_become_a_clean_empty_review(self):
+        primary = self.root / "primary.txt"
+        peer = self.root / "peer.txt"
+        peer.write_text("No additional concerns from the peer.")
+        for i, text in enumerate(
+            ("The handler has a race; add serialization.", "{}", '{"score": 95}')
+        ):
+            primary.write_text(text)
+            directory = self.root / f"invalid-primary-{i}"
+            with self.assertRaisesRegex(ValueError, "primary"):
+                prepare(
+                    str(self.root), self.sha, str(directory), [str(primary), str(peer)]
+                )
+            self.assertFalse((directory / "findings.json").exists())
+            self.assertEqual((directory / "input-0.txt").read_text(), text)
+        for i, text in enumerate(
+            ('{"findings": []}', "### FINDINGS_START\n### FINDINGS_END\n")
+        ):
+            primary.write_text(text)
+            directory = self.root / f"empty-primary-{i}"
+            prepare(str(self.root), self.sha, str(directory), [str(primary), str(peer)])
+            apply(str(directory))
+            self.assertEqual(json.loads((directory / "findings.json").read_text()), [])
+
+    def test_dead_code_candidate_reaches_source_gate_without_legacy_grep_drop(self):
+        lib = Path(__file__).resolve().parents[1] / "lib"
+        source = (lib / "review.sh").read_text()
+        block = source.split("# STEP 4.7: MECHANICAL VERIFICATION", 1)[1].split(
+            "# STEP 5: VOICE RAG", 1
+        )[0]
+        block = block.split("\n", 1)[1]
+        script = self.root / "mechanical.sh"
+        script.write_text(block)
+        (self.root / "helpers.ts").write_text(
+            "function unusedHelper() {}\nfunction unrelated() {}\n"
+        )
+        primary = self.root / "primary.txt"
+        primary.write_text(
+            '```json\n{"findings":[{"file":"helpers.ts","line":1,"severity":"NIT","body":"function unusedHelper is unused"}]}\n```\n'
+        )
+        original = primary.read_text()
+        subprocess.run(
+            [
+                "bash",
+                "-c",
+                'source "$1/parser.sh"; spinner_start() { :; }; spinner_stop() { :; }; source "$2"',
+                "test",
+                str(lib),
+                str(script),
+            ],
+            env=dict(
+                os.environ,
+                CLAUDE_OUT=str(primary),
+                REPO_PATH=str(self.root),
+                DIFFHOUND_SOURCE_CHECK_ENABLED="1",
+            ),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertEqual(primary.read_text(), original)
+
     def test_large_candidate_set_is_fully_batched_without_a_count_cliff(self):
         primary = self.root / "large.txt"
         primary.write_text(
@@ -670,6 +732,43 @@ dh_system_review "$1" "$2" "$3" "$4" "$5" "$5"
             check=False,
         )
         self.assertEqual(result.returncode, 1)
+
+    def test_final_verdict_uses_checked_findings_not_advisory_score(self):
+        lib = Path(__file__).resolve().parents[1] / "lib"
+        for heading, expected in (
+            ("", "APPROVE"),
+            ("Nits", "APPROVE"),
+            ("Should-Fix", "COMMENT"),
+            ("Blockers (must fix before merge)", "REQUEST_CHANGES"),
+        ):
+            for score in (60, 95):
+                summary = self.root / "summary.md"
+                bullets = f"### {heading}\n- Checked finding.\n" if heading else ""
+                summary.write_text(
+                    bullets + f"## Scorecard\n| **Total** | {score}/100 | APPROVE |\n"
+                )
+                result = subprocess.run(
+                    [
+                        "bash",
+                        "-c",
+                        'source "$1/parser.sh"; _claim_verify_summary "$2" "$3"; parse_verdict "$2" "$3/comments"',
+                        "test",
+                        str(lib),
+                        str(summary),
+                        str(self.root),
+                    ],
+                    env=dict(
+                        os.environ,
+                        DIFFHOUND_SOURCE_CHECK_ENABLED="1",
+                        DIFFHOUND_CLAIM_VERIFY="1",
+                    ),
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                self.assertEqual(result.stdout.strip(), expected)
+                self.assertIn(f"{score}/100", summary.read_text())
+                self.assertNotIn("quality", summary.read_text())
 
     def test_final_wording_cannot_add_findings_or_resurrect_claims(self):
         voice = """### INLINE_COMMENTS_START
