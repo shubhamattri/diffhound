@@ -5,7 +5,7 @@ import re
 import sys
 from pathlib import Path
 
-from voice_output import section
+from voice_output import normalize_summary_headings, section
 
 
 def constrain(body, findings):
@@ -14,7 +14,7 @@ def constrain(body, findings):
     The model retains layout duties and advisory numeric scoring. Its thread
     replies are not source-checked candidates, so this boundary withholds them.
     """
-    lines = body.splitlines()
+    lines = normalize_summary_headings(body).splitlines()
     start, end = section(lines, "SUMMARY")
     inline = "\n".join(lines[:start])
     # Formatter comments are never authority: render the entire checked set below.

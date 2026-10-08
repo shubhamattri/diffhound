@@ -12,6 +12,7 @@ from pathlib import Path
 spec = importlib.util.spec_from_file_location('test_voice', Path(sys.argv[1]) / 'tests/test-voice-output.py')
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 Path(sys.argv[2], 'complete').write_text(m.COMPLETE)
+Path(sys.argv[2], 'h3').write_text(m.COMPLETE.replace('## Scorecard', '### Scorecard').replace('## Verification & Test Checklist', '### Verification & Test Checklist'))
 Path(sys.argv[2], 'partial').write_text(m.COMPLETE.split('### INLINE_COMMENTS_END')[0])
 PY
 printf 'prompt' > "$TMP/prompt"
@@ -55,6 +56,12 @@ test ! -s "$TMP/output"
 
 STOPS=(end_turn end_turn); BODIES=(complete complete); RCS=(0 0)
 run
+test "$(wc -l < "$TMP/calls" | tr -d ' ')" = 1
+
+STOPS=(end_turn end_turn); BODIES=(h3 h3); RCS=(0 0)
+run
+cmp "$TMP/complete" "$TMP/output"
+cmp "$TMP/h3" "$TMP/output.attempt-1"
 test "$(wc -l < "$TMP/calls" | tr -d ' ')" = 1
 
 if parse_summary "$TMP/partial" "$TMP/summary" 2>/dev/null; then

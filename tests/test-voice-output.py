@@ -1,10 +1,16 @@
 """Reject incomplete formatting before any review can be published."""
+
 import importlib.util
-from pathlib import Path
+import subprocess
+import sys
+import tempfile
 import unittest
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location("voice_output", ROOT / "lib/voice_output.py")
+spec = importlib.util.spec_from_file_location(
+    "voice_output", ROOT / "lib/voice_output.py"
+)
 voice = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(voice)
 
@@ -29,29 +35,86 @@ class VoiceOutput(unittest.TestCase):
         voice.validate(COMPLETE, "end_turn", True)
         clean = COMPLETE.replace(COMPLETE.splitlines()[1] + "\n", "")
         voice.validate(clean, "end_turn", False)
-        voice.validate(clean[clean.index("### SUMMARY_START"):], "end_turn", False)
+        voice.validate(clean[clean.index("### SUMMARY_START") :], "end_turn", False)
+
+    def test_h3_summary_headings_are_canonical_without_changing_content(self):
+        h3 = COMPLETE.replace("## Scorecard", "### Scorecard").replace(
+            "## Verification & Test Checklist", "### Verification & Test Checklist"
+        )
+        self.assertEqual(voice.validate(h3, "end_turn", True), COMPLETE)
+        for missing in [
+            "| Total | 93/100 | COMMENT |",
+            "- [ ] run the retry regression test",
+        ]:
+            with self.subTest(missing=missing), self.assertRaises(ValueError):
+                voice.validate(h3.replace(missing, ""), "end_turn", True)
+        with self.assertRaisesRegex(ValueError, "max_tokens"):
+            voice.validate(h3, "max_tokens", True)
+        with tempfile.TemporaryDirectory() as directory:
+            raw = Path(directory) / "raw"
+            stop = Path(directory) / "stop"
+            canonical = Path(directory) / "canonical"
+            raw.write_text(h3)
+            stop.write_text("end_turn")
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "lib/voice_output.py"),
+                    str(raw),
+                    str(stop),
+                    "true",
+                    str(canonical),
+                ],
+                check=True,
+                capture_output=True,
+            )
+            self.assertEqual(raw.read_text(), h3)
+            self.assertEqual(canonical.read_text(), COMPLETE)
 
     def test_partial_and_complete_looking_token_exhaustion(self):
         for body in [COMPLETE.split("### INLINE_COMMENTS_END")[0], COMPLETE]:
-            with self.subTest(body=body), self.assertRaisesRegex(ValueError, "max_tokens"):
+            with (
+                self.subTest(body=body),
+                self.assertRaisesRegex(ValueError, "max_tokens"),
+            ):
                 voice.validate(body, "max_tokens", True)
 
     def test_missing_duplicate_or_unordered_sections(self):
-        for marker in ["INLINE_COMMENTS_START", "INLINE_COMMENTS_END", "SUMMARY_START", "SUMMARY_END"]:
-            for body in [COMPLETE.replace("### " + marker, "missing"), COMPLETE + "### " + marker + "\n"]:
+        for marker in [
+            "INLINE_COMMENTS_START",
+            "INLINE_COMMENTS_END",
+            "SUMMARY_START",
+            "SUMMARY_END",
+        ]:
+            for body in [
+                COMPLETE.replace("### " + marker, "missing"),
+                COMPLETE + "### " + marker + "\n",
+            ]:
                 with self.subTest(marker=marker), self.assertRaises(ValueError):
                     voice.validate(body, "end_turn", True)
-        swapped = COMPLETE.replace("INLINE_COMMENTS_END", "TMP").replace("SUMMARY_START", "INLINE_COMMENTS_END").replace("TMP", "SUMMARY_START")
+        swapped = (
+            COMPLETE.replace("INLINE_COMMENTS_END", "TMP")
+            .replace("SUMMARY_START", "INLINE_COMMENTS_END")
+            .replace("TMP", "SUMMARY_START")
+        )
         with self.assertRaises(ValueError):
             voice.validate(swapped, "end_turn", True)
 
     def test_required_summary_fields_and_comments(self):
-        for text in ["## Scorecard", "| Total | 93/100 | COMMENT |", "## Verification & Test Checklist", COMPLETE.splitlines()[1]]:
+        for text in [
+            "## Scorecard",
+            "| Total | 93/100 | COMMENT |",
+            "## Verification & Test Checklist",
+            COMPLETE.splitlines()[1],
+        ]:
             with self.subTest(text=text), self.assertRaises(ValueError):
                 voice.validate(COMPLETE.replace(text, ""), "end_turn", True)
 
     def test_raw_metadata_and_malformed_comments_are_rejected(self):
-        for body in [COMPLETE.replace("the update needs", "COMMENT: api/t\nthe update needs"), COMPLETE.replace(COMPLETE.splitlines()[1], "COMMENT: api/t")]:
+        for body in [
+            COMPLETE.replace("the update needs", "COMMENT: api/t\nthe update needs"),
+            COMPLETE.replace(COMPLETE.splitlines()[1], "COMMENT: api/t"),
+        ]:
             with self.assertRaises(ValueError):
                 voice.validate(body, "end_turn", True)
 
@@ -60,7 +123,11 @@ class VoiceOutput(unittest.TestCase):
             with self.subTest(stop=stop), self.assertRaises(ValueError):
                 voice.validate(COMPLETE, stop, True)
         with self.assertRaises(ValueError):
-            voice.validate("prose mentioning ### SUMMARY_START and ### SUMMARY_END", "end_turn", False)
+            voice.validate(
+                "prose mentioning ### SUMMARY_START and ### SUMMARY_END",
+                "end_turn",
+                False,
+            )
 
 
 if __name__ == "__main__":

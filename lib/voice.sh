@@ -17,26 +17,27 @@ dh_voice_findings_expected() {
 
 dh_write_voice() {
   local system="$1" prompt="$2" output="$3" findings_expected="$4" verified="${5:-}"
-  local attempt candidate stop effort=medium
+  local attempt candidate normalized stop effort=medium
   local raw_findings_expected="$findings_expected"
   [ -z "$verified" ] || raw_findings_expected=false
   for attempt in 1 2; do
     candidate="${output}.attempt-${attempt}"
+    normalized="${candidate}.normalized"
     stop="${candidate}.stop"
     : > "$stop"
     if DIFFHOUND_STAGE=voice-rewrite DIFFHOUND_STOP_REASON_FILE="$stop" \
          _call_api_system "claude-sonnet-5" 128000 900 "$system" "$effort" \
          < "$prompt" > "$candidate" 2>"${candidate}.stderr"; then
-      if python3 "$_DH_VOICE_DIR/voice_output.py" "$candidate" "$stop" "$raw_findings_expected" \
+      if python3 "$_DH_VOICE_DIR/voice_output.py" "$candidate" "$stop" "$raw_findings_expected" "$normalized" \
            2>>"${candidate}.stderr"; then
         if [ -n "$verified" ]; then
-          python3 "$_DH_VOICE_DIR/verified_voice.py" "$candidate" "$verified" \
+          python3 "$_DH_VOICE_DIR/verified_voice.py" "$normalized" "$verified" \
             2>>"${candidate}.stderr" || continue
-          python3 "$_DH_VOICE_DIR/voice_output.py" "$candidate" "$stop" "$findings_expected" \
+          python3 "$_DH_VOICE_DIR/voice_output.py" "$normalized" "$stop" "$findings_expected" \
             2>>"${candidate}.stderr" || continue
-          cp "${candidate}.withheld-replies" "${output}.withheld-replies"
+          cp "${normalized}.withheld-replies" "${output}.withheld-replies"
         fi
-        cp "$candidate" "$output"
+        cp "$normalized" "$output"
         return 0
       fi
     fi
