@@ -159,6 +159,14 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 V="$ROOT/lib/validators"
 
+dh_legacy_verifier() {
+  if [ "${DIFFHOUND_SOURCE_CHECK_ENABLED:-0}" = 1 ]; then
+    cat
+  else
+    "$V/verifier.sh"
+  fi
+}
+
 "$V/checklist-execute.py" \
   | "$V/security-helper.sh" \
   | "$V/concurrency-helper.sh" \
@@ -178,6 +186,7 @@ V="$ROOT/lib/validators"
   | "$V/pre-existing-pattern.sh" \
   | "$V/consumer-check.sh" \
   | "$V/todo-deferral.sh" \
+  | dh_legacy_verifier \
   | "$V/citation-discipline.sh" \
   | "$V/dedup-helper.py" \
   | "$V/claim-verify.sh"

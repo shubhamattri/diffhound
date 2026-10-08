@@ -30,6 +30,9 @@ IFS=$'\n\t'
 # ── Resolve lib directory ────────────────────────────────────
 DIFFHOUND_ROOT="${DIFFHOUND_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 LIB_DIR="${DIFFHOUND_ROOT}/lib"
+# Internal version handshake: this process always runs the final source gate.
+# Older running processes keep their legacy verifier during a rolling upgrade.
+export DIFFHOUND_SOURCE_CHECK_ENABLED=1
 
 # ── Source modules ───────────────────────────────────────────
 source "${LIB_DIR}/spinner.sh"
