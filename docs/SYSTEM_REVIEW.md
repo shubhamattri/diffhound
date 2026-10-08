@@ -15,6 +15,10 @@ Accept model decisions only with complete IDs and exact quotes in the supplied e
 Pass the existing voice examples into this gate, then preserve its final bodies verbatim.
 Constrain formatting to the checked finding set; reconstruct summary claims from that set.
 Final verdicts follow surviving checked severities; low advisory scores alone cannot request changes.
+If verification proposes a higher severity, withhold that candidate as UNVERIFIED and
+record `severity_escalations_withheld` separately. Other checked findings can proceed;
+the review cannot approve while any candidate is unverified. Evidence and body validation
+still run first. Unknown severity values remain errors. Raw decisions stay in the archive.
 Withhold formatting-generated thread replies until their assertions are source-checked too.
 Do not refresh old visible history into a new source-checked review; link earlier rounds.
 Missing responses or malformed decisions fail publication; no fail-open fallback.
