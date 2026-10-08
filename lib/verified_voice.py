@@ -3,14 +3,9 @@
 import json
 import re
 import sys
-from collections import Counter
 from pathlib import Path
 
 from voice_output import section
-
-HEADER = re.compile(
-    r"^COMMENT: (.+?):(\d+):(BLOCKING|SHOULD-FIX|NIT|OPEN_QUESTION) — ", re.MULTILINE
-)
 
 
 def constrain(body, findings):
@@ -22,9 +17,7 @@ def constrain(body, findings):
     lines = body.splitlines()
     start, end = section(lines, "SUMMARY")
     inline = "\n".join(lines[:start])
-    expected = Counter((f["file"], str(f["line"]), f["severity"]) for f in findings)
-    if Counter(match.groups() for match in HEADER.finditer(inline)) != expected:
-        raise ValueError("wording added, removed or moved source-checked findings")
+    # Formatter comments are never authority: render the entire checked set below.
     replies = re.findall(
         r"^REPLY: .*?(?=^COMMENT: |^REPLY: |^### INLINE_COMMENTS_END)",
         inline,

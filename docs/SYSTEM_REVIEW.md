@@ -28,7 +28,11 @@ All located candidates are batched without a separate count limit. Exhausting th
 or missing a candidate decision stops publication; a partial review never passes the gate.
 Preparation and final reconciliation use the same remaining timeout budget.
 Exact citations may refer to any source packet supplied in the same batch and Git head;
-fabricated text, paths or line numbers remain invalid.
+fabricated text and paths remain invalid. A wrong evidence line number is corrected only
+when its exact path and quote identify one unique supplied source line. Ambiguous matches
+are rejected, candidate anchors are unchanged, and correction counts are archived separately.
+The formatter cannot select, move or rewrite findings: comments are rendered directly from
+the checked set, including when its proposed comment list is incomplete.
 Keep unverified candidates in the private archive and report aggregate coverage publicly.
 Reserve peer prompt space for instructions, findings, actual diff, and repository context.
 Peer completion is transport coverage, not proof that every finding is correct.

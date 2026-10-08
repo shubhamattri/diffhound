@@ -9,6 +9,7 @@ from pathlib import Path
 from repo_context import Repository, balanced_peer, clip
 
 SEVERITIES = {"BLOCKING", "SHOULD-FIX", "NIT", "OPEN_QUESTION"}
+STATUSES = ("supported", "corrected", "contradicted", "not_actionable", "unverified")
 
 
 def read_json(text):
@@ -80,34 +81,50 @@ def candidates(text, *, primary=False):
     return result
 
 
+def source_reference(ref, supplied):
+    """Resolve an exact quote, repairing only an unambiguous copied line number."""
+    if (
+        not isinstance(ref, dict)
+        or set(ref) != {"path", "line", "text"}
+        or type(ref["line"]) is not int
+        or ref["line"] < 1
+    ):
+        raise ValueError("decision lacks exact supplied source evidence")
+    if ref in supplied:
+        return ref
+    matches = {
+        candidate["line"]: candidate
+        for candidate in supplied
+        if candidate["path"] == ref["path"] and candidate["text"] == ref["text"]
+    }
+    if len(matches) != 1:
+        raise ValueError("decision lacks exact supplied source evidence")
+    return next(iter(matches.values()))
+
+
 def reconcile(items, packets, response):
     decisions = response.get("decisions", [])
     ids = [d.get("id") for d in decisions]
     if any(type(i) is not int for i in ids) or sorted(ids) != list(range(len(items))):
         raise ValueError("incomplete, duplicate or unknown finding decisions")
     decisions = sorted(decisions, key=lambda d: d["id"])
-    counts = {
-        k: 0
-        for k in (
-            "supported",
-            "corrected",
-            "contradicted",
-            "not_actionable",
-            "unverified",
-        )
-    }
+    counts = dict.fromkeys(STATUSES, 0)
     kept = []
     # Every packet in this batch was supplied together from the same Git head.
     supplied = [ref for packet in packets for ref in packet["references"]]
     for item, packet, decision in zip(items, packets, decisions):
         status = decision.get("status", "").lower()
-        if status not in counts or not decision.get("reason"):
+        if status not in STATUSES or not decision.get("reason"):
             raise ValueError("invalid finding decision")
         evidence = decision.get("evidence", [])
-        if status != "unverified" and (
-            not evidence or any(ref not in supplied for ref in evidence)
-        ):
-            raise ValueError("decision lacks exact supplied source evidence")
+        if status != "unverified":
+            if not evidence:
+                raise ValueError("decision lacks exact supplied source evidence")
+            repaired = sum(source_reference(ref, supplied) != ref for ref in evidence)
+            if repaired:
+                counts["citation_locations_corrected"] = (
+                    counts.get("citation_locations_corrected", 0) + repaired
+                )
         counts[status] += 1
         if status in {"supported", "corrected"}:
             body = decision.get("body", "").strip()
@@ -237,7 +254,9 @@ def apply(directory):
         kept.extend(findings)
         for key, count in counts.items():
             totals[key] = totals.get(key, 0) + count
-    if sum(totals.values()) != int((root / "count").read_text()):
+    if sum(totals.get(status, 0) for status in STATUSES) != int(
+        (root / "count").read_text()
+    ):
         raise ValueError("system review batch coverage mismatch")
     version = root / "format-version"
     if version.exists():
