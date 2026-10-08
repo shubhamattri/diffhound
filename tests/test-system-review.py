@@ -967,7 +967,11 @@ invented summary defect
         )
         self.assertEqual(constrain(omitted, findings), result)
         raw = self.root / "raw-voice"
-        raw.write_text(omitted)
+        h3 = omitted.replace("## Scorecard", "### Scorecard").replace(
+            "## Verification & Test Checklist", "### Verification & Test Checklist"
+        )
+        self.assertEqual(constrain(h3, findings), result)
+        raw.write_text(h3)
         checked = self.root / "checked.json"
         checked.write_text(json.dumps(findings))
         output = self.root / "written-voice"
@@ -989,6 +993,7 @@ invented summary defect
             check=True,
         )
         self.assertEqual(output.read_text(), result)
+        self.assertEqual(Path(str(output) + ".attempt-1").read_text(), h3)
         self.assertFalse(Path(str(output) + ".attempt-2").exists())
         self.assertIn("**Total**", result)
         with self.assertRaises(ValueError):
