@@ -61,7 +61,9 @@ def candidates(text, *, primary=False):
     except json.JSONDecodeError:
         if primary:
             raise ValueError("unrecognized primary finding format") from None
-        if re.search(r"FINDING:|\"findings\"", text):
+        if re.search(
+            r'^\s*(?:\{|\[\s*(?:\{|$)|```json\b|"findings"\s*:)', text, re.MULTILINE
+        ):
             raise ValueError("unparseable candidate findings")
         return []  # Peer challenges and scorecards are context, not new findings.
     if isinstance(value, list):
@@ -82,16 +84,25 @@ def candidates(text, *, primary=False):
 
 
 def source_reference(ref, supplied):
-    """Resolve an exact quote, repairing only an unambiguous copied line number."""
+    """Resolve supplied source; never repair both quote whitespace and location."""
     if (
         not isinstance(ref, dict)
         or set(ref) != {"path", "line", "text"}
         or type(ref["line"]) is not int
         or ref["line"] < 1
+        or not isinstance(ref["path"], str)
+        or not isinstance(ref["text"], str)
     ):
         raise ValueError("decision lacks exact supplied source evidence")
     if ref in supplied:
         return ref
+    for candidate in supplied:
+        if (
+            candidate["path"] == ref["path"]
+            and candidate["line"] == ref["line"]
+            and candidate["text"].strip(" \t") == ref["text"].strip(" \t")
+        ):
+            return candidate
     matches = {
         candidate["line"]: candidate
         for candidate in supplied
@@ -118,12 +129,27 @@ def reconcile(items, packets, response):
             raise ValueError("invalid finding decision")
         evidence = decision.get("evidence", [])
         if status != "unverified":
-            if not evidence:
-                raise ValueError("decision lacks exact supplied source evidence")
-            repaired = sum(source_reference(ref, supplied) != ref for ref in evidence)
+            try:
+                if not isinstance(evidence, list) or not evidence:
+                    raise ValueError("decision lacks exact supplied source evidence")
+                resolved = [source_reference(ref, supplied) for ref in evidence]
+            except ValueError:
+                # One unchecked claim must neither publish nor discard its neighbors.
+                # Audit uncertainty also prevents this review from approving the PR.
+                counts["unverified"] += 1
+                counts["evidence_failures_withheld"] = (
+                    counts.get("evidence_failures_withheld", 0) + 1
+                )
+                continue
+            repaired = sum(a["line"] != b["line"] for a, b in zip(resolved, evidence))
             if repaired:
                 counts["citation_locations_corrected"] = (
                     counts.get("citation_locations_corrected", 0) + repaired
+                )
+            whitespace = sum(a["text"] != b["text"] for a, b in zip(resolved, evidence))
+            if whitespace:
+                counts["citation_whitespace_corrected"] = (
+                    counts.get("citation_whitespace_corrected", 0) + whitespace
                 )
         counts[status] += 1
         if status in {"supported", "corrected"}:

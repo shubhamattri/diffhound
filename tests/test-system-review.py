@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -11,7 +12,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 from repo_context import Repository, balanced_peer
-from system_review import apply, candidates, prepare, reconcile
+from system_review import apply, candidates, prepare, reconcile, source_reference
 from verified_voice import constrain
 
 
@@ -176,6 +177,148 @@ class SystemReviewTests(unittest.TestCase):
         self.assertEqual(
             candidates("FINDING: a.py:12 — NIT\nWHAT: exact cite")[0]["line"], 12
         )
+
+    def test_quoted_peer_objections_are_context_not_candidate_records(self):
+        peer = '- "FINDING: capacity.py:2:SHOULD-FIX" — false positive; the guard handles it.\n'
+        self.assertEqual(candidates(peer), [])
+        for prose in (
+            "[capacity.py:2](https://example.invalid/source) — the guard handles this.",
+            "[REFUTED] capacity.py:2 already checks the guard.",
+            "[1]: https://example.invalid/source",
+        ):
+            self.assertEqual(candidates(prose), [])
+        primary = self.root / "primary.txt"
+        primary.write_text("FINDING: capacity.py:2:NIT\nWHAT: inspect this call\n")
+        peer_file = self.root / "peer.txt"
+        peer_file.write_text(peer)
+        directory = self.root / "peer-challenge-gate"
+        prepare(
+            str(self.root), self.sha, str(directory), [str(primary), str(peer_file)]
+        )
+        payload = json.loads((directory / "batch-000.json").read_text())
+        self.assertEqual(len(payload["items"]), 1)
+        self.assertIn("false positive", (directory / "batch-000.prompt").read_text())
+        self.assertEqual((directory / "input-1.txt").read_text(), peer)
+        for malformed in (
+            '{"findings": [',
+            '```json\n{"findings": [\n```',
+            '[{"file":',
+        ):
+            with self.assertRaisesRegex(ValueError, "unparseable candidate"):
+                candidates(malformed)
+        self.assertIn("unverified", candidates("FINDING: invalid location\nconcern")[0])
+
+    def test_citation_whitespace_repair_requires_the_exact_coordinate(self):
+        ref = {"path": "capacity.py", "line": 2, "text": "    await store.claim(key)"}
+        copied = dict(ref, text="await store.claim(key)")
+        self.assertEqual(source_reference(copied, [ref, dict(ref, line=3)]), ref)
+        self.assertEqual(copied["text"], "await store.claim(key)")
+        for bad in (
+            dict(copied, line=99),
+            dict(copied, path="other.py"),
+            dict(copied, text="await store.claim(other_key)"),
+            dict(copied, text="awaitstore.claim(key)"),
+        ):
+            with self.assertRaisesRegex(ValueError, "exact supplied source evidence"):
+                source_reference(bad, [ref])
+
+    def test_bad_citations_withhold_only_the_affected_decision(self):
+        item = {
+            "file": "capacity.py",
+            "line": 2,
+            "severity": "NIT",
+            "body": "candidate",
+        }
+        ref = {"path": "capacity.py", "line": 2, "text": "    await store.claim(key)"}
+        packet = {"references": [ref, dict(ref, line=3)]}
+        good = {
+            "id": 1,
+            "status": "SUPPORTED",
+            "body": "checked concern",
+            "reason": "source",
+            "evidence": [ref],
+        }
+        for status in ("SUPPORTED", "CORRECTED", "CONTRADICTED", "NOT_ACTIONABLE"):
+            for evidence in (
+                [],
+                [dict(ref, text="invented")],
+                [dict(ref, line=99)],
+                [ref, dict(ref, path="absent.py")],
+            ):
+                bad = dict(
+                    good,
+                    id=0,
+                    status=status,
+                    body="must never publish",
+                    evidence=evidence,
+                )
+                response = {"decisions": [bad, good]}
+                kept, audit = reconcile([item, item], [packet, packet], response)
+                self.assertEqual(kept, [dict(item, body="checked concern")])
+                self.assertEqual(audit["supported"], 1)
+                self.assertEqual(audit["unverified"], 1)
+                self.assertEqual(audit["evidence_failures_withheld"], 1)
+                self.assertEqual(response["decisions"][0], bad)
+
+    def test_withheld_citation_survives_archive_and_caps_actual_approval_path(self):
+        item = {"file": "capacity.py", "line": 2, "severity": "NIT", "body": "claim"}
+        directory = self.root / "withheld-citation-gate"
+        directory.mkdir()
+        (directory / "count").write_text("1")
+        (directory / "batch-000.json").write_text(
+            json.dumps({"items": [item], "packets": [self.repo.packet(item)]})
+        )
+        (directory / "batch-000.stop").write_text("end_turn")
+        (directory / "batch-000.response").write_text(
+            json.dumps(
+                {
+                    "decisions": [
+                        {
+                            "id": 0,
+                            "status": "SUPPORTED",
+                            "reason": "unproven",
+                            "body": "must not publish",
+                            "evidence": [
+                                {"path": "capacity.py", "line": 2, "text": "invented"}
+                            ],
+                        }
+                    ]
+                }
+            )
+        )
+        apply(str(directory))
+        self.assertEqual(json.loads((directory / "findings.json").read_text()), [])
+        audit = json.loads((directory / "audit.json").read_text())
+        self.assertEqual(audit["unverified"], 1)
+        lib = Path(__file__).resolve().parents[1] / "lib"
+        source = (lib / "review.sh").read_text()
+        guard = re.search(
+            r'  if \[ "\$_SYSTEM_UNVERIFIED".*?\n  fi', source, re.DOTALL
+        )[0]
+        for unverified, expected in ((audit["unverified"], "COMMENT"), (0, "APPROVE")):
+            summary = self.root / "summary.md"
+            summary.write_text("## Scorecard\n| **Total** | 100/100 | APPROVE |\n")
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1/parser.sh"; REVIEW_EVENT=APPROVE\n'
+                    + guard
+                    + '\nprintf "%s" "$REVIEW_EVENT"',
+                    "test",
+                    str(lib),
+                ],
+                env=dict(
+                    os.environ,
+                    _SYSTEM_UNVERIFIED=str(unverified),
+                    REVIEW_SUMMARY=str(summary),
+                ),
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertEqual(result.stdout, expected)
+            self.assertIn(expected, summary.read_text())
 
     def test_unlocatable_notes_are_archived_counted_and_withheld(self):
         primary = self.root / "primary.txt"
@@ -635,8 +778,10 @@ _call_api claude-sonnet-5 128000 900 medium "$2" </dev/null
         decisions[0]["evidence"] = [
             {"path": "capacity.py", "line": 2, "text": "invented source"}
         ]
-        with self.assertRaisesRegex(ValueError, "exact supplied source evidence"):
-            reconcile(items, packets, response)
+        kept, audit = reconcile(items, packets, response)
+        self.assertEqual(kept, out)
+        self.assertEqual(audit["evidence_failures_withheld"], 1)
+        self.assertEqual(audit["unverified"], 2)
 
     def test_cross_finding_citations_use_exact_source_from_same_batch(self):
         items = [
@@ -677,8 +822,10 @@ _call_api claude-sonnet-5 128000 900 medium "$2" </dev/null
             dict(refs[1], path="not_supplied.py"),
         ):
             response["decisions"][0]["evidence"] = [refs[0], invalid]
-            with self.assertRaisesRegex(ValueError, "exact supplied source evidence"):
-                reconcile(items, packets, response)
+            kept, audit = reconcile(items, packets, response)
+            self.assertEqual(kept, [])
+            self.assertEqual(audit["unverified"], 1)
+            self.assertEqual(audit["not_actionable"], 1)
 
     def test_citation_line_repair_requires_one_exact_source_match(self):
         item = {"file": "capacity.py", "line": 2, "severity": "NIT", "body": "claim"}
@@ -716,11 +863,17 @@ _call_api claude-sonnet-5 128000 900 medium "$2" </dev/null
         ):
             decision["evidence"] = [invalid]
             with self.assertRaisesRegex(ValueError, "exact supplied source evidence"):
-                reconcile([item], [packet], response)
+                source_reference(invalid, packet["references"])
+            kept, audit = reconcile([item], [packet], response)
+            self.assertEqual(kept, [])
+            self.assertEqual(audit["unverified"], 1)
         decision["evidence"] = [dict(ref, line=99)]
         packet["references"].append(dict(ref, line=3))
         with self.assertRaisesRegex(ValueError, "exact supplied source evidence"):
-            reconcile([item], [packet], response)
+            source_reference(decision["evidence"][0], packet["references"])
+        kept, audit = reconcile([item], [packet], response)
+        self.assertEqual(kept, [])
+        self.assertEqual(audit["unverified"], 1)
 
     def test_invalid_or_missing_decisions_never_pass_through(self):
         item = {
@@ -730,22 +883,8 @@ _call_api claude-sonnet-5 128000 900 medium "$2" </dev/null
             "body": "bad",
         }
         packet = self.repo.packet(item)
-        for result in (
-            {"decisions": []},
-            {
-                "decisions": [
-                    {
-                        "id": 0,
-                        "status": "SUPPORTED",
-                        "body": "bad",
-                        "evidence": [],
-                        "reason": "trust me",
-                    }
-                ]
-            },
-        ):
-            with self.assertRaises(ValueError):
-                reconcile([item], [packet], result)
+        with self.assertRaisesRegex(ValueError, "incomplete"):
+            reconcile([item], [packet], {"decisions": []})
         forged = {
             "id": 0,
             "status": "SUPPORTED",
@@ -755,8 +894,11 @@ _call_api claude-sonnet-5 128000 900 medium "$2" </dev/null
                 {"path": "capacity.py", "line": 2, "text": "await store.zadd(key)"}
             ],
         }
-        with self.assertRaises(ValueError):
-            reconcile([item], [packet], {"decisions": [forged]})
+        for evidence in (forged["evidence"], []):
+            forged["evidence"] = evidence
+            kept, audit = reconcile([item], [packet], {"decisions": [forged]})
+            self.assertEqual(kept, [])
+            self.assertEqual(audit["unverified"], 1)
 
     def test_uncertainty_is_withheld_not_labelled_correct(self):
         item = {"file": "helpers.py", "line": 5, "severity": "NIT", "body": "unused"}
