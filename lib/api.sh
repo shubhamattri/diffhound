@@ -27,8 +27,14 @@ _TEXT_BLOCKS='[.content[] | select(.type == "text") | .text] | join("")'
 # level. Haiku 4.5 rejects `output_config.effort`, so the cheap layers must keep
 # omitting it; Opus 5 / Sonnet 5 think by default either way.
 _output_cfg() {
-  [ -z "${1:-}" ] && { printf '{}'; return; }
-  jq -nc --arg e "$1" '{thinking: {type: "adaptive"}, output_config: {effort: $e}}'
+  local config='{}'
+  if [ -n "${1:-}" ]; then
+    config=$(jq -nc --arg e "$1" '{thinking: {type: "adaptive"}, output_config: {effort: $e}}') || return 1
+  fi
+  if [ -n "${2:-}" ]; then
+    config=$(jq --slurpfile schema "$2" '.output_config.format = {type: "json_schema", schema: $schema[0]}' <<< "$config") || return 1
+  fi
+  printf '%s' "$config"
 }
 
 # A response that spent every output token thinking has stop_reason max_tokens and
@@ -49,13 +55,14 @@ _lower_effort() {
   case "${1:-}" in max|xhigh) echo high ;; high) echo medium ;; medium) echo low ;; *) echo "" ;; esac
 }
 
-# Usage: printf '%s' "$prompt" | _call_api MODEL [MAX_TOKENS] [TIMEOUT_SECS] [EFFORT]
-#        _call_api MODEL [MAX_TOKENS] [TIMEOUT_SECS] [EFFORT] < prompt_file
+# Usage: _call_api MODEL [MAX_TOKENS] [TIMEOUT_SECS] [EFFORT] [SCHEMA_FILE] < prompt_file
 _call_api() {
   local model="$1"
   local max_tokens="${2:-4096}"
   local timeout_secs="${3:-120}"
   local effort="${4:-}"
+  local schema_file="${5:-}" _api_extra
+  _api_extra=$(_output_cfg "$effort" "$schema_file") || return 1
 
   local _api_pf _api_jf
   _api_pf=$(mktemp -t "api-prompt.XXXXXX")
@@ -65,7 +72,7 @@ _call_api() {
 
   jq -n --arg model "$model" \
         --argjson max_tokens "$max_tokens" \
-        --argjson extra "$(_output_cfg "$effort")" \
+        --argjson extra "$_api_extra" \
         --rawfile user "$_api_pf" \
     '{model: $model, max_tokens: $max_tokens,
       messages: [{role: "user", content: $user}]} + $extra' > "$_api_jf"
@@ -89,7 +96,7 @@ _call_api() {
     local _lower; _lower=$(_lower_effort "$effort")
     echo "  [diffhound] ${model} spent all ${max_tokens} output tokens thinking (stop_reason=max_tokens, no text)${_lower:+; retrying at effort ${_lower}}" >&2
     if [ -n "$_lower" ] && [ "${_DIFFHOUND_EFFORT_RETRY:-0}" != 1 ]; then
-      _DIFFHOUND_EFFORT_RETRY=1 _call_api "$model" "$max_tokens" "$timeout_secs" "$_lower" < "$_api_pf_keep"
+      _DIFFHOUND_EFFORT_RETRY=1 _call_api "$model" "$max_tokens" "$timeout_secs" "$_lower" "$schema_file" < "$_api_pf_keep"
       local _rc=$?; rm -f "$_api_pf_keep"; return $_rc
     fi
     rm -f "$_api_pf_keep"; return 1

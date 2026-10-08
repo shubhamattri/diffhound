@@ -18,7 +18,7 @@ dh_system_review() {
     [ "$remaining" -le 900 ] || remaining=900
     (
       _DIFFHOUND_EFFORT_RETRY=1 DIFFHOUND_STAGE=system-review DIFFHOUND_STOP_REASON_FILE="${base}.stop" \
-        _call_api "claude-sonnet-5" 128000 "$remaining" medium \
+        _call_api "claude-sonnet-5" 128000 "$remaining" medium "$LIB_DIR/system-review-schema.json" \
         < "$prompt" > "${base}.response" 2>"${base}.stderr" || exit 1
       [ "$(cat "${base}.stop" 2>/dev/null)" = end_turn ] || {
         echo 'Source verification output incomplete; stopping this wave' >> "${base}.stderr"

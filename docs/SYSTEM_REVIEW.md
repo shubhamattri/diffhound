@@ -18,6 +18,9 @@ Final verdicts follow surviving checked severities; low advisory scores alone ca
 Withhold formatting-generated thread replies until their assertions are source-checked too.
 Do not refresh old visible history into a new source-checked review; link earlier rounds.
 Missing responses or malformed decisions fail publication; no fail-open fallback.
+Verification requests use Anthropic's native JSON schema output contract, not prompt-only
+JSON formatting. Local ID, evidence, severity and completion checks still apply, and
+refusals or truncated generations remain failures. The schema contains no repository data.
 Legacy notes without an unambiguous file, numeric line and severity are archived
 as UNVERIFIED, counted in coverage and withheld; locations are never guessed.
 Raw inputs are retained before parsing. Up to four verification calls run together,

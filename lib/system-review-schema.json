@@ -1,0 +1,35 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["decisions"],
+  "properties": {
+    "decisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "status", "body", "reason", "evidence"],
+        "properties": {
+          "id": {"type": "integer"},
+          "status": {"type": "string", "enum": ["SUPPORTED", "CORRECTED", "CONTRADICTED", "NOT_ACTIONABLE", "UNVERIFIED"]},
+          "body": {"type": "string"},
+          "reason": {"type": "string"},
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["path", "line", "text"],
+              "properties": {
+                "path": {"type": "string"},
+                "line": {"type": "integer"},
+                "text": {"type": "string"}
+              }
+            }
+          },
+          "severity": {"type": "string", "enum": ["BLOCKING", "SHOULD-FIX", "NIT", "OPEN_QUESTION"]}
+        }
+      }
+    }
+  }
+}
