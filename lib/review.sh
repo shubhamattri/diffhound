@@ -1519,6 +1519,8 @@ _review_chunks_parallel() {
     # Build chunk prompt
     {
       cat "$chunked_prompt_file"
+      cat "$LIB_DIR/system-checklist.txt"
+      python3 "$LIB_DIR/repo_context.py" "$repo_path" "$HEAD_SHA" "$chunk_diff"
       echo ""
       echo "---"
       echo ""
@@ -2074,6 +2076,13 @@ elif [ -f "$_RAG_SCRIPT" ] && $_TIMEOUT_CMD 60 bash "$_RAG_SCRIPT" \
 else
   spinner_stop "RAG context unavailable — proceeding with diff only"
   echo "" > "$RAG_CONTEXT_FILE"
+fi
+
+# Shared context for monolithic review and peers; chunks also collect their own hunks.
+cat "$LIB_DIR/system-checklist.txt" >> "$RAG_CONTEXT_FILE"
+if ! python3 "$LIB_DIR/repo_context.py" "$REPO_PATH" "$HEAD_SHA" "$DIFF_FILE" >> "$RAG_CONTEXT_FILE"; then
+  echo "Repository evidence unavailable; refusing to analyze a different revision" >&2
+  exit 1
 fi
 
 # ============================================================
@@ -3378,7 +3387,7 @@ ${_PEER_DIFF_CONTENT}
 1. For each BLOCKING finding: do you agree? If wrong or overstated, explain why with diff evidence.
 2. Any BLOCKING or SHOULD-FIX issues the primary analysis missed? Reference exact file:line from diff.
 3. Any findings rated too low or too high severity?
-4. Assume there is at least one gap. Find it.
+4. Report a gap only when supported. No minimum finding count.
 
 ## SCOPE RULES (apply these strictly)
 - ONLY comment on code CHANGED in this PR (lines with + or - prefix in the diff)
@@ -3390,6 +3399,8 @@ ${_PEER_DIFF_CONTENT}
 Respond in the same FINDING block format. Plain text. No style concerns.
 PEER_EOF
   fi
+
+  cat "$LIB_DIR/system-checklist.txt" "$RAG_CONTEXT_FILE" >> "$PEER_PROMPT_FILE"
 
   # Peer slot 1: Claude Opus 4.8, ADVERSARIAL (v0.7.12). Replaces the Codex CLI,
   # whose ChatGPT-OAuth kept dying (refresh_token_reused) and needs interactive
@@ -3406,11 +3417,11 @@ PEER_EOF
   _CLAUDE_PEER_PROMPT=$(mktemp -t "pr-${PR_NUMBER}-claudepeer.XXXXXX")
   {
     echo "You are an ADVERSARIAL second reviewer. The PRIMARY review (also Claude) is below."
-    echo "Your job is to REFUTE, not agree. Assume at least one finding is a FALSE POSITIVE."
+    echo "Test each claim and its strongest counterexample. Agreement and disagreement both require evidence."
     echo "Rules:"
     echo "- For any 'X does not exist / not defined / missing / the only exports are' claim: the symbol most likely DOES exist elsewhere in the repo. Unless the diff shown here proves absence, treat it as a PROBABLE FALSE POSITIVE."
     echo "- For any version/API claim ('method .X does not exist in pkg@Y'): a caret range like ^1.1.0 means the LATEST 1.x, not the floor or an older major. If you cannot verify it from the prompt, call it UNSUPPORTED."
-    echo "- Only AFFIRM a finding you can defend from the diff shown. Otherwise list it as a false positive."
+    echo "- Only AFFIRM a finding supported by supplied code. Missing evidence means UNVERIFIED, not false positive."
     echo "- Output exactly two short plain-text sections: 'AFFIRMED:' (findings you can defend, with file:line) and 'FALSE_POSITIVES:' (findings to drop, one line each with why)."
     echo ""
     cat "$PEER_PROMPT_FILE"
@@ -3430,12 +3441,11 @@ PEER_EOF
   # part of the diff" as a finding.
   _PEER_TIMEOUT=1820
   _GEMINI_PROMPT_FILE=$(mktemp -t "pr-${PR_NUMBER}-gemini-prompt.XXXXXX")
-  if [ "$(wc -c < "$PEER_PROMPT_FILE" 2>/dev/null || echo 0)" -gt 14000 ]; then
-    head -c 14000 "$PEER_PROMPT_FILE" > "$_GEMINI_PROMPT_FILE"
-    printf '\n\n[NOTE: context truncated to 14 KB for Gemini-CLI compatibility — review what is shown above. Do not flag missing context as a finding.]\n' >> "$_GEMINI_PROMPT_FILE"
-  else
-    cp "$PEER_PROMPT_FILE" "$_GEMINI_PROMPT_FILE"
-  fi
+  _peer_diff_file=$(mktemp -t "pr-${PR_NUMBER}-peer-diff.XXXXXX")
+  printf '%s' "$_PEER_DIFF_CONTENT" > "$_peer_diff_file"
+  python3 "$LIB_DIR/system_review.py" peer "$LIB_DIR/system-checklist.txt" \
+    "$CLAUDE_OUT" "$_peer_diff_file" "$RAG_CONTEXT_FILE" > "$_GEMINI_PROMPT_FILE"
+  rm -f "$_peer_diff_file"
 
   # Run Gemini in background (prompt via stdin to avoid ARG_MAX on large diffs).
   #
@@ -3533,170 +3543,7 @@ fi
 SYNTH_FINDINGS=$(mktemp -t "pr-${PR_NUMBER}-findings.XXXXXX")
 cp "$CLAUDE_OUT" "$SYNTH_FINDINGS"
 
-# ============================================================
-# STEP 4.5: CROSS-VERIFICATION PASS (kill false positives)
-# For each finding, Haiku verifies against diff context + RAG + learned patterns.
-# Drops FALSE_POSITIVE findings. Tags LIKELY findings with lower confidence.
-# ALWAYS runs on re-reviews — incremental diffs have HIGHER hallucination rates
-# and need the false-positive filter MORE than full diffs do.
-# ============================================================
-if [ "$FAST_MODE" != "true" ] || [ "$IS_REREVIEW" = true ]; then
-  spinner_start "Verifying findings (reducing false positives)..."
-
-  VERIFY_PROMPT=$(mktemp -t "pr-${PR_NUMBER}-verify.XXXXXX")
-  VERIFY_OUT=$(mktemp -t "pr-${PR_NUMBER}-verify-out.XXXXXX")
-
-  # Extract JSON findings from Claude output (or parse FINDING blocks)
-  _FINDINGS_JSON=""
-  _json_block=$(_extract_json "$CLAUDE_OUT" 2>/dev/null || true)
-  if [ -n "$_json_block" ] && echo "$_json_block" | jq -e '.findings' >/dev/null 2>&1; then
-    _FINDINGS_JSON="$_json_block"
-  fi
-
-  if [ -n "$_FINDINGS_JSON" ]; then
-    _FINDING_COUNT=$(echo "$_FINDINGS_JSON" | jq '.findings | length')
-
-    if [ "$_FINDING_COUNT" -gt 0 ]; then
-      # Short-circuit: skip verification for low-finding, non-blocking reviews
-      _has_blocking=$(echo "$_FINDINGS_JSON" | jq '[.findings[] | select(.severity == "BLOCKING")] | length' 2>/dev/null || echo "0")
-      if [ "$_FINDING_COUNT" -le 3 ] && [ "${_has_blocking:-0}" -eq 0 ]; then
-        spinner_stop "Low-risk review (${_FINDING_COUNT} findings, no blockers) — verification skipped"
-      else
-      # Build verification prompt with all findings + context
-      {
-        cat << 'VERIFY_SYS'
-You are a code review verifier. For each finding below, determine if it is a real issue or a false positive.
-
-For each finding, you receive:
-- The finding details (file, line, severity, body)
-- The actual diff context around the flagged line
-- Learned false positive patterns from past reviews
-
-Your job: classify each finding as VALID, LIKELY, or FALSE_POSITIVE.
-- VALID (confidence 0.85-1.0): Clear evidence in the diff/context confirms the issue
-- LIKELY (confidence 0.5-0.84): Plausible but cannot fully confirm from available context
-- FALSE_POSITIVE (confidence 0.0-0.49): The concern is unfounded, already handled, or out of scope
-
-Output valid JSON only:
-```json
-{
-  "verifications": [
-    {"index": 0, "verdict": "VALID", "confidence": 0.92, "reason": "one line reason"},
-    {"index": 1, "verdict": "FALSE_POSITIVE", "confidence": 0.15, "reason": "the guard already handles this case at line 42"}
-  ]
-}
-```
-VERIFY_SYS
-
-        echo ""
-        echo "## FINDINGS TO VERIFY"
-        echo "$_FINDINGS_JSON" | jq -r '
-          .findings | to_entries[] |
-          "### Finding \(.key): \(.value.file):\(.value.line) [\(.value.severity)]
-\(.value.title // .value.body)
-Evidence: \(.value.evidence // "none")
-"
-        '
-
-        echo ""
-        echo "## DIFF CONTEXT (around flagged lines)"
-        # For each finding, extract ±20 lines from the diff
-        echo "$_FINDINGS_JSON" | jq -r '.findings[].file' | sort -u | while read -r _vf; do
-          [ -z "$_vf" ] && continue
-          echo "### $_vf"
-          awk -v f="$_vf" '
-            /^diff --git/ { in_file = 0 }
-            /^diff --git a\// {
-              split($0, parts, " b/")
-              if (parts[2] == f) in_file = 1
-            }
-            in_file { print }
-      END { if (pending && hold != "") {} }
-          ' "$DIFF_FILE" 2>/dev/null | head -200
-          echo ""
-        done
-
-        # Include learned patterns for context
-        _lp_file="$HOME/.diffhound/learned-patterns.jsonl"
-        if [ -f "$_lp_file" ] && [ -s "$_lp_file" ]; then
-          echo ""
-          echo "## LEARNED FALSE POSITIVE PATTERNS (from past reviews)"
-          jq -r '.lesson' "$_lp_file" 2>/dev/null | sort -u | awk "NR<=20" | while read -r _lesson; do
-            echo "- $_lesson"
-          done
-        fi
-      } > "$VERIFY_PROMPT"
-
-      # Cross-verification pass. v0.7.29: single backend, no duplicate curl.
-      _verify_resp=""
-      DIFFHOUND_STAGE="cross-verify"
-      _verify_resp=$(_call_api "claude-sonnet-5" 128000 900 medium < "$VERIFY_PROMPT" 2>/dev/null || true)
-
-      # Parse verification results and filter findings
-      if [ -n "$_verify_resp" ]; then
-        _verify_json=$(echo "$_verify_resp" | sed -n '/^```json/,/^```/{/^```/d;p;}' 2>/dev/null || echo "$_verify_resp")
-
-        if echo "$_verify_json" | jq -e '.verifications' >/dev/null 2>&1; then
-          _dropped=0; _downgraded=0
-
-          # Build filtered findings JSON
-          _filtered_json=$(echo "$_FINDINGS_JSON" | jq --argjson verifications "$(echo "$_verify_json" | jq '.verifications')" '
-            # Filter findings based on verification results
-            .findings = [
-              .findings | to_entries[] |
-              . as $entry |
-              # If no verification for this index, keep as-is (safe default)
-              ([$verifications[] | select(.index == $entry.key)] | first // {verdict: "VALID", confidence: 0.7}) as $v |
-              if $v.verdict == "FALSE_POSITIVE" then
-                empty
-              elif $v.verdict == "LIKELY" then
-                $entry.value + {confidence: ($v.confidence // 0.6)}
-              else
-                $entry.value + {confidence: ($v.confidence // 0.9)}
-              end
-            ] |
-            # Recalculate verdict based on remaining findings
-            if [.findings[] | select(.severity == "BLOCKING")] | length > 0 then
-              .verdict = "REQUEST_CHANGES"
-            elif [.findings[] | select(.severity == "SHOULD-FIX")] | length > 0 then
-              .verdict = "COMMENT"
-            else
-              .verdict = "APPROVE"
-            end
-          ' 2>/dev/null || echo "")
-
-          if [ -n "$_filtered_json" ] && echo "$_filtered_json" | jq -e '.findings' >/dev/null 2>&1; then
-            _dropped=$(echo "$_verify_json" | jq '[.verifications[] | select(.verdict == "FALSE_POSITIVE")] | length' 2>/dev/null || echo "0")
-            _downgraded=$(echo "$_verify_json" | jq '[.verifications[] | select(.verdict == "LIKELY")] | length' 2>/dev/null || echo "0")
-
-            # Update CLAUDE_OUT with filtered findings
-            # Rebuild the output as JSON-fenced block
-            {
-              echo '```json'
-              echo "$_filtered_json"
-              echo '```'
-            } > "$CLAUDE_OUT"
-
-            spinner_stop "Verified: ${_dropped} false positives dropped, ${_downgraded} downgraded"
-          else
-            spinner_stop "Verification parse failed — using unfiltered findings"
-          fi
-        else
-          spinner_stop "Verification output invalid — using unfiltered findings"
-        fi
-      else
-        spinner_stop "Verification call failed — using unfiltered findings"
-      fi
-    fi  # end short-circuit check
-    else
-      spinner_stop "No findings to verify"
-    fi
-  else
-    spinner_stop "Non-JSON output — verification skipped (will use regex fallback)"
-  fi
-
-  rm -f "$VERIFY_PROMPT" "$VERIFY_OUT" 2>/dev/null || true
-fi
+# All candidate formats are verified by dh_system_review before wording.
 
 # ============================================================
 # STEP 4.7: MECHANICAL VERIFICATION (grep/test to drop false positives)
@@ -3945,171 +3792,27 @@ CANONICAL_FALLBACK
 fi
 
 
-# ── Pre-merge peer findings at script level (avoids overloading Haiku) ──────
-_MERGED_FINDINGS_FILE=""
-if [ "$_RUN_PEER_REVIEW" = true ]; then
-  _MERGED_FINDINGS_FILE=$(mktemp -t "pr-${PR_NUMBER}-merged.XXXXXX")
-
-  # Start with Claude's findings as base
-  _claude_merge_json=$(_extract_json "$CLAUDE_OUT" 2>/dev/null || true)
-  if [ -n "$_claude_merge_json" ] && echo "$_claude_merge_json" | jq -e '.findings' >/dev/null 2>&1; then
-    echo "$_claude_merge_json" | jq '.findings' > "$_MERGED_FINDINGS_FILE"
-  else
-    echo "[]" > "$_MERGED_FINDINGS_FILE"
-  fi
-
-  # Extract structured findings from Codex/Gemini text output
-  for _peer_label in CODEX GEMINI; do
-    _peer_text=""
-    [ "$_peer_label" = "CODEX" ] && _peer_text="$CODEX_CONTENT"
-    [ "$_peer_label" = "GEMINI" ] && _peer_text="$GEMINI_CONTENT"
-    [ -z "$_peer_text" ] && continue
-    [ "$_peer_text" = "CODEX_UNAVAILABLE" ] && continue
-    [ "$_peer_text" = "GEMINI_UNAVAILABLE" ] && continue
-
-    # Try extracting JSON findings from peer output
-    _peer_json=$(echo "$_peer_text" | sed -n '/```json/,/```/{/```/d;p;}' 2>/dev/null | jq '.findings // []' 2>/dev/null || echo "[]")
-    if [ "$_peer_json" != "null" ] && [ "$_peer_json" != "[]" ] && [ -n "$_peer_json" ]; then
-      # Merge: append peer findings tagged with source
-      _merged=$(jq -s --arg src "$_peer_label" \
-        '.[0] + [.[1][] | . + {source: $src}]' \
-        "$_MERGED_FINDINGS_FILE" <(echo "$_peer_json") 2>/dev/null || cat "$_MERGED_FINDINGS_FILE")
-      echo "$_merged" > "$_MERGED_FINDINGS_FILE"
-    fi
-  done
-
-  # Deduplicate by file:line proximity (±3 lines = same finding), keep highest severity
-  _deduped=$(jq '
-    def sev_rank: if . == "BLOCKING" then 3 elif . == "SHOULD-FIX" then 2 elif . == "NIT" then 1 else 0 end;
-    group_by(.file) | map(
-      sort_by(.line) |
-      reduce .[] as $f ([];
-        if length == 0 then [$f]
-        else
-          .[-1] as $last |
-          if ($last.file == $f.file) and (($f.line - $last.line) | fabs <= 3) then
-            if ($f.severity | sev_rank) > ($last.severity | sev_rank) then
-              .[:-1] + [$f]
-            else . end
-          else . + [$f] end
-        end
-      )
-    ) | flatten
-  ' "$_MERGED_FINDINGS_FILE" 2>/dev/null || cat "$_MERGED_FINDINGS_FILE")
-
-  echo "$_deduped" > "$_MERGED_FINDINGS_FILE"
-
-# -- Pattern consolidation: collapse similar findings across different files --
-# Runs on pre-rewrite JSON findings. Groups by title similarity (Jaccard >0.7).
-if echo "$_deduped" | jq -e 'length > 5' >/dev/null 2>&1; then
-  _consolidated=$(echo "$_deduped" | jq '
-    def title: (.title // (.body | split(".")[0] // .body[:80]));
-    def words: [title | ascii_downcase | split(" ")[] | select(length > 2)];
-    def jaccard(a; b):
-      if (a | length) == 0 or (b | length) == 0 then 0
-      else
-        ([a[], b[]] | unique | length) as $union |
-        ([a[] as $w | b[] | select(. == $w)] | unique | length) as $inter |
-        if $union == 0 then 0 else ($inter / $union) end
-      end;
-    . as $all |
-    reduce range(length) as $i (
-      {groups: [], assigned: {}};
-      if .assigned[($i | tostring)] then .
-      else
-        ($all[$i] | words) as $w_i |
-        if ($w_i | length) < 5 then
-          .groups += [[$i]] | .assigned[($i | tostring)] = true
-        else
-          ([ range(length) | select(. > $i) |
-             select(.assigned[(. | tostring)] | not) |
-             select($all[.].file != $all[$i].file) |
-             select(jaccard($w_i; $all[.] | words) > 0.7)
-          ]) as $matches |
-          if ($matches | length) >= 2 then
-            .groups += [[$i] + $matches] |
-            .assigned[($i | tostring)] = true |
-            reduce $matches[] as $m (.; .assigned[($m | tostring)] = true)
-          elif ($matches | length) == 1 and jaccard($w_i; $all[$matches[0]] | words) == 1.0 then
-            .groups += [[$i] + $matches] |
-            .assigned[($i | tostring)] = true |
-            .assigned[($matches[0] | tostring)] = true
-          else
-            .groups += [[$i]] | .assigned[($i | tostring)] = true
-          end
-        end
-      end
-    ) |
-    [.groups[] |
-      if length == 1 then $all[.[0]]
-      else
-        . as $idxs |
-        ($all[$idxs[0]]) * {
-          body: (
-            ($all[$idxs[0]].body | split("\u001f")[0]) +
-            "\u001f\u001fSame pattern in " + ([$idxs[1:][] | $all[.].file + ":" + ($all[.].line | tostring)] | join(", "))
-          ),
-          severity: (
-            [$idxs[] | $all[.].severity |
-              if . == "BLOCKING" then 3 elif . == "SHOULD-FIX" then 2 else 1 end
-            ] | max |
-            if . == 3 then "BLOCKING" elif . == 2 then "SHOULD-FIX" else "NIT" end
-          )
-        }
-      end
-    ]
-  ' 2>/dev/null)
-  if [ -n "$_consolidated" ]; then
-    _pre_count=$(echo "$_deduped" | jq 'length' 2>/dev/null || echo "?")
-    _post_count=$(echo "$_consolidated" | jq 'length' 2>/dev/null || echo "?")
-    if [ "$_pre_count" != "$_post_count" ]; then
-      echo "  Pattern consolidation: ${_pre_count} -> ${_post_count} findings (collapsed similar patterns)" >&2
-      echo "$_consolidated" > "$_MERGED_FINDINGS_FILE"
-    fi
-  fi
+# Ground all primary and peer candidates before any wording or scoring.
+source "$LIB_DIR/system-review.sh"
+_SYSTEM_REVIEW_DIR="$(_run_log_dir)/system-review"
+spinner_start "Checking findings against the captured repository..."
+printf '%s' "$VOICE_EXAMPLES_CONTENT" > "$VOICE_EXAMPLES_FILE"
+if ! DIFFHOUND_VERIFICATION_VOICE_FILE="$VOICE_EXAMPLES_FILE" dh_system_review "$REPO_PATH" "$HEAD_SHA" "$_SYSTEM_REVIEW_DIR" "$CLAUDE_OUT" "$CODEX_OUT" "$GEMINI_OUT"; then
+  spinner_fail "Repository verification incomplete; not posting"
+  DIFFHOUND_FAIL_REASON="Repository verification did not finish with complete source-backed decisions. Nothing was posted."
+  exit 1
 fi
-
-# -- Same-file topic dedup: merge findings in same file with overlapping topics --
-# Catches duplicates like two SSRF comments on doc_ingest.py at different lines.
-# Wider tolerance than proximity dedup (+-20 lines) but requires title similarity.
-_sf_deduped=$(jq '
-  def title: (.title // (.body | split(".")[0] // .body[:80]));
-  def words: [title | ascii_downcase | split(" ")[] | select(length > 2)];
-  def jaccard(a; b):
-    if (a | length) == 0 or (b | length) == 0 then 0
-    else
-      ([a[], b[]] | unique | length) as $union |
-      ([a[] as $w | b[] | select(. == $w)] | unique | length) as $inter |
-      if $union == 0 then 0 else ($inter / $union) end
-    end;
-  group_by(.file) | map(
-    if length <= 1 then .
-    else
-      sort_by(.line) |
-      reduce .[] as $f ([];
-        if length == 0 then [$f]
-        else
-          .[-1] as $last |
-          if jaccard(($last | words); ($f | words)) > 0.6 then
-            # Same file + similar topic = keep the one with higher severity
-            if ([$f.severity, $last.severity] | map(if . == "BLOCKING" then 3 elif . == "SHOULD-FIX" then 2 else 1 end) | .[0] > .[1]) then
-              .[:-1] + [$f]
-            else . end
-          else . + [$f] end
-        end
-      )
-    end
-  ) | flatten
-' "$_MERGED_FINDINGS_FILE" 2>/dev/null || cat "$_MERGED_FINDINGS_FILE")
-_sf_pre=$(jq 'length' "$_MERGED_FINDINGS_FILE" 2>/dev/null || echo "?")
-_sf_post=$(echo "$_sf_deduped" | jq 'length' 2>/dev/null || echo "?")
-if [ "$_sf_pre" != "$_sf_post" ]; then
-  echo "  Same-file topic dedup: ${_sf_pre} -> ${_sf_post} findings" >&2
-  echo "$_sf_deduped" > "$_MERGED_FINDINGS_FILE"
-fi
-  _merge_count=$(echo "$_deduped" | jq 'length' 2>/dev/null || echo "?")
-  echo "  Pre-merged findings: ${_merge_count} unique (from Claude + peers)" >&2
-fi
+cp "$CLAUDE_OUT" "$_SYSTEM_REVIEW_DIR/primary-before.txt"
+# Preserve thread reconciliation metadata but never reintroduce rejected finding prose.
+_system_metadata=$(_extract_json "$CLAUDE_OUT" 2>/dev/null | jq '{thread_statuses: (.thread_statuses // [])}' 2>/dev/null || echo '{}')
+[ -n "$_system_metadata" ] || _system_metadata='{}'
+_MERGED_FINDINGS_FILE="$_SYSTEM_REVIEW_DIR/findings.json"
+jq -n --slurpfile findings "$_MERGED_FINDINGS_FILE" --argjson metadata "$_system_metadata" \
+  '$metadata + {findings: $findings[0]}' > "$CLAUDE_OUT"
+_VALIDATOR_FINDING_COUNT=$(jq 'length' "$_MERGED_FINDINGS_FILE")
+_SYSTEM_UNVERIFIED=$(jq '.unverified // 0' "$_SYSTEM_REVIEW_DIR/audit.json")
+_VALIDATORS_RAN=true
+spinner_stop "Source check complete: $(cat "$_SYSTEM_REVIEW_DIR/audit.json")"
 
 # ============================================================
 # -- PR-scope enforcement: downgrade findings on unchanged code to NIT --
@@ -4159,6 +3862,9 @@ if [ -f "$_MERGED_FINDINGS_FILE" ] && [ -f "$DIFF_FILE" ]; then
   rm -f "$_changed_lines_set"
 fi
 
+jq -n --slurpfile findings "$_MERGED_FINDINGS_FILE" --argjson metadata "$_system_metadata" \
+  '$metadata + {findings: $findings[0]}' > "$CLAUDE_OUT"
+
 # # STEP 6: MERGE + STYLE REWRITE — single cached Haiku call
 # Combines old Pass 3 (merge) + Pass 4 (style) into one API call.
 # Static system prompt is cached via prompt-caching-2024-07-31 beta.
@@ -4168,6 +3874,8 @@ spinner_start "Writing review comments (pass ${_STYLE_PASS_NUM}/${_TOTAL_PASSES}
 
 # ── Static system prompt (cached between calls — voice rules + output format) ─
 read -r -d '' _STATIC_SYSTEM << 'STATIC_SYS_EOF' || true
+Use only the supplied source-checked findings. Never add a claim, impact, default question, or test result from examples or prior reviews. Base the summary and scorecard reasons only on these findings; a score is advisory.
+
 You are a ghostwriter. You have engineering findings from a code analysis. Your job is to rewrite them as PR review comments that sound exactly like a specific engineer.
 
 ## WHO YOU ARE WRITING AS
@@ -4434,7 +4142,7 @@ REREVIEW_BLOCK
 _SYS_TMP=$(mktemp -t "pr-${PR_NUMBER}-sys.XXXXXX")
 printf '%s' "$_STATIC_SYSTEM" > "$_SYS_TMP"
 _voice_expected=$(dh_voice_findings_expected "$CLAUDE_OUT" "${_VALIDATOR_FINDING_COUNT:-}" "${_MERGED_FINDINGS_FILE:-}")
-if ! dh_write_voice "$_SYS_TMP" "$_USER_TMP" "$REVIEW_STRUCTURED" "$_voice_expected"; then
+if ! dh_write_voice "$_SYS_TMP" "$_USER_TMP" "$REVIEW_STRUCTURED" "$_voice_expected" "$_MERGED_FINDINGS_FILE"; then
   spinner_fail "Voice rewrite incomplete; not posting"
   DIFFHOUND_FAIL_REASON="The wording step did not produce a complete review, scorecard and verdict. Nothing was posted."
   _voice_logs="$(_run_log_dir)"
@@ -4443,6 +4151,7 @@ if ! dh_write_voice "$_SYS_TMP" "$_USER_TMP" "$REVIEW_STRUCTURED" "$_voice_expec
   exit 1
 fi
 # Archive formatting evidence before cleanup, including the API stop reason.
+_SYSTEM_UNVERIFIED=$((_SYSTEM_UNVERIFIED + $(cat "${REVIEW_STRUCTURED}.withheld-replies")))
 _voice_logs="$(_run_log_dir)"
 mkdir -p "$_voice_logs"
 cp "$_USER_TMP" "$_voice_logs/voice-prompt.txt"
@@ -4458,7 +4167,7 @@ rm -f "$_USER_TMP"
   || spinner_stop "Pass ${_STYLE_PASS_NUM} complete — review ready"
 
 # Cleanup extra temp files
-rm -f "${SYNTH_FINDINGS:-}" "${VOICE_EXAMPLES_FILE:-}" "${_MERGED_FINDINGS_FILE:-}" 2>/dev/null || true
+rm -f "${SYNTH_FINDINGS:-}" "${VOICE_EXAMPLES_FILE:-}" 2>/dev/null || true
 
 # ============================================================
 # PARSE OUTPUT
@@ -4570,8 +4279,11 @@ fi
 # Append peer review coverage note to summary
 if [ -n "${PEER_COVERAGE:-}" ]; then
   echo "" >> "$REVIEW_SUMMARY"
-  echo "*Cross-checked by ${PEER_COVERAGE}.*" >> "$REVIEW_SUMMARY"
+  echo "*Responses completed: ${PEER_COVERAGE}. This counts usable responses, not verified findings.*" >> "$REVIEW_SUMMARY"
 fi
+
+echo "" >> "$REVIEW_SUMMARY"
+echo "*Repository evidence gate: $(jq -r '"\(.supported // 0) supported, \(.corrected // 0) corrected, \(.contradicted // 0) contradicted, \(.not_actionable // 0) not actionable, \(.unverified // 0) unverified"' "$_SYSTEM_REVIEW_DIR/audit.json"). Unverified candidates withheld; bounded source inspection does not establish test execution or exhaustive coverage.*" >> "$REVIEW_SUMMARY"
 
 COMMENT_COUNT=$(grep -c "^COMMENT:" "${REVIEW_STRUCTURED}.comments" || true)
 REPLY_COUNT_PREVIEW=$(grep -c "^REPLY:" "${REVIEW_STRUCTURED}.comments" || true)
@@ -4814,6 +4526,10 @@ if [ "$POST_REVIEW" = true ]; then
   # Parse verdict (3-method fallback). The scorecard was already derived above
   # (before this block) and preserves the verdict word, so this still resolves.
   REVIEW_EVENT=$(parse_verdict "$REVIEW_SUMMARY" "${REVIEW_STRUCTURED}.new_comments")
+  if [ "$_SYSTEM_UNVERIFIED" -gt 0 ] && [ "$REVIEW_EVENT" = APPROVE ]; then
+    REVIEW_EVENT=COMMENT
+    _cap_total_row_verdict "$REVIEW_SUMMARY"
+  fi
   _DH_MODEL_EVENT="$REVIEW_EVENT"   # before any cap; a capped block must never go quiet
 
   # Whatever the verdict, a review with unreviewed files says so at the top.
@@ -5059,7 +4775,7 @@ JSONEND
   fi
   _POSTED_OK=false
   if dh_quiet_rerun_ok "$IS_REREVIEW" "${FORCE_FULL:-false}" "$REVIEW_EVENT" "${_DH_MODEL_EVENT:-}" \
-       "${_CHUNK_GAPS:-}" "${_dh_inline_n:-0}" "${REPLY_COUNT:-0}" "${LAST_DH_REVIEW_ID:-}"; then
+       "${_CHUNK_GAPS:-}" "${_dh_inline_n:-0}" "${REPLY_COUNT:-0}" "${LAST_DH_REVIEW_ID:-}" source_checked; then
     # Publish the current summary/state even on a quiet rerun.
     cp "$_dh_marked" "${_dh_marked}.q"
     if dh_refresh_review "$REPO_OWNER" "$REPO_NAME" "$PR_NUMBER" "$LAST_DH_REVIEW_ID" \

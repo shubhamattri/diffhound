@@ -178,7 +178,6 @@ V="$ROOT/lib/validators"
   | "$V/pre-existing-pattern.sh" \
   | "$V/consumer-check.sh" \
   | "$V/todo-deferral.sh" \
-  | "$V/verifier.sh" \
   | "$V/citation-discipline.sh" \
   | "$V/dedup-helper.py" \
   | "$V/claim-verify.sh"

@@ -106,7 +106,13 @@ flowchart LR
 | Verify and write | Validators and model verification filter findings; Sonnet prepares the final review in the configured voice. Haiku supports triage, chunk merging, and deduplication. |
 | Publish | Reconcile finding history, validate the body budget and current head, then submit the review and update the persistent summary. |
 
-The primary Anthropic request receives prepared code context; it does not have repository-browsing tools. Tree-sitter can improve enclosing-function extraction, with a line-window fallback when unavailable. The Gemini peer currently receives a bounded 14 KB prompt, so peer coverage does not mean every model read the entire PR.
+The primary Anthropic request receives prepared code context; it does not have repository-browsing tools. Tree-sitter can improve enclosing-function extraction, with a line-window fallback when unavailable. Gemini's 14 KB prompt reserves separate space for instructions, findings, the actual diff and repository context. Peer completion counts usable responses, not correctness or exhaustive PR coverage.
+
+Before wording, every primary and peer candidate goes through a shared repository evidence gate. It reads immutable source at the captured head, including callers, settings, tests and nearby lifecycle code. Each decision must cover its candidate and quote exact supplied source lines. The gate retains supported findings, corrects overstated claims, removes contradicted or non-actionable claims and withholds unverified candidates. Missing or malformed responses stop publication. A review with unverified candidates cannot approve the PR.
+
+The gate receives the configured voice examples and produces the final comment text. The formatting pass must preserve the exact finding locations and severities; final rendering uses the checked bodies verbatim and builds summary claims from the same set. Numeric category scores remain advisory. Proposed thread replies from the formatting pass are withheld because they have not passed this evidence gate; separate reply-command handling is unchanged. Source-checked runs submit a new review rather than refreshing older unchecked finding text into the current head's body. Historical findings remain linked, not silently marked fixed.
+
+Review instructions explicitly cover program comprehension, architectural fit, compatible reuse, dead code, duplication, unnecessary abstractions, misleading comments and ineffective tests. These are evidence checks, not a judgement about who or what wrote the code. Text search cannot establish complete reachability, and a source quote cannot establish that a model's reasoning is correct. Tests are never claimed as executed merely because their source was read. See [the design and limits](docs/SYSTEM_REVIEW.md).
 
 ### Large diffs and output limits
 
@@ -116,9 +122,10 @@ Diff acquisition and model input have different budgets. Generated files, lockfi
 
 | Budget | Default |
 | --- | --- |
-| Primary, Sonnet peer/verification, and voice output | Up to 128,000 tokens per call |
+| Primary, Sonnet peer, and voice output | Up to 128,000 tokens per call |
+| Repository evidence gate | 16,000 output tokens per batch of 8 candidates; 180 seconds per call, 600 seconds total; at most 120 candidates |
 | Haiku chunk-merge output | Up to 64,000 tokens per call |
-| Primary, Sonnet peer/verification, and voice call timeout | 900 seconds |
+| Primary, Sonnet peer, and voice call timeout | 900 seconds |
 | Chunk-merge call timeout | 600 seconds |
 | Final review body | 150,000 UTF-8 bytes, including embedded history and markers |
 

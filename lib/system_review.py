@@ -1,0 +1,222 @@
+"""Prepare and reconcile repository-backed finding decisions before voice rewriting."""
+
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+from repo_context import Repository, balanced_peer, clip
+
+SEVERITIES = {"BLOCKING", "SHOULD-FIX", "NIT", "OPEN_QUESTION"}
+
+
+def read_json(text):
+    match = re.search(r"^```(?:json)?\s*\n(.*?)^```", text, re.MULTILINE | re.DOTALL)
+    return json.loads(match[1] if match else text)
+
+
+def candidates(text):
+    """Accept both primary formats; embedded evidence JSON cannot shadow FINDING blocks."""
+    matches = list(
+        re.finditer(r"^\s*FINDING: (.+?):(\d+):([A-Z_-]+)\s*$", text, re.MULTILINE)
+    )
+    if len(matches) != len(re.findall(r"^\s*FINDING:", text, re.MULTILINE)):
+        raise ValueError("malformed finding header")
+    if matches:
+        result = []
+        for i, match in enumerate(matches):
+            body = text[
+                match.end() : matches[i + 1].start()
+                if i + 1 < len(matches)
+                else len(text)
+            ]
+            body = re.split(
+                r"^### \w+_(?:START|END)", body, maxsplit=1, flags=re.MULTILINE
+            )[0].strip()
+            result.append(
+                {
+                    "file": match[1],
+                    "line": int(match[2]),
+                    "severity": match[3],
+                    "body": body,
+                }
+            )
+        return result
+    try:
+        value = read_json(text)
+    except json.JSONDecodeError:
+        if re.search(r"FINDING:|\"findings\"", text):
+            raise ValueError("unparseable candidate findings")
+        return []  # Peer challenges and scorecards are context, not new findings.
+    return value if isinstance(value, list) else value.get("findings", [])
+
+
+def reconcile(items, packets, response):
+    decisions = response.get("decisions", [])
+    ids = [d.get("id") for d in decisions]
+    if any(type(i) is not int for i in ids) or sorted(ids) != list(range(len(items))):
+        raise ValueError("incomplete, duplicate or unknown finding decisions")
+    decisions = sorted(decisions, key=lambda d: d["id"])
+    counts = {
+        k: 0
+        for k in (
+            "supported",
+            "corrected",
+            "contradicted",
+            "not_actionable",
+            "unverified",
+        )
+    }
+    kept = []
+    for item, packet, decision in zip(items, packets, decisions):
+        status = decision.get("status", "").lower()
+        if status not in counts or not decision.get("reason"):
+            raise ValueError("invalid finding decision")
+        evidence = decision.get("evidence", [])
+        if status != "unverified" and (
+            not evidence or any(ref not in packet["references"] for ref in evidence)
+        ):
+            raise ValueError("decision lacks exact supplied source evidence")
+        counts[status] += 1
+        if status in {"supported", "corrected"}:
+            body = decision.get("body", "").strip()
+            if not body or re.search(
+                r"^(?:COMMENT:|REPLY:|FINDING:|### )", body, re.MULTILINE
+            ):
+                raise ValueError("invalid corrected finding body")
+            if any(ord(c) < 32 and c not in "\n\t" for c in body):
+                raise ValueError("finding body contains transport control characters")
+            if not any(
+                ref["path"] == item["file"] and ref["line"] == item["line"]
+                for ref in packet["references"]
+            ):
+                raise ValueError("finding location is not in captured source")
+            severity = decision.get("severity", item["severity"])
+            ranks = {"OPEN_QUESTION": 0, "NIT": 1, "SHOULD-FIX": 2, "BLOCKING": 3}
+            if severity not in ranks or ranks[severity] > ranks[item["severity"]]:
+                raise ValueError("verification cannot escalate severity")
+            kept.append(
+                {
+                    "file": item["file"],
+                    "line": item["line"],
+                    "severity": severity,
+                    "body": body,
+                }
+            )
+    return kept, counts
+
+
+def prepare(repo, sha, directory, paths):
+    root = Path(directory)
+    root.mkdir(parents=True, exist_ok=False)
+    repository = Repository(repo, sha)
+    items = []
+    texts = [Path(path).read_text() for path in paths]
+    for text in texts:
+        for item in candidates(text):
+            if (
+                item.get("severity") not in SEVERITIES
+                or type(item.get("line")) is not int
+                or item["line"] < 1
+            ):
+                raise ValueError("invalid candidate metadata")
+            item = {
+                "file": item["file"],
+                "line": item["line"],
+                "severity": item["severity"],
+                "body": "\n".join(
+                    f"{k}: {item[k]}"
+                    for k in (
+                        "title",
+                        "body",
+                        "evidence",
+                        "impact",
+                        "reachable_path",
+                        "rejected_alternative",
+                        "suggestion",
+                        "options",
+                        "diff_line",
+                        "claims",
+                    )
+                    if item.get(k)
+                ),
+            }
+            if item not in items:
+                items.append(item)
+    if len(items) > 120:
+        raise ValueError(
+            "system review exceeds 120-candidate budget; refusing partial publication"
+        )
+    instructions = Path(__file__).with_name("system-review-prompt.txt").read_text()
+    voice_file = os.environ.get("DIFFHOUND_VERIFICATION_VOICE_FILE")
+    if voice_file:
+        instructions += (
+            "\nStyle examples only; never borrow their facts or findings:\n"
+            + clip(Path(voice_file).read_text(), 6000)
+        )
+    for offset in range(0, len(items), 8):
+        batch = items[offset : offset + 8]
+        packets = [repository.packet(item) for item in batch]
+        payload = {"items": batch, "packets": packets}
+        name = root / f"batch-{offset // 8:03d}"
+        name.with_suffix(".json").write_text(json.dumps(payload))
+        findings = [
+            {
+                "id": i,
+                "finding": item,
+                "source": packet,
+                "peer_assessments": peer_assessments(item, texts[1:]),
+            }
+            for i, (item, packet) in enumerate(zip(batch, packets))
+        ]
+        name.with_suffix(".prompt").write_text(
+            instructions + "\n" + json.dumps(findings, ensure_ascii=False)
+        )
+    (root / "count").write_text(str(len(items)))
+
+
+def peer_assessments(item, texts):
+    """Keep refutations as challenges even when the peer emits no new FINDING blocks."""
+    excerpts = []
+    for text in texts:
+        lines = text.splitlines()
+        selected = set()
+        for i, line in enumerate(lines):
+            if Path(item["file"]).name in line:
+                selected.update(range(max(0, i - 2), min(len(lines), i + 4)))
+        excerpts.append(clip("\n".join(lines[i] for i in sorted(selected)), 4000))
+    return excerpts
+
+
+def apply(directory):
+    root, kept, totals = Path(directory), [], {}
+    for path in sorted(root.glob("batch-*.json")):
+        payload = json.loads(path.read_text())
+        if path.with_suffix(".stop").read_text().strip() != "end_turn":
+            raise ValueError("system review generation incomplete")
+        findings, counts = reconcile(
+            payload["items"],
+            payload["packets"],
+            read_json(path.with_suffix(".response").read_text()),
+        )
+        kept.extend(findings)
+        for key, count in counts.items():
+            totals[key] = totals.get(key, 0) + count
+    if sum(totals.values()) != int((root / "count").read_text()):
+        raise ValueError("system review batch coverage mismatch")
+    (root / "audit.json").write_text(json.dumps(totals))
+    (root / "findings.json").write_text(json.dumps(kept))
+
+
+if __name__ == "__main__":
+    try:
+        if sys.argv[1] == "prepare":
+            prepare(*sys.argv[2:5], sys.argv[5:])
+        elif sys.argv[1] == "apply":
+            apply(sys.argv[2])
+        elif sys.argv[1] == "peer":
+            print(balanced_peer(*(Path(p).read_text() for p in sys.argv[2:6])))
+    except (ValueError, OSError, KeyError, TypeError) as error:
+        print(f"System review stopped: {error}", file=sys.stderr)
+        sys.exit(1)
