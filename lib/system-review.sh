@@ -2,9 +2,9 @@
 # Mandatory gate for both JSON and chunked findings, including peer additions.
 dh_system_review() {
   local repo="$1" sha="$2" directory="$3" primary="$4" peer1="$5" peer2="$6"
-  local prompt base remaining deadline=$((SECONDS + 600)) pid failed=0
+  local prompt base remaining deadline=$((SECONDS + 1200)) pid failed=0
   local -a pids=()
-  python3 "$LIB_DIR/system_review.py" prepare "$repo" "$sha" "$directory" \
+  "$_TIMEOUT_CMD" "$((deadline - SECONDS))" python3 "$LIB_DIR/system_review.py" prepare "$repo" "$sha" "$directory" \
     "$primary" "$peer1" "$peer2" || return 1
   for prompt in "$directory"/batch-*.prompt; do
     [ -f "$prompt" ] || continue
@@ -30,5 +30,7 @@ dh_system_review() {
     for pid in "${pids[@]}"; do wait "$pid" || failed=1; done
   fi
   [ "$failed" -eq 0 ] || return 1
-  python3 "$LIB_DIR/system_review.py" apply "$directory"
+  remaining=$((deadline - SECONDS))
+  [ "$remaining" -gt 0 ] || { echo 'System review deadline exceeded' >&2; return 1; }
+  "$_TIMEOUT_CMD" "$remaining" python3 "$LIB_DIR/system_review.py" apply "$directory"
 }
