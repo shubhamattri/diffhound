@@ -63,6 +63,14 @@ to skip a file are demoted to low priority. Model context remains bounded;
 Gemini's peer prompt is capped at 14 KB with separate section budgets. Chunk stop reasons and
 coverage checks expose incomplete primary analysis.
 
+Peer text validation preserves complete Markdown emphasis and terminal code
+blocks. It rejects empty/short answers, unclosed fences, invalid JSON documents
+and unfinished prose. This is a conservative text check, not proof of a provider
+finish reason or finding correctness. Before replacing an unusable answer, the
+private run archive saves the original reply and a metadata-only validation
+decision under `peer-diagnostics/` (directory mode 700, files 600). Archive
+opt-out also disables these copies; review text is never printed by this gate.
+
 Re-reviews use ancestry-checked incremental information where available. The
 large-diff route retains full-diff chunks for context and supplies the changed
 file list to focus feedback. `--force-full` removes that incremental baseline.

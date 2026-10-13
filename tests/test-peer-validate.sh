@@ -23,7 +23,7 @@ run() {
   printf '%s' "$1" > "$f"
   : > "$ERRF"
   _validate_peer_output "$f" "GEMINI" 2>"$ERRF"
-  cat "$f"; rm -f "$f"
+  cat "$f"; rm -f "$f" "${f}.validation.json"
 }
 kept() {
   if [ "$2" != "GEMINI_UNAVAILABLE" ] && [ -n "$2" ]; then
@@ -111,6 +111,42 @@ const rows = await db.select().from(reports);
 That keeps the FK-violation path covered without the deleted helper.')
 kept     "8: mid-text fence is left alone" "$C8"
 contains "8: inline code block preserved" "$C8" 'db.select()'
+
+# Completed Markdown endings from three production failures, with synthetic content.
+C9_TEXT='The changed branch preserves the intended behavior, and the supplied context
+contains no evidence of a newly introduced defect in this small example.
+*The conclusion applies only to the supplied changes (see `example_flag`).*'
+C9=$(run "$C9_TEXT")
+kept "9: complete italic conclusion is KEPT" "$C9"
+contains "9: italic conclusion preserved" "$C9" '*The conclusion'
+
+C10=$(run 'The evidence supplied for this small change supports the primary analysis.
+The visible caller handles the return value and passes the required arguments.
+**No additional issues found (within supplied context)**')
+kept "10: complete bold parenthetical conclusion is KEPT" "$C10"
+
+C11_TEXT='FINDING: example.ts:12:SHOULD-FIX
+WHAT: Preserve the checked value when passing it to the next operation.
+EVIDENCE: The following synthetic example shows the intended return path.
+```typescript
+return checkedValue;
+```'
+C11=$(run "$C11_TEXT")
+kept "11: complete terminal code block is KEPT" "$C11"
+contains "11: terminal closing fence preserved" "$C11" '```'
+
+C12=$(run 'This explanation starts normally but the code block is incomplete even
+though the last visible line happens to end in punctuation accepted by the old guard.
+```typescript
+const value = compute()'); binned "12: unclosed fence with punctuation is DISCARDED" "$C12"
+C13=$(run '```json
+{"description": "This is a deliberately incomplete JSON document with a long enough description to pass the byte floor.",
+"items": ["finished string"
+```'); binned "13: closed wrapper cannot hide incomplete JSON" "$C13"
+C14=$(run 'This synthetic response is long enough but the final italic sentence is
+missing its closing delimiter and ends with an unfinished explanation about the'); binned "14: mid-sentence cutoff stays DISCARDED" "$C14"
+C15=$(run 'This synthetic explanation is complete until its final formatting delimiter.
+It has sufficient length for the peer validator but the last emphasis is unpaired.*'); binned "15: unmatched trailing emphasis is DISCARDED" "$C15"
 
 rm -f "$ERRF"
 echo ""

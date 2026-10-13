@@ -1024,6 +1024,8 @@ cleanup() {
   dh_abandon_pending
   [ -z "${_DH_STATE_DIR:-}" ] || rm -rf "$_DH_STATE_DIR"
   [ -z "${REVIEW_STRUCTURED:-}" ] || rm -f "$REVIEW_STRUCTURED".attempt-*
+  [ -z "${CODEX_OUT:-}" ] || rm -f "${CODEX_OUT}.validation.json"
+  [ -z "${GEMINI_OUT:-}" ] || rm -f "${GEMINI_OUT}.validation.json"
   rm -f "${DIFF_FILE:-}" "${PROMPT_FILE:-}" "${CLAUDE_OUT:-}" "${CODEX_OUT:-}" "${GEMINI_OUT:-}" "${DIFFHOUND_USAGE_LOG:-}" \
         "${PEER_PROMPT_FILE:-}" "${_GEMINI_PROMPT_FILE:-}" "${SYNTH_PROMPT:-}" "${REVIEW_STRUCTURED:-}" "${REVIEW_SUMMARY:-}" \
         "${REVIEW_JSON:-}" "${REVIEW_STRUCTURED:-}.comments" "${REVIEW_STRUCTURED:-}.new_comments" \
@@ -3520,10 +3522,14 @@ PEER_EOF
   fi
   rm -f "${_GEMINI_ERR:-}" "${_GEMINI_EXIT:-}"
 
-  # Validate peer output (lib/peer-validate.sh — unit-tested, see its header
-  # for the measured evidence behind the markdown-fence fix).
-  _validate_peer_output "$CODEX_OUT" "CODEX"
-  _validate_peer_output "$GEMINI_OUT" "GEMINI"
+  # Keep diagnostic evidence before validation replaces incomplete replies.
+  # Private files only; completeness decisions contain no review text.
+  _PEER_ARCHIVE=""
+  if [ "${DIFFHOUND_DISABLE_RUN_ARCHIVE:-0}" != "1" ]; then
+    _PEER_ARCHIVE="$(_run_log_dir)/peer-diagnostics"
+  fi
+  _validate_peer_output "$CODEX_OUT" "CODEX" "$_PEER_ARCHIVE"
+  _validate_peer_output "$GEMINI_OUT" "GEMINI" "$_PEER_ARCHIVE"
 
   CODEX_CONTENT=$(cat "$CODEX_OUT")
   GEMINI_CONTENT=$(cat "$GEMINI_OUT")
