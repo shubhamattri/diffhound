@@ -1218,15 +1218,27 @@ class CheckTheUncheckedTests(unittest.TestCase):
             ("`consent.py:2`:`BLOCKING`", (["consent.py"], "BLOCKING", ["consent.py", 2])),
             ("protocol.py + route.py:7:BLOCKING", (["protocol.py", "route.py"], "BLOCKING", ["route.py", 7])),
             ("consent.py:2:BLOCKING NOT FIXED", (["consent.py"], "BLOCKING", ["consent.py", 2])),
+            ("consent.py:2:NIT — blocking call in event loop", (["consent.py"], "NIT", ["consent.py", 2])),
+            ("consent.py:2:SHOULD-FIX — non-blocking read drops data", (["consent.py"], "SHOULD-FIX", ["consent.py", 2])),
+            ("consent.py:2:SHOULD_FIX (could become a blocker)", (["consent.py"], "SHOULD-FIX", ["consent.py", 2])),
+            ("consent.py:2:BLOCKING — also a nit on naming", (["consent.py"], "BLOCKING", ["consent.py", 2])),
+            ("consent.py (CROSS-CHUNK):OPEN_QUESTION", (["consent.py"], "OPEN_QUESTION", None)),
         ):
             found = candidates(f"FINDING: {header}\nWHAT: x")[0]
             self.assertIn("unverified", found, header)
             self.assertEqual((found["paths"], found["severity"], found.get("located")), expected, header)
 
     def test_header_without_a_severity_stays_withheld_never_guessed(self):
-        found = candidates("FINDING: consent.py:CROSS-FILE-DEPENDENCY\nWHAT: x")[0]
-        self.assertEqual(found["paths"], ["consent.py"])
-        self.assertNotIn("severity", found)
+        for header, paths in (
+            ("consent.py:CROSS-FILE-DEPENDENCY", ["consent.py"]),
+            ("src/nit.py:CROSS-FILE", ["src/nit.py"]),
+            ("consent.py:the blocking path is slow", ["consent.py"]),
+            ("consent.py:the cache misses: blocking issue", ["consent.py"]),
+            ("consent.py:NITPICK", ["consent.py"]),
+        ):
+            found = candidates(f"FINDING: {header}\nWHAT: x")[0]
+            self.assertEqual(found["paths"], paths, header)
+            self.assertNotIn("severity", found, header)
         self.assertNotIn("paths", candidates("FINDING: invalid location\nconcern")[0])
 
     def test_only_a_bare_status_header_is_dropped(self):
@@ -1319,6 +1331,8 @@ class CheckTheUncheckedTests(unittest.TestCase):
             ("cutoff", good, "max_tokens"),
             ("heading", {"decisions": [dict(good["decisions"][0], body="### not a body")]}, "end_turn"),
             ("missing", {"decisions": []}, "end_turn"),
+            ("array", [], "end_turn"),
+            ("not-a-dict", {"decisions": ["x"]}, "end_turn"),
         ):
             directory = self.batch_with_one_retry(name, response, stop)
             apply(str(directory))

@@ -86,28 +86,42 @@ def candidates(text, *, primary=False):
     return result
 
 
-SEVERITY_WORD = re.compile(
-    r"\b(BLOCKING|BLOCKER|SHOULD[-_ ]FIX|NIT|OPEN[-_ ]QUESTION)\b", re.IGNORECASE
+SEVERITY_SLOT = re.compile(
+    r"(BLOCKING|BLOCKER|SHOULD[-_ ]FIX|NIT|OPEN[-_ ]QUESTION)(?![\w-])", re.IGNORECASE
 )
+QUALIFIER = re.compile(r"\(?[A-Za-z_-]+\)?|\d+|")
 FILE_LINE = re.compile(r"([\w./-]+\.[A-Za-z]\w*)(?::(\d+)\b)?")
+
+
+def _severity_slot(rest):
+    """Severity from the slot after the location; location qualifiers may come first, prose may not."""
+    for segment in re.split(r"\s*[:—]\s*", rest.strip()):
+        match = SEVERITY_SLOT.match(segment)
+        if match:
+            word = re.sub(r"[-_ ]", "-", match[1].upper())
+            return {"BLOCKER": "BLOCKING", "OPEN-QUESTION": "OPEN_QUESTION"}.get(word, word)
+        if not QUALIFIER.fullmatch(segment) or SEVERITY_SLOT.search(segment):
+            return None
+    return None
 
 
 def unanchored(header):
     """Files, line and severity of a header the strict form rejects, for anchoring.
 
-    A header with no recognisable severity stays unanchored: guessing one could lower a blocker.
+    A header with no severity in its slot stays unanchored: guessing one could lower a blocker.
     """
     text = header.split("FINDING:", 1)[-1].replace("*", "").replace("`", "")
     if re.fullmatch(r"\s*[\w./-]+(?::(?:\d+|general))?\s*(?::|\s—\s)\s*(?:FIXED|RESOLVED)\s*", text):
         return {"status_note": True}  # A thread status, not a claim about the code.
-    pairs = FILE_LINE.findall(text)
-    words = SEVERITY_WORD.findall(text)
-    if not pairs or not words:
-        return {"paths": list(dict.fromkeys(p for p, _ in pairs))} if pairs else {}
-    word = re.sub(r"[-_ ]", "-", words[-1].upper())
-    severity = {"BLOCKER": "BLOCKING", "OPEN-QUESTION": "OPEN_QUESTION"}.get(word, word)
-    found = {"paths": list(dict.fromkeys(p for p, _ in pairs)), "severity": severity}
-    numbered = [(p, int(n)) for p, n in pairs if n and int(n) > 0]
+    matches = list(FILE_LINE.finditer(text))
+    if not matches:
+        return {}
+    found = {"paths": list(dict.fromkeys(m[1] for m in matches))}
+    severity = _severity_slot(text[matches[-1].end():])
+    if not severity:
+        return found
+    found["severity"] = severity
+    numbered = [(m[1], int(m[2])) for m in matches if m[2] and int(m[2]) > 0]
     if numbered:
         found["located"] = list(numbered[0])
     return found
@@ -429,7 +443,7 @@ def _usable_retry(path):
         payload, response = json.loads(path.read_text()), _decided(path)
         reconcile(payload["items"], payload["packets"], response, [])
         return payload, response
-    except (ValueError, OSError, KeyError, TypeError) as error:
+    except (ValueError, OSError, KeyError, TypeError, AttributeError) as error:
         print(
             f"Second look {path.stem} unusable ({type(error).__name__}); keeping first decisions",
             file=sys.stderr,
