@@ -1206,6 +1206,13 @@ class CheckTheUncheckedTests(unittest.TestCase):
         (directory / f"{name}.stop").write_text("end_turn")
         (directory / f"{name}.response").write_text(json.dumps({"decisions": decisions}))
 
+    def test_checker_schema_uses_only_keywords_the_api_accepts(self):
+        # The API rejected maxItems with a silent HTTP 400, so no review posted.
+        text = (self.lib / "system-review-schema.json").read_text()
+        for keyword in ("maxItems", "minItems", "maxLength", "minLength", "minimum", "maximum", "pattern"):
+            self.assertNotIn(f'"{keyword}"', text)
+        self.assertEqual(json.loads(text)["properties"]["decisions"]["items"]["properties"]["needs"], {"type": "array", "items": {"type": "string"}})
+
     def test_loose_headers_keep_files_line_and_severity(self):
         for header, expected in (
             ("protocol.py + route.py:CROSS-FILE:SHOULD-FIX", (["protocol.py", "route.py"], "SHOULD-FIX", None)),
