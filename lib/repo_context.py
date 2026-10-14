@@ -183,6 +183,75 @@ class Repository:
         )
         return [{"path": path, "line": i + 1, "text": lines[i]} for i in indices]
 
+    def has_line(self, path, line):
+        return bool(self.window(path, 1)) and 1 <= line <= len(self.files[path])
+
+    def anchor(self, paths, body, changed=frozenset()):
+        """A line in the named files holding a symbol the finding names.
+
+        Backticked names beat prose words; a changed line beats a definition beats a mention.
+        """
+        quoted = re.findall(r"`([A-Za-z_][A-Za-z_0-9]*)", body)
+        prose = [w for w in TOKEN.findall(body) if "_" in w or any(c.isupper() for c in w[1:])]
+        present = [path for path in paths if self.window(path, 1)]
+        # Each new name costs a full-repository search; the first few carry the finding.
+        for names in (list(dict.fromkeys(quoted))[:12], list(dict.fromkeys(prose))[:12]):
+            best = None
+            for path in present:
+                for symbol in dict.fromkeys(names):
+                    for p, n in self.occurrences(symbol):
+                        if p != path:
+                            continue
+                        defines = re.search(
+                            r"\b(def|class|function|const)\s+" + re.escape(symbol) + r"\b",
+                            self.files[path][n - 1],
+                        )
+                        rank = (0 if (path, n) in changed else 1 if defines else 2)
+                        if best is None or rank < best[0]:
+                            best = (rank, path, n)
+            if best:
+                return best[1], best[2]
+        return None
+
+    def second_look(self, packet, needs, budget=12000):
+        """Add the source the checker asked for: files from the top, symbols at definition and one caller."""
+        references = list(packet["references"])
+        seen = {(r["path"], r["line"]) for r in references}
+        allowance = budget // max(1, len(needs))
+        found = []
+        for need in needs:
+            name = need.strip().strip("`")
+            if name in self.tracked or name in self.files:
+                windows = [self.window(name, 1)]
+            elif re.fullmatch(r"[A-Za-z_][A-Za-z_0-9.]*", name):
+                symbol = name.split(".")[-1]
+                hits = self.occurrences(symbol)
+                defining = [
+                    (p, n)
+                    for p, n in hits
+                    if re.search(
+                        r"\b(def|class|function|const)\s+" + re.escape(symbol) + r"\b",
+                        self.files[p][n - 1],
+                    )
+                ]
+                callers = [hit for hit in hits if hit not in defining and "test" not in hit[0]]
+                windows = [self.window(p, n) for p, n in (defining[:1] + callers[:1])]
+            else:
+                windows = []
+            used = 0
+            for window in windows:
+                for ref in window:
+                    length = len(json.dumps(ref, ensure_ascii=False).encode())
+                    key = (ref["path"], ref["line"])
+                    if key not in seen and used + length <= allowance:
+                        references.append(ref)
+                        seen.add(key)
+                        used += length
+            if used:
+                found.append(name)
+        references.sort(key=lambda ref: (ref["path"], ref["line"]))
+        return dict(packet, references=references, second_look=found)
+
     def packet(self, finding, budget=10000):
         path, line = finding["file"], int(finding["line"])
         cited = self.window(path, line)

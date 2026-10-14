@@ -3801,7 +3801,7 @@ source "$LIB_DIR/system-review.sh"
 _SYSTEM_REVIEW_DIR="$(_run_log_dir)/system-review"
 spinner_start "Checking findings against the captured repository..."
 printf '%s' "$VOICE_EXAMPLES_CONTENT" > "$VOICE_EXAMPLES_FILE"
-if ! DIFFHOUND_VERIFICATION_VOICE_FILE="$VOICE_EXAMPLES_FILE" dh_system_review "$REPO_PATH" "$HEAD_SHA" "$_SYSTEM_REVIEW_DIR" "$CLAUDE_OUT" "$CODEX_OUT" "$GEMINI_OUT"; then
+if ! DIFFHOUND_VERIFICATION_VOICE_FILE="$VOICE_EXAMPLES_FILE" DIFFHOUND_DIFF_FILE="${DIFF_FILE:-}" dh_system_review "$REPO_PATH" "$HEAD_SHA" "$_SYSTEM_REVIEW_DIR" "$CLAUDE_OUT" "$CODEX_OUT" "$GEMINI_OUT"; then
   spinner_fail "Repository verification incomplete; not posting"
   DIFFHOUND_FAIL_REASON="Repository verification did not finish with complete source-backed decisions. Nothing was posted."
   exit 1
@@ -4155,7 +4155,8 @@ if ! dh_write_voice "$_SYS_TMP" "$_USER_TMP" "$REVIEW_STRUCTURED" "$_voice_expec
   exit 1
 fi
 # Archive formatting evidence before cleanup, including the API stop reason.
-_SYSTEM_UNVERIFIED=$((_SYSTEM_UNVERIFIED + $(cat "${REVIEW_STRUCTURED}.withheld-replies")))
+_DH_WITHHELD_REPLIES=$(cat "${REVIEW_STRUCTURED}.withheld-replies")
+_SYSTEM_UNVERIFIED=$((_SYSTEM_UNVERIFIED + _DH_WITHHELD_REPLIES))
 _voice_logs="$(_run_log_dir)"
 mkdir -p "$_voice_logs"
 cp "$_USER_TMP" "$_voice_logs/voice-prompt.txt"
@@ -4530,9 +4531,16 @@ if [ "$POST_REVIEW" = true ]; then
   # Parse verdict (3-method fallback). The scorecard was already derived above
   # (before this block) and preserves the verdict word, so this still resolves.
   REVIEW_EVENT=$(parse_verdict "$REVIEW_SUMMARY" "${REVIEW_STRUCTURED}.new_comments")
+  _dh_held=listed
   if [ "$_SYSTEM_UNVERIFIED" -gt 0 ] && [ "$REVIEW_EVENT" = APPROVE ]; then
+    echo "  ⚠ Verdict APPROVE held at COMMENT: ${_SYSTEM_UNVERIFIED} claim(s) or thread repl(ies) could not be checked against the code" >&2
     REVIEW_EVENT=COMMENT
+    _dh_held=held
     _cap_total_row_verdict "$REVIEW_SUMMARY"
+  fi
+  if [ "$_SYSTEM_UNVERIFIED" -gt 0 ] && [ -f "${_SYSTEM_REVIEW_DIR:-}/unchecked.json" ]; then
+    python3 "$LIB_DIR/system_review.py" unchecked "$_SYSTEM_REVIEW_DIR" "$_dh_held" "${_DH_WITHHELD_REPLIES:-0}" >> "$REVIEW_SUMMARY" \
+      || echo "  ⚠ Could not list the unchecked claims in the review" >&2
   fi
   _DH_MODEL_EVENT="$REVIEW_EVENT"   # before any cap; a capped block must never go quiet
 
