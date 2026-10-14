@@ -44,6 +44,10 @@ no forced slang or introductory labels. Explain the concrete concern and relevan
 This body is preserved verbatim after verification; do not leave WHAT/EVIDENCE field labels in it.
 Use CORRECTED to remove unsupported assertions while keeping a proven defect.
 CONTRADICTED requires affirmative counterevidence. UNVERIFIED is for insufficient evidence.
+For UNVERIFIED, list in "needs" up to 6 function, class or constant names, or repository file
+paths, whose source would settle the claim; they are fetched for one more look. Leave "needs"
+empty when the answer lies outside this repository (production data, deployment, other services,
+ticket intent) or needs the code to run.
 NOT_ACTIONABLE requires affirmative evidence that no change/question is warranted.
 Exact quotes establish that code was supplied, not that your reasoning is automatically correct.
 Do not manufacture agreement, disagreement, or a minimum finding count.

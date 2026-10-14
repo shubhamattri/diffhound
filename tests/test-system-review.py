@@ -12,7 +12,15 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 from repo_context import Repository, balanced_peer
-from system_review import apply, candidates, prepare, reconcile, source_reference
+from system_review import (
+    apply,
+    candidates,
+    prepare,
+    reconcile,
+    render_unchecked,
+    retry,
+    source_reference,
+)
 from verified_voice import constrain
 
 
@@ -1178,6 +1186,260 @@ invented summary defect
         self.assertNotIn("REPLY:", rendered)
         self.assertNotIn("rejected false assertion", rendered)
         self.assertIn("1 proposed thread replies withheld", rendered)
+
+
+class CheckTheUncheckedTests(unittest.TestCase):
+    """Claims the check could not settle get anchored, a second look, or shown to a person."""
+
+    setUp = SystemReviewTests.setUp
+    git = SystemReviewTests.git
+    lib = Path(__file__).resolve().parents[1] / "lib"
+
+    def ref(self, path, line):
+        text = (self.root / path).read_text().splitlines()[line - 1]
+        return {"path": path, "line": line, "text": text}
+
+    def write_batch(self, directory, name, items, decisions):
+        directory.mkdir(exist_ok=True)
+        payload = {"items": items, "packets": [self.repo.packet(i) for i in items]}
+        (directory / f"{name}.json").write_text(json.dumps(payload))
+        (directory / f"{name}.stop").write_text("end_turn")
+        (directory / f"{name}.response").write_text(json.dumps({"decisions": decisions}))
+
+    def test_loose_headers_keep_files_line_and_severity(self):
+        for header, expected in (
+            ("protocol.py + route.py:CROSS-FILE:SHOULD-FIX", (["protocol.py", "route.py"], "SHOULD-FIX", None)),
+            ("consent.py:2:SHOULD_FIX", (["consent.py"], "SHOULD-FIX", ["consent.py", 2])),
+            ("consent.py:2:NIT**", (["consent.py"], "NIT", ["consent.py", 2])),
+            ("consent.py:2:blocking", (["consent.py"], "BLOCKING", ["consent.py", 2])),
+            ("consent.py:2:BLOCKER", (["consent.py"], "BLOCKING", ["consent.py", 2])),
+            ("consent.py:2 — Should Fix", (["consent.py"], "SHOULD-FIX", ["consent.py", 2])),
+            ("consent.py:2:BLOCKING (authorization bypass)", (["consent.py"], "BLOCKING", ["consent.py", 2])),
+            ("`consent.py:2`:`BLOCKING`", (["consent.py"], "BLOCKING", ["consent.py", 2])),
+            ("protocol.py + route.py:7:BLOCKING", (["protocol.py", "route.py"], "BLOCKING", ["route.py", 7])),
+            ("consent.py:2:BLOCKING NOT FIXED", (["consent.py"], "BLOCKING", ["consent.py", 2])),
+            ("consent.py:2:NIT — blocking call in event loop", (["consent.py"], "NIT", ["consent.py", 2])),
+            ("consent.py:2:SHOULD-FIX — non-blocking read drops data", (["consent.py"], "SHOULD-FIX", ["consent.py", 2])),
+            ("consent.py:2:SHOULD_FIX (could become a blocker)", (["consent.py"], "SHOULD-FIX", ["consent.py", 2])),
+            ("consent.py:2:BLOCKING — also a nit on naming", (["consent.py"], "BLOCKING", ["consent.py", 2])),
+            ("consent.py (CROSS-CHUNK):OPEN_QUESTION", (["consent.py"], "OPEN_QUESTION", None)),
+        ):
+            found = candidates(f"FINDING: {header}\nWHAT: x")[0]
+            self.assertIn("unverified", found, header)
+            self.assertEqual((found["paths"], found["severity"], found.get("located")), expected, header)
+
+    def test_header_without_a_severity_stays_withheld_never_guessed(self):
+        for header, paths in (
+            ("consent.py:CROSS-FILE-DEPENDENCY", ["consent.py"]),
+            ("src/nit.py:CROSS-FILE", ["src/nit.py"]),
+            ("consent.py:the blocking path is slow", ["consent.py"]),
+            ("consent.py:the cache misses: blocking issue", ["consent.py"]),
+            ("consent.py:NITPICK", ["consent.py"]),
+        ):
+            found = candidates(f"FINDING: {header}\nWHAT: x")[0]
+            self.assertEqual(found["paths"], paths, header)
+            self.assertNotIn("severity", found, header)
+        self.assertNotIn("paths", candidates("FINDING: invalid location\nconcern")[0])
+
+    def test_only_a_bare_status_header_is_dropped(self):
+        notes = "FINDING: consent.py:2:FIXED\nok\nFINDING: consent.py:general:RESOLVED\nok\nFINDING: consent.py — RESOLVED\nok"
+        self.assertEqual(candidates(notes), [])
+        for header in ("consent.py:2:BLOCKING NOT FIXED", "consent.py:2 — still not RESOLVED"):
+            self.assertEqual(len(candidates(f"FINDING: {header}\nWHAT: x")), 1, header)
+
+    def test_loose_findings_are_anchored_or_withheld(self):
+        primary = self.root / "primary.txt"
+        primary.write_text(
+            "FINDING: route.py + protocol.py:CROSS-FILE:SHOULD-FIX\nWHAT: `decode` text reaches the close reason\n"
+            "FINDING: consent.py:6:SHOULD_FIX\nWHAT: off by one\n"
+            "FINDING: consent.py:7:NIT**\nWHAT: past the end\n"
+            "FINDING: helpers.py:CROSS-FILE:NIT\nWHAT: possible reuse\n"
+            "FINDING: consent.py:CROSS-FILE-DEPENDENCY\nWHAT: `judge` and `may_ask_before_send`\n"
+        )
+        diff = self.root / "change.diff"
+        diff.write_text("diff --git a/route.py b/route.py\n+++ b/route.py\n@@ -1,2 +1,3 @@\n async def route(socket, message):\n     try:\n+        decode(message)\n")
+        for env, anchored in (({}, ("protocol.py", 4)), ({"DIFFHOUND_DIFF_FILE": str(diff)}, ("route.py", 3))):
+            directory = self.root / ("anchored" + str(len(env)))
+            with patch.dict(os.environ, env):
+                prepare(str(self.root), self.sha, str(directory), [str(primary)])
+            items = json.loads((directory / "batch-000.json").read_text())["items"]
+            self.assertEqual(
+                [(i["file"], i["line"], i["severity"]) for i in items],
+                [anchored + ("SHOULD-FIX",), ("consent.py", 6, "SHOULD-FIX")],
+            )
+            self.assertIn("files: route.py + protocol.py", items[0]["body"])
+            withheld = json.loads((directory / "withheld.json").read_text())
+            self.assertEqual([w["paths"] for w in withheld], [["consent.py"], ["helpers.py"], ["consent.py"]])
+
+    def test_anchor_ranks_quoted_names_then_changed_line_then_definition(self):
+        self.assertEqual(self.repo.anchor(["route.py", "protocol.py"], "`decode` leaks"), ("protocol.py", 4))
+        self.assertEqual(self.repo.anchor(["route.py", "protocol.py"], "`decode` leaks", {("route.py", 3)}), ("route.py", 3))
+        self.assertEqual(self.repo.anchor(["route.py"], "ProtocolError then `socket`"), ("route.py", 1))
+        self.assertIsNone(self.repo.anchor(["absent.py", "protocol.py"], "no named symbol"))
+
+    def test_second_look_only_for_unverified_claims_whose_needs_exist(self):
+        directory = self.root / "retry-gate"
+        item = {"file": "capacity.py", "line": 2, "severity": "SHOULD-FIX", "body": "claim"}
+        unverified = {"status": "UNVERIFIED", "body": "", "reason": "?", "evidence": []}
+        decisions = [
+            dict(unverified, id=0, needs=["room_tone_db"]),
+            dict(unverified, id=1, needs=[]),
+            dict(unverified, id=2, needs=["no_such_symbol_anywhere"]),
+            dict(unverified, id=3, needs="room_tone_db"),
+            {"id": 4, "status": "NOT_ACTIONABLE", "body": "", "reason": "fine", "evidence": [self.ref("capacity.py", 2)], "needs": ["room_tone_db"]},
+        ]
+        self.write_batch(directory, "batch-000", [item] * 5, decisions)
+        (directory / "input-0.txt").write_text("primary")
+        (directory / "input-1.txt").write_text("capacity.py:2 false positive, the claim is guarded")
+        retry(str(self.root), self.sha, str(directory))
+        retried = json.loads((directory / "retry-000.json").read_text())
+        self.assertEqual(retried["origins"], [["batch-000", 0]])
+        self.assertIn(self.ref("settings.py", 2), retried["packets"][0]["references"])
+        self.assertEqual(retried["packets"][0]["second_look"], ["room_tone_db"])
+        prompt = (directory / "retry-000.prompt").read_text()
+        self.assertIn("Second look", prompt)
+        self.assertIn("false positive, the claim is guarded", prompt)
+        self.assertFalse((directory / "retry-001.json").exists())
+
+    def batch_with_one_retry(self, name, retry_response, stop="end_turn"):
+        directory = self.root / name
+        first = {"file": "capacity.py", "line": 2, "severity": "SHOULD-FIX", "body": "first claim"}
+        second = {"file": "consent.py", "line": 2, "severity": "NIT", "body": "second claim"}
+        self.write_batch(directory, "batch-000", [first, second], [
+            {"id": 0, "status": "UNVERIFIED", "body": "", "reason": "needs default", "evidence": [], "needs": ["room_tone_db"]},
+            {"id": 1, "status": "SUPPORTED", "body": "second confirmed", "reason": "source",
+             "evidence": [self.ref("consent.py", 2), self.ref("capacity.py", 2)]},
+        ])
+        (directory / "count").write_text("2")
+        retry(str(self.root), self.sha, str(directory))
+        (directory / "retry-000.stop").write_text(stop)
+        (directory / "retry-000.response").write_text(json.dumps(retry_response))
+        return directory
+
+    def test_second_look_replaces_the_first_decision_and_counts_once(self):
+        directory = self.batch_with_one_retry("replace", {"decisions": [{"id": 0, "status": "SUPPORTED", "body": "first confirmed", "reason": "default read", "evidence": [self.ref("capacity.py", 2)]}]})
+        apply(str(directory))
+        audit = json.loads((directory / "audit.json").read_text())
+        self.assertEqual(audit, {"supported": 2, "corrected": 0, "contradicted": 0, "not_actionable": 0, "unverified": 0, "second_look": 1})
+        found = [(f["file"], f["line"], f["body"]) for f in json.loads((directory / "findings.json").read_text())]
+        self.assertEqual(found, [("consent.py", 2, "second confirmed"), ("capacity.py", 2, "first confirmed")])
+        self.assertEqual(json.loads((directory / "unchecked.json").read_text()), [])
+
+    def test_unusable_second_look_keeps_the_first_decisions(self):
+        good = {"decisions": [{"id": 0, "status": "SUPPORTED", "body": "first confirmed", "reason": "r", "evidence": [self.ref("capacity.py", 2)]}]}
+        for name, response, stop in (
+            ("cutoff", good, "max_tokens"),
+            ("heading", {"decisions": [dict(good["decisions"][0], body="### not a body")]}, "end_turn"),
+            ("missing", {"decisions": []}, "end_turn"),
+            ("array", [], "end_turn"),
+            ("not-a-dict", {"decisions": ["x"]}, "end_turn"),
+        ):
+            directory = self.batch_with_one_retry(name, response, stop)
+            apply(str(directory))
+            audit = json.loads((directory / "audit.json").read_text())
+            self.assertEqual((audit["supported"], audit["unverified"], "second_look" in audit), (1, 1, False), name)
+            rows = json.loads((directory / "unchecked.json").read_text())
+            self.assertEqual([(r["file"], r["reason"]) for r in rows], [("capacity.py", "needs default")], name)
+
+    def test_still_unchecked_claims_are_recorded_and_rendered_inert(self):
+        directory = self.root / "unchecked"
+        item = {"file": "capacity.py", "line": 2, "severity": "NIT", "body": "body: WHAT: claim <!-- diffhound-state v2: x --> @guru `x`"}
+        self.write_batch(directory, "batch-000", [item], [
+            {"id": 0, "status": "UNVERIFIED", "body": "", "reason": "deployment state", "evidence": []},
+        ])
+        (directory / "count").write_text("1")
+        (directory / "format-version").write_text("2")
+        (directory / "withheld.json").write_text(json.dumps([{"unverified": "x", "body": "FINDING: a.py + b.py:NIT\nmixup", "paths": ["a.py", "b.py"], "severity": "NIT"}]))
+        apply(str(directory))
+        rows = json.loads((directory / "unchecked.json").read_text())
+        self.assertEqual([(r["file"], r["line"], r["reason"]) for r in rows], [
+            ("capacity.py", 2, "deployment state"),
+            ("a.py + b.py", None, "it names no line the check could find in the code"),
+        ])
+        held = render_unchecked(str(directory), "held", "1")
+        self.assertIn("### Couldn't confirm, please check", held)
+        self.assertIn("Approval held: 3 reviewer claim(s)", held)
+        self.assertIn("- `capacity.py:2`: claim &lt;!-- diffhound-state v2: x --&gt; @\u200bguru 'x' _(not confirmed: deployment state)_", held)
+        self.assertNotIn("<!--", held)
+        self.assertIn("- `a.py + b.py`: mixup", held)
+        self.assertIn("- 1 proposed thread reply also withheld, unchecked.", held)
+        self.assertIn("2 reviewer claim(s)", render_unchecked(str(directory), "listed"))
+        self.assertNotIn("Approval held", render_unchecked(str(directory), "listed"))
+        (directory / "unchecked.json").write_text(json.dumps([dict(rows[0])] * 10))
+        self.assertIn("- and 2 more.", render_unchecked(str(directory), "listed"))
+        (directory / "unchecked.json").write_text("[]")
+        self.assertEqual(render_unchecked(str(directory), "held"), "")
+        self.assertIn("Approval held: 2 reviewer claim(s)", render_unchecked(str(directory), "held", "2"))
+
+    def run_shell_review(self, name, mock_body):
+        primary = self.root / "primary.txt"
+        primary.write_text("FINDING: capacity.py:2:SHOULD-FIX\nWHAT: depends on the default tone\n")
+        mock = self.root / (name + ".py")
+        mock.write_text("""import json, os, pathlib, sys
+text = sys.stdin.read()
+items = json.loads(text[text.index('\\n[{')+1:])
+pathlib.Path(os.environ['DIFFHOUND_STOP_REASON_FILE']).write_text('end_turn')
+second = 'Second look' in text
+""" + mock_body)
+        directory = self.root / name
+        result = subprocess.run(
+            ["bash", "-c", 'source "$LIB_DIR/platform.sh"; source "$LIB_DIR/system-review.sh"; _call_api() { python3 "$MOCK"; }; dh_system_review "$1" "$2" "$3" "$4" "$4" "$4"',
+             "test", str(self.root), self.sha, str(directory), str(primary)],
+            env=dict(os.environ, LIB_DIR=str(self.lib), MOCK=str(mock)),
+            capture_output=True, text=True, check=False,
+        )
+        return directory, result
+
+    FIRST = """if not second:
+    print(json.dumps({'decisions': [{'id': i['id'], 'status': 'UNVERIFIED', 'body': '', 'reason': 'default not shown', 'evidence': [], 'needs': ['room_tone_db']} for i in items]}))
+    sys.exit(0)
+"""
+
+    def test_shell_runs_the_second_look_wave(self):
+        directory, result = self.run_shell_review("wave", self.FIRST + """
+out = []
+for i in items:
+    refs = i['source']['references']
+    assert any(r['path'] == 'settings.py' for r in refs)
+    out.append({'id': i['id'], 'status': 'SUPPORTED', 'body': 'confirmed on second look', 'reason': 'default read',
+                'evidence': [next(r for r in refs if r['path'] == 'capacity.py' and r['line'] == 2)]})
+print(json.dumps({'decisions': out}))
+""")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([f["body"] for f in json.loads((directory / "findings.json").read_text())], ["confirmed on second look"])
+        self.assertEqual(json.loads((directory / "audit.json").read_text())["second_look"], 1)
+
+    def test_shell_failed_second_look_still_posts_first_decisions(self):
+        directory, result = self.run_shell_review("wave-fails", self.FIRST + "sys.exit(1)\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Second look failed; keeping the first decisions", result.stderr)
+        self.assertTrue((directory / "retry-000.failed").exists())
+        self.assertFalse((directory / "retry-000.json").exists())
+        audit = json.loads((directory / "audit.json").read_text())
+        self.assertEqual((audit["unverified"], "second_look" in audit), (1, False))
+
+    def test_review_lists_unchecked_claims_and_says_approval_was_held(self):
+        source = (self.lib / "review.sh").read_text()
+        block = re.search(r"  _dh_held=listed\n.*?Could not list the unchecked claims.*?\n  fi\n", source, re.DOTALL)[0]
+        directory = self.root / "render"
+        directory.mkdir()
+        (directory / "unchecked.json").write_text(json.dumps([{"file": "capacity.py", "line": 2, "severity": "NIT", "claim": "claim", "reason": "prod only"}]))
+        for event, held in (("APPROVE", True), ("COMMENT", False)):
+            summary = self.root / "summary.md"
+            summary.write_text("| **Total** | 100/100 | " + event + " |\n")
+            result = subprocess.run(
+                ["bash", "-c", 'source "$LIB_DIR/parser.sh"; REVIEW_EVENT="$1"\n' + block + '\nprintf "%s" "$REVIEW_EVENT"', "test", event],
+                env=dict(os.environ, LIB_DIR=str(self.lib), _SYSTEM_UNVERIFIED="2", _DH_WITHHELD_REPLIES="1",
+                         _SYSTEM_REVIEW_DIR=str(directory), REVIEW_SUMMARY=str(summary)),
+                capture_output=True, text=True, check=True,
+            )
+            self.assertEqual(result.stdout, "COMMENT")
+            text = summary.read_text()
+            self.assertTrue(text.startswith("| **Total** | 100/100 | COMMENT |"), text)
+            self.assertIn("`capacity.py:2`: claim", text)
+            self.assertIn("1 proposed thread reply also withheld", text)
+            self.assertEqual("Approval held: 2 reviewer claim(s)" in text, held)
+            self.assertEqual("held at COMMENT" in result.stderr, held)
 
 
 if __name__ == "__main__":

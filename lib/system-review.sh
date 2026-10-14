@@ -2,11 +2,31 @@
 # Mandatory gate for both JSON and chunked findings, including peer additions.
 dh_system_review() {
   local repo="$1" sha="$2" directory="$3" primary="$4" peer1="$5" peer2="$6"
-  local prompt base remaining deadline=$((SECONDS + 1200)) pid failed=0
-  local -a pids=()
+  local deadline=$((SECONDS + 1200)) remaining base
   "$_TIMEOUT_CMD" "$((deadline - SECONDS))" python3 "$LIB_DIR/system_review.py" prepare "$repo" "$sha" "$directory" \
     "$primary" "$peer1" "$peer2" || return 1
-  for prompt in "$directory"/batch-*.prompt; do
+  _dh_system_wave "$directory" batch "$deadline" || return 1
+  # Second look: claims the checker could not settle get the code it asked for, once.
+  # Best effort: if it fails or time is short, the first decisions stand.
+  remaining=$((deadline - SECONDS))
+  if [ "$remaining" -gt 240 ]; then
+    if ! { "$_TIMEOUT_CMD" "$((remaining - 120))" python3 "$LIB_DIR/system_review.py" retry "$repo" "$sha" "$directory" \
+        && _dh_system_wave "$directory" retry "$((deadline - 120))"; }; then
+      echo 'Second look failed; keeping the first decisions' >&2
+      for base in "$directory"/retry-*.json; do [ -f "$base" ] && mv "$base" "${base%.json}.failed"; done
+    fi
+  fi
+  remaining=$((deadline - SECONDS))
+  [ "$remaining" -gt 0 ] || { echo 'System review deadline exceeded' >&2; return 1; }
+  "$_TIMEOUT_CMD" "$remaining" python3 "$LIB_DIR/system_review.py" apply "$directory"
+}
+
+# Run every <prefix>-*.prompt in the directory, four at a time.
+# Args: directory prefix deadline
+_dh_system_wave() {
+  local directory="$1" prefix="$2" deadline="$3" prompt base remaining pid failed=0
+  local -a pids=()
+  for prompt in "$directory"/"$prefix"-*.prompt; do
     [ -f "$prompt" ] || continue
     base="${prompt%.prompt}"
     remaining=$((deadline - SECONDS))
@@ -35,8 +55,5 @@ dh_system_review() {
   if [ "${#pids[@]}" -gt 0 ]; then
     for pid in "${pids[@]}"; do wait "$pid" || failed=1; done
   fi
-  [ "$failed" -eq 0 ] || return 1
-  remaining=$((deadline - SECONDS))
-  [ "$remaining" -gt 0 ] || { echo 'System review deadline exceeded' >&2; return 1; }
-  "$_TIMEOUT_CMD" "$remaining" python3 "$LIB_DIR/system_review.py" apply "$directory"
+  [ "$failed" -eq 0 ]
 }
