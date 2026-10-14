@@ -28,7 +28,7 @@
             }
           },
           "severity": {"type": "string", "enum": ["BLOCKING", "SHOULD-FIX", "NIT", "OPEN_QUESTION"]},
-          "needs": {"type": "array", "maxItems": 6, "items": {"type": "string"}}
+          "needs": {"type": "array", "items": {"type": "string"}}
         }
       }
     }
